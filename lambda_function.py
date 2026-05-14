@@ -1,3 +1,6 @@
+import base64
+import hashlib
+import hmac
 import json
 from datetime import datetime, timezone
 from html import escape
@@ -13,6 +16,8 @@ FROM_ADDR = "agent@agent.graciagroup.com"
 TO_ADDRS = ["cgracia@rainmakersecurities.com", "kate@graciagroup.com"]
 
 PIPELINE_DEAL_URL = "https://app.pipelinecrm.com/deals/{}"
+CONFIRM_URL = "https://s5qv2qkmjt2qejliwchvqukseq0wgwff.lambda-url.us-east-1.on.aws"
+CONFIRM_SECRET = b"trade-update"
 
 CF_DEAL_SIDE = "custom_label_1958"
 CF_GROSS = "custom_label_3064339"
@@ -22,15 +27,25 @@ CF_TICKET_MIN = "custom_label_3065488"
 CF_TICKET_MAX = "custom_label_3064645"
 CF_MKT_ASK = "custom_label_3997297"
 CF_MKT_BID = "custom_label_3997298"
+CF_IQF = "custom_label_3763008"
 
 OPT_SELL = 5011675
 OPT_BUY = 5077819
 OPT_STRUCT_DIRECT = 6250090
 OPT_STRUCT_FUND = 5077906
+OPT_IQF_YES = 6496840
+OPT_IQF_PENDING = 6496842
+OPT_IQF_NO = 6496841
 
 STRUCTURE_LABELS = {
     OPT_STRUCT_DIRECT: "Direct",
     OPT_STRUCT_FUND: "Fund",
+}
+
+IQF_LABELS = {
+    OPT_IQF_YES: "Yes",
+    OPT_IQF_PENDING: "Pending",
+    OPT_IQF_NO: "No",
 }
 
 STAGE_FIRM = 111800
@@ -64,6 +79,7 @@ TO_CLOSE_AGED_STAGE = STAGE_TRANSFER_NOTICE
 TO_CLOSE_AGE_DAYS = 30
 
 NEG_DISTANCE_BG = "#d4edda"
+SECTION_B_COLS = 9
 
 
 def _cf(record, key):
@@ -168,22 +184,66 @@ def _company_name(deal):
     return deal.get("company_name") or "(unknown)"
 
 
-def _contact(deal):
-    pc = deal.get("primary_contact") or deal.get("person") or {}
-    if isinstance(pc, list):
-        pc = pc[0] if pc else {}
-    if not isinstance(pc, dict):
+def _person_name_email(p):
+    if not isinstance(p, dict):
         return "", ""
-    name = pc.get("name") or " ".join(
-        p for p in (pc.get("first_name"), pc.get("last_name")) if p
+    name = p.get("name") or " ".join(
+        x for x in (p.get("first_name"), p.get("last_name")) if x
     ).strip()
-    email = pc.get("email")
+    email = p.get("email")
     if not email:
-        emails = pc.get("emails") or []
+        emails = p.get("emails") or []
         if isinstance(emails, list) and emails:
             first = emails[0]
             email = first.get("address") if isinstance(first, dict) else first
     return name or "", email or ""
+
+
+def _person_first_name(p):
+    if not isinstance(p, dict):
+        return ""
+    fn = p.get("first_name")
+    if fn:
+        return fn
+    name = p.get("name") or ""
+    return name.split()[0] if name else ""
+
+
+def _person_iqf(p):
+    return IQF_LABELS.get(_cf_option_id(p, CF_IQF), "—")
+
+
+def _primary_contact(deal):
+    pc = deal.get("primary_contact") or deal.get("person") or {}
+    if isinstance(pc, list):
+        pc = pc[0] if pc else {}
+    return pc if isinstance(pc, dict) else {}
+
+
+def _deal_people(deal, people_by_id):
+    out = []
+    seen = set()
+    raw = deal.get("people") or []
+    if isinstance(raw, list) and raw:
+        for p in raw:
+            if not isinstance(p, dict):
+                continue
+            pid = p.get("id")
+            full = people_by_id.get(pid) if pid is not None else None
+            chosen = full or p
+            key = pid if pid is not None else id(chosen)
+            if key in seen:
+                continue
+            seen.add(key)
+            out.append(chosen)
+    else:
+        for pid in (deal.get("person_ids") or []):
+            full = people_by_id.get(pid)
+            if not full or pid in seen:
+                continue
+            seen.add(pid)
+            out.append(full)
+    return out
 
 
 def _fetch_json(s3, key):
@@ -209,18 +269,51 @@ def _deal_link(deal):
     return f'<a href="{PIPELINE_DEAL_URL.format(escape(s, quote=True))}">{escape(s)}</a>'
 
 
-def _contact_cell(name, email, company=None, side=None):
-    label = ""
-    if name and email:
-        label = f"{name} <{email}>"
-    elif name:
-        return escape(name)
-    elif email:
-        label = f"<{email}>"
-    else:
+def _make_token(deal_id):
+    msg = str(deal_id).encode()
+    sig = hmac.new(CONFIRM_SECRET, msg, hashlib.sha256).digest()
+    return base64.urlsafe_b64encode(sig).decode().rstrip("=")
+
+
+def _confirm_email_link(deal, company, side):
+    did = deal.get("id")
+    if did in (None, ""):
         return ""
+    pc = _primary_contact(deal)
+    _, email = _person_name_email(pc)
     if not email:
-        return escape(label)
+        return ""
+    first_name = _person_first_name(pc)
+    token = _make_token(did)
+    url = f"{CONFIRM_URL}?deal_id={quote(str(did))}&token={quote(token)}"
+    subject = f"Confirming your {company} {side} order"
+    body = (
+        f"Hello {first_name},\n\n"
+        "Can you let me know if this deal is still valid? If so, we may "
+        "have a match. Please confirm the terms here:\n\n"
+        f"{url}\n\n"
+        "Thanks,\n"
+        "Chad"
+    )
+    href = (
+        f"mailto:{quote(email, safe='@')}"
+        f"?subject={quote(subject)}&body={quote(body)}"
+    )
+    return f'<a href="{escape(href, quote=True)}" title="Send confirmation email">✉</a>'
+
+
+def _deal_id_cell(deal, company, side):
+    link = _deal_link(deal)
+    confirm = _confirm_email_link(deal, company, side)
+    if confirm:
+        return f"{link} {confirm}" if link else confirm
+    return link
+
+
+def _contact_cell(name, email, company=None, side=None):
+    if not email:
+        return escape(name) if name else ""
+    label = f"{name} <{email}>" if name else f"<{email}>"
     if company and side:
         subject = f"Re: Your {company} {side} order"
     elif company:
@@ -231,6 +324,20 @@ def _contact_cell(name, email, company=None, side=None):
     if subject:
         href += f"?subject={quote(subject)}"
     return f'<a href="{escape(href, quote=True)}">{escape(label)}</a>'
+
+
+def _people_cells(people, company, side=None):
+    contacts = []
+    iqfs = []
+    for p in people:
+        n, e = _person_name_email(p)
+        if not n and not e:
+            continue
+        contacts.append(_contact_cell(n, e, company, side))
+        iqfs.append(escape(_person_iqf(p)))
+    contact_html = "<br>".join(contacts) if contacts else ""
+    iqf_html = "<br>".join(iqfs) if iqfs else ""
+    return contact_html, iqf_html
 
 
 def _ticket_compat(buy, sell):
@@ -282,15 +389,15 @@ def _build_crossed(deals):
             if buy_struct not in STRUCTURE_LABELS:
                 continue
             for n, sell in co["sells"]:
-                if g < n:
+                if g < n or n == 0:
                     continue
                 sell_struct = _cf_option_id(sell, CF_STRUCTURE)
                 if sell_struct != buy_struct:
                     continue
                 if not _ticket_compat(buy, sell):
                     continue
-                spread = g - n
-                if best is None or spread > best["spread"]:
+                pct = (g - n) / n * 100
+                if best is None or pct > best["pct"]:
                     best = {
                         "company": co["name"],
                         "structure": STRUCTURE_LABELS[buy_struct],
@@ -298,11 +405,11 @@ def _build_crossed(deals):
                         "buy_deal": buy,
                         "sell_price": n,
                         "sell_deal": sell,
-                        "spread": spread,
+                        "pct": pct,
                     }
         if best:
             rows.append(best)
-    rows.sort(key=lambda r: r["spread"], reverse=True)
+    rows.sort(key=lambda r: r["pct"], reverse=True)
     return rows
 
 
@@ -355,11 +462,11 @@ def _build_tight(deals, companies):
                     "distance": dist,
                     "deal": d,
                 })
-    rows.sort(key=lambda r: (0 if r["side"] == "SELL" else 1, abs(r["distance"])))
+    rows.sort(key=lambda r: (0 if r["side"] == "SELL" else 1, r["distance"]))
     return rows
 
 
-def _build_matched(deals, now):
+def _build_matched(deals, now, people_by_id):
     rows = []
     for d in deals:
         if _stage_id(d) != STAGE_MATCHED:
@@ -368,7 +475,7 @@ def _build_matched(deals, now):
         rows.append({
             "title": _deal_title(d),
             "company": _company_name(d),
-            "contact": _contact(d),
+            "people": _deal_people(d, people_by_id),
             "days": days if days is not None else 0,
             "deal": d,
         })
@@ -376,7 +483,7 @@ def _build_matched(deals, now):
     return rows
 
 
-def _build_to_close(deals, now):
+def _build_to_close(deals, now, people_by_id):
     rows = []
     for d in deals:
         sid = _stage_id(d)
@@ -390,7 +497,7 @@ def _build_to_close(deals, now):
             "stage": STAGE_LABELS.get(sid, str(sid)),
             "title": _deal_title(d),
             "company": _company_name(d),
-            "contact": _contact(d),
+            "people": _deal_people(d, people_by_id),
             "days": days,
             "deal": d,
         })
@@ -398,7 +505,7 @@ def _build_to_close(deals, now):
     return rows
 
 
-def _build_to_invoice(deals, now):
+def _build_to_invoice(deals, now, people_by_id):
     rows = []
     for d in deals:
         if _stage_id(d) != STAGE_SPA_SIGNED:
@@ -407,7 +514,7 @@ def _build_to_invoice(deals, now):
         rows.append({
             "title": _deal_title(d),
             "company": _company_name(d),
-            "contact": _contact(d),
+            "people": _deal_people(d, people_by_id),
             "days": days if days is not None else 0,
             "deal": d,
         })
@@ -426,21 +533,21 @@ def _render_html(crossed, tight, matched, to_close, to_invoice, date_str):
         out.append("<tr><th>Company</th><th>Structure</th>"
                    "<th>Buy</th><th>Buy Contact</th><th>Buy Deal ID</th>"
                    "<th>Sell</th><th>Sell Contact</th><th>Sell Deal ID</th>"
-                   "<th>Spread</th></tr>")
+                   "<th>% Diff</th></tr>")
         for r in crossed:
-            bn, be = _contact(r["buy_deal"])
-            sn, se = _contact(r["sell_deal"])
+            bn, be = _person_name_email(_primary_contact(r["buy_deal"]))
+            sn, se = _person_name_email(_primary_contact(r["sell_deal"]))
             out.append(
                 "<tr>"
                 f"<td>{escape(r['company'])}</td>"
                 f"<td>{escape(r['structure'])}</td>"
                 f"<td>{escape(_fmt_price(r['buy_price']))}</td>"
                 f"<td>{_contact_cell(bn, be, r['company'], 'BUY')}</td>"
-                f"<td>{_deal_link(r['buy_deal'])}</td>"
+                f"<td>{_deal_id_cell(r['buy_deal'], r['company'], 'BUY')}</td>"
                 f"<td>{escape(_fmt_price(r['sell_price']))}</td>"
                 f"<td>{_contact_cell(sn, se, r['company'], 'SELL')}</td>"
-                f"<td>{_deal_link(r['sell_deal'])}</td>"
-                f"<td>{escape(_fmt_price(r['spread']))}</td>"
+                f"<td>{_deal_id_cell(r['sell_deal'], r['company'], 'SELL')}</td>"
+                f"<td>{r['pct']:+.2f}%</td>"
                 "</tr>"
             )
         out.append("</table>")
@@ -453,9 +560,19 @@ def _render_html(crossed, tight, matched, to_close, to_invoice, date_str):
         out.append("<tr><th>Company</th><th>Side</th><th>Stage</th>"
                    "<th>Structure</th><th>Your Price</th><th>Marketplace</th>"
                    "<th>% Distance</th><th>Contact</th><th>Deal ID</th></tr>")
+        prev_side = None
         for r in tight:
-            n, e = _contact(r["deal"])
-            dist_style = f' style="background-color:{NEG_DISTANCE_BG}"' if r["distance"] < 0 else ""
+            if prev_side == "SELL" and r["side"] == "BUY":
+                out.append(
+                    f'<tr><td colspan="{SECTION_B_COLS}" '
+                    'style="border-top: 3px solid #000; height: 0; padding: 0;">'
+                    '</td></tr>'
+                )
+            n, e = _person_name_email(_primary_contact(r["deal"]))
+            dist_style = (
+                f' style="background-color:{NEG_DISTANCE_BG}"'
+                if r["distance"] < 0 else ""
+            )
             out.append(
                 "<tr>"
                 f"<td>{escape(r['company'])}</td>"
@@ -466,9 +583,10 @@ def _render_html(crossed, tight, matched, to_close, to_invoice, date_str):
                 f"<td>{escape(_fmt_price(r['marketplace_price']))}</td>"
                 f"<td{dist_style}>{r['distance'] * 100:+.2f}%</td>"
                 f"<td>{_contact_cell(n, e, r['company'], r['side'])}</td>"
-                f"<td>{_deal_link(r['deal'])}</td>"
+                f"<td>{_deal_id_cell(r['deal'], r['company'], r['side'])}</td>"
                 "</tr>"
             )
+            prev_side = r["side"]
         out.append("</table>")
 
     out.append("<h2>C. Matched — Follow Up</h2>")
@@ -477,14 +595,15 @@ def _render_html(crossed, tight, matched, to_close, to_invoice, date_str):
     else:
         out.append("<table border='1' cellpadding='4' cellspacing='0'>")
         out.append("<tr><th>Deal</th><th>Company</th><th>Contact</th>"
-                   "<th>Days Since Update</th><th>Deal ID</th></tr>")
+                   "<th>IQF</th><th>Days Since Update</th><th>Deal ID</th></tr>")
         for r in matched:
-            n, e = r["contact"]
+            contact_html, iqf_html = _people_cells(r["people"], r["company"])
             out.append(
                 "<tr>"
                 f"<td>{escape(r['title'])}</td>"
                 f"<td>{escape(r['company'])}</td>"
-                f"<td>{_contact_cell(n, e, r['company'])}</td>"
+                f"<td>{contact_html}</td>"
+                f"<td>{iqf_html}</td>"
                 f"<td>{r['days']}</td>"
                 f"<td>{_deal_link(r['deal'])}</td>"
                 "</tr>"
@@ -497,15 +616,17 @@ def _render_html(crossed, tight, matched, to_close, to_invoice, date_str):
     else:
         out.append("<table border='1' cellpadding='4' cellspacing='0'>")
         out.append("<tr><th>Stage</th><th>Company</th><th>Deal Title</th>"
-                   "<th>Contact</th><th>Days Since Update</th><th>Deal ID</th></tr>")
+                   "<th>Contact</th><th>IQF</th><th>Days Since Update</th>"
+                   "<th>Deal ID</th></tr>")
         for r in to_close:
-            n, e = r["contact"]
+            contact_html, iqf_html = _people_cells(r["people"], r["company"])
             out.append(
                 "<tr>"
                 f"<td>{escape(r['stage'])}</td>"
                 f"<td>{escape(r['company'])}</td>"
                 f"<td>{escape(r['title'])}</td>"
-                f"<td>{_contact_cell(n, e, r['company'])}</td>"
+                f"<td>{contact_html}</td>"
+                f"<td>{iqf_html}</td>"
                 f"<td>{r['days']}</td>"
                 f"<td>{_deal_link(r['deal'])}</td>"
                 "</tr>"
@@ -520,13 +641,13 @@ def _render_html(crossed, tight, matched, to_close, to_invoice, date_str):
         out.append("<tr><th>Company</th><th>Deal Title</th><th>Contact</th>"
                    "<th>Days Since Update</th><th>Deal ID</th></tr>")
         for r in to_invoice:
-            n, e = r["contact"]
             side = _deal_side(r["deal"])
+            contact_html, _ = _people_cells(r["people"], r["company"], side)
             out.append(
                 "<tr>"
                 f"<td>{escape(r['company'])}</td>"
                 f"<td>{escape(r['title'])}</td>"
-                f"<td>{_contact_cell(n, e, r['company'], side)}</td>"
+                f"<td>{contact_html}</td>"
                 f"<td>{r['days']}</td>"
                 f"<td>{_deal_link(r['deal'])}</td>"
                 "</tr>"
@@ -544,14 +665,17 @@ def lambda_handler(event, context):
     s3 = boto3.client("s3", region_name=S3_REGION)
     deals_doc = _fetch_json(s3, "deals.json")
     companies_doc = _fetch_json(s3, "companies.json")
+    people_doc = _fetch_json(s3, "people.json")
     deals = deals_doc.get("deals", []) or []
     companies = companies_doc.get("companies", []) or []
+    people = people_doc.get("people", []) or []
+    people_by_id = {p.get("id"): p for p in people if p.get("id") is not None}
 
     crossed = _build_crossed(deals)
     tight = _build_tight(deals, companies)
-    matched = _build_matched(deals, now)
-    to_close = _build_to_close(deals, now)
-    to_invoice = _build_to_invoice(deals, now)
+    matched = _build_matched(deals, now, people_by_id)
+    to_close = _build_to_close(deals, now, people_by_id)
+    to_invoice = _build_to_invoice(deals, now, people_by_id)
 
     body_html = _render_html(crossed, tight, matched, to_close, to_invoice, date_str)
     subject = f"Daily Brief — {date_str}"
@@ -577,5 +701,6 @@ def lambda_handler(event, context):
             "to_invoice": len(to_invoice),
             "deals": len(deals),
             "companies": len(companies),
+            "people": len(people),
         },
     }
