@@ -11,15 +11,26 @@ SES_REGION = "us-east-1"
 FROM_ADDR = "agent@agent.graciagroup.com"
 TO_ADDRS = ["cgracia@rainmakersecurities.com", "kate@graciagroup.com"]
 
+PIPELINE_DEAL_URL = "https://app.pipelinecrm.com/deals/{}"
+
 CF_DEAL_SIDE = "custom_label_1958"
 CF_GROSS = "custom_label_3064339"
 CF_NET = "custom_label_3064369"
-CF_REFRESH = "custom_label_3994687"
-CF_HIIVE_ASK = "custom_label_3997297"
-CF_HIIVE_BID = "custom_label_3997298"
+CF_STRUCTURE = "custom_label_3064360"
+CF_TICKET_MIN = "custom_label_3065488"
+CF_TICKET_MAX = "custom_label_3064645"
+CF_MKT_ASK = "custom_label_3997297"
+CF_MKT_BID = "custom_label_3997298"
 
 OPT_SELL = 5011675
 OPT_BUY = 5077819
+OPT_STRUCT_DIRECT = 6250090
+OPT_STRUCT_FUND = 5077906
+
+STRUCTURE_LABELS = {
+    OPT_STRUCT_DIRECT: "Direct",
+    OPT_STRUCT_FUND: "Fund",
+}
 
 STAGE_FIRM = 111800
 STAGE_MATCHED = 2381534
@@ -28,8 +39,16 @@ STAGE_HOLD = 2094373
 STAGE_CONFIRM = 2388323
 ACTIVE_STAGES = {STAGE_FIRM, STAGE_MATCHED, STAGE_INQUIRY, STAGE_HOLD, STAGE_CONFIRM}
 
-STALE_THRESHOLD_DAYS = 50
+STAGE_LABELS = {
+    STAGE_FIRM: "FIRM",
+    STAGE_MATCHED: "MATCHED",
+    STAGE_INQUIRY: "INQUIRY",
+    STAGE_HOLD: "HOLD",
+    STAGE_CONFIRM: "CONFIRM",
+}
+
 TIGHT_PCT = 0.10
+TICKET_TOLERANCE = 0.10
 
 
 def _cf(record, key):
@@ -42,13 +61,19 @@ def _cf_option_id(record, key):
     if v is None:
         return None
     if isinstance(v, dict):
-        return v.get("option_id") or v.get("id") or v.get("value")
-    if isinstance(v, list) and v:
+        v = v.get("option_id") or v.get("id") or v.get("value")
+    elif isinstance(v, list) and v:
         first = v[0]
         if isinstance(first, dict):
-            return first.get("option_id") or first.get("id")
-        return first
-    return v
+            v = first.get("option_id") or first.get("id")
+        else:
+            v = first
+    if v is None:
+        return None
+    try:
+        return int(v)
+    except (TypeError, ValueError):
+        return None
 
 
 def _cf_number(record, key):
@@ -61,13 +86,6 @@ def _cf_number(record, key):
         return float(v)
     except (TypeError, ValueError):
         return None
-
-
-def _cf_date(record, key):
-    v = _cf(record, key)
-    if isinstance(v, dict):
-        v = v.get("value") or v.get("date")
-    return _parse_dt(v)
 
 
 def _parse_dt(s):
@@ -99,12 +117,6 @@ def _days_since(dt, now):
 
 def _deal_side(deal):
     opt = _cf_option_id(deal, CF_DEAL_SIDE)
-    if opt is None:
-        return None
-    try:
-        opt = int(opt)
-    except (TypeError, ValueError):
-        return None
     if opt == OPT_BUY:
         return "BUY"
     if opt == OPT_SELL:
@@ -170,6 +182,32 @@ def _deal_title(d):
     return d.get("name") or d.get("title") or f"Deal {d.get('id', '')}"
 
 
+def _deal_link(deal):
+    did = deal.get("id")
+    if did in (None, ""):
+        return ""
+    s = str(did)
+    return f'<a href="{PIPELINE_DEAL_URL.format(escape(s, quote=True))}">{escape(s)}</a>'
+
+
+def _ticket_compat(buy, sell):
+    buy_min = _cf_number(buy, CF_TICKET_MIN) or 0
+    sell_min = _cf_number(sell, CF_TICKET_MIN) or 0
+    bm = _cf_number(buy, CF_TICKET_MAX)
+    sm = _cf_number(sell, CF_TICKET_MAX)
+    buy_max = bm if bm is not None else float("inf")
+    sell_max = sm if sm is not None else float("inf")
+    lo = max(buy_min, sell_min)
+    hi = min(buy_max, sell_max)
+    if lo <= hi:
+        return True
+    gap = lo - hi
+    max_size = max(buy_max, sell_max)
+    if max_size == float("inf") or max_size == 0:
+        return max_size == float("inf")
+    return (gap / max_size) <= TICKET_TOLERANCE
+
+
 def _build_crossed(deals):
     by_co = {}
     for d in deals:
@@ -193,19 +231,32 @@ def _build_crossed(deals):
 
     rows = []
     for co in by_co.values():
-        if not co["buys"] or not co["sells"]:
-            continue
-        best_buy = max(co["buys"], key=lambda t: t[0])
-        best_sell = min(co["sells"], key=lambda t: t[0])
-        if best_buy[0] >= best_sell[0]:
-            rows.append({
-                "company": co["name"],
-                "buy_price": best_buy[0],
-                "buy_deal": best_buy[1],
-                "sell_price": best_sell[0],
-                "sell_deal": best_sell[1],
-                "spread": best_buy[0] - best_sell[0],
-            })
+        best = None
+        for g, buy in co["buys"]:
+            buy_struct = _cf_option_id(buy, CF_STRUCTURE)
+            if buy_struct not in STRUCTURE_LABELS:
+                continue
+            for n, sell in co["sells"]:
+                if g < n:
+                    continue
+                sell_struct = _cf_option_id(sell, CF_STRUCTURE)
+                if sell_struct != buy_struct:
+                    continue
+                if not _ticket_compat(buy, sell):
+                    continue
+                spread = g - n
+                if best is None or spread > best["spread"]:
+                    best = {
+                        "company": co["name"],
+                        "structure": STRUCTURE_LABELS[buy_struct],
+                        "buy_price": g,
+                        "buy_deal": buy,
+                        "sell_price": n,
+                        "sell_deal": sell,
+                        "spread": spread,
+                    }
+        if best:
+            rows.append(best)
     rows.sort(key=lambda r: r["spread"], reverse=True)
     return rows
 
@@ -214,7 +265,8 @@ def _build_tight(deals, companies):
     co_by_id = {c.get("id"): c for c in companies if c.get("id") is not None}
     rows = []
     for d in deals:
-        if _stage_id(d) != STAGE_FIRM:
+        sid = _stage_id(d)
+        if sid not in ACTIVE_STAGES:
             continue
         side = _deal_side(d)
         cid = _company_id(d)
@@ -222,8 +274,9 @@ def _build_tight(deals, companies):
         if not co:
             continue
         co_name = co.get("name") or _company_name(d)
+        stage_label = STAGE_LABELS.get(sid, str(sid))
         if side == "BUY":
-            ask = _cf_number(co, CF_HIIVE_ASK)
+            ask = _cf_number(co, CF_MKT_ASK)
             gross = _cf_number(d, CF_GROSS)
             if not ask or gross is None:
                 continue
@@ -232,13 +285,14 @@ def _build_tight(deals, companies):
                 rows.append({
                     "company": co_name,
                     "side": "BUY",
+                    "stage": stage_label,
                     "your_price": gross,
-                    "hiive_price": ask,
+                    "marketplace_price": ask,
                     "distance": dist,
                     "deal": d,
                 })
         elif side == "SELL":
-            bid = _cf_number(co, CF_HIIVE_BID)
+            bid = _cf_number(co, CF_MKT_BID)
             net = _cf_number(d, CF_NET)
             if not bid or net is None:
                 continue
@@ -247,8 +301,9 @@ def _build_tight(deals, companies):
                 rows.append({
                     "company": co_name,
                     "side": "SELL",
+                    "stage": stage_label,
                     "your_price": net,
-                    "hiive_price": bid,
+                    "marketplace_price": bid,
                     "distance": dist,
                     "deal": d,
                 })
@@ -267,25 +322,7 @@ def _build_matched(deals, now):
             "company": _company_name(d),
             "contact": _contact(d),
             "days": days if days is not None else 0,
-        })
-    rows.sort(key=lambda r: r["days"], reverse=True)
-    return rows
-
-
-def _build_stale(deals, now):
-    rows = []
-    for d in deals:
-        if _stage_id(d) not in ACTIVE_STAGES:
-            continue
-        refresh = _cf_date(d, CF_REFRESH) or _parse_dt(d.get("created_at"))
-        days = _days_since(refresh, now)
-        if days is None or days <= STALE_THRESHOLD_DAYS:
-            continue
-        rows.append({
-            "title": _deal_title(d),
-            "company": _company_name(d),
-            "contact": _contact(d),
-            "days": days,
+            "deal": d,
         })
     rows.sort(key=lambda r: r["days"], reverse=True)
     return rows
@@ -301,7 +338,7 @@ def _contact_cell(name, email):
     return ""
 
 
-def _render_html(crossed, tight, matched, stale, date_str):
+def _render_html(crossed, tight, matched, date_str):
     out = [f"<html><body><h1>Daily Brief — {escape(date_str)}</h1>"]
 
     out.append("<h2>A. Crossed in Own Book</h2>")
@@ -309,45 +346,48 @@ def _render_html(crossed, tight, matched, stale, date_str):
         out.append("<p>(None)</p>")
     else:
         out.append("<table border='1' cellpadding='4' cellspacing='0'>")
-        out.append("<tr><th>Company</th><th>Buy</th><th>Buy Contact</th>"
-                   "<th>Buy Deal ID</th><th>Sell</th><th>Sell Contact</th>"
-                   "<th>Sell Deal ID</th><th>Spread</th></tr>")
+        out.append("<tr><th>Company</th><th>Structure</th>"
+                   "<th>Buy</th><th>Buy Contact</th><th>Buy Deal ID</th>"
+                   "<th>Sell</th><th>Sell Contact</th><th>Sell Deal ID</th>"
+                   "<th>Spread</th></tr>")
         for r in crossed:
             bn, be = _contact(r["buy_deal"])
             sn, se = _contact(r["sell_deal"])
             out.append(
                 "<tr>"
                 f"<td>{escape(r['company'])}</td>"
+                f"<td>{escape(r['structure'])}</td>"
                 f"<td>{escape(_fmt_price(r['buy_price']))}</td>"
                 f"<td>{_contact_cell(bn, be)}</td>"
-                f"<td>{escape(str(r['buy_deal'].get('id', '')))}</td>"
+                f"<td>{_deal_link(r['buy_deal'])}</td>"
                 f"<td>{escape(_fmt_price(r['sell_price']))}</td>"
                 f"<td>{_contact_cell(sn, se)}</td>"
-                f"<td>{escape(str(r['sell_deal'].get('id', '')))}</td>"
+                f"<td>{_deal_link(r['sell_deal'])}</td>"
                 f"<td>{escape(_fmt_price(r['spread']))}</td>"
                 "</tr>"
             )
         out.append("</table>")
 
-    out.append("<h2>B. Tight Markets vs Hiive (within 10%)</h2>")
+    out.append("<h2>B. Trades Close to Marketplaces (within 10%)</h2>")
     if not tight:
         out.append("<p>(None)</p>")
     else:
         out.append("<table border='1' cellpadding='4' cellspacing='0'>")
-        out.append("<tr><th>Company</th><th>Side</th><th>Your Price</th>"
-                   "<th>Hiive</th><th>% Distance</th><th>Contact</th>"
-                   "<th>Deal ID</th></tr>")
+        out.append("<tr><th>Company</th><th>Side</th><th>Stage</th>"
+                   "<th>Your Price</th><th>Marketplace</th><th>% Distance</th>"
+                   "<th>Contact</th><th>Deal ID</th></tr>")
         for r in tight:
             n, e = _contact(r["deal"])
             out.append(
                 "<tr>"
                 f"<td>{escape(r['company'])}</td>"
                 f"<td>{escape(r['side'])}</td>"
+                f"<td>{escape(r['stage'])}</td>"
                 f"<td>{escape(_fmt_price(r['your_price']))}</td>"
-                f"<td>{escape(_fmt_price(r['hiive_price']))}</td>"
+                f"<td>{escape(_fmt_price(r['marketplace_price']))}</td>"
                 f"<td>{r['distance'] * 100:+.2f}%</td>"
                 f"<td>{_contact_cell(n, e)}</td>"
-                f"<td>{escape(str(r['deal'].get('id', '')))}</td>"
+                f"<td>{_deal_link(r['deal'])}</td>"
                 "</tr>"
             )
         out.append("</table>")
@@ -358,7 +398,7 @@ def _render_html(crossed, tight, matched, stale, date_str):
     else:
         out.append("<table border='1' cellpadding='4' cellspacing='0'>")
         out.append("<tr><th>Deal</th><th>Company</th><th>Contact</th>"
-                   "<th>Days Since Update</th></tr>")
+                   "<th>Days Since Update</th><th>Deal ID</th></tr>")
         for r in matched:
             n, e = r["contact"]
             out.append(
@@ -367,25 +407,7 @@ def _render_html(crossed, tight, matched, stale, date_str):
                 f"<td>{escape(r['company'])}</td>"
                 f"<td>{_contact_cell(n, e)}</td>"
                 f"<td>{r['days']}</td>"
-                "</tr>"
-            )
-        out.append("</table>")
-
-    out.append("<h2>D. Approaching Stale (&gt;50 days since refresh)</h2>")
-    if not stale:
-        out.append("<p>(None)</p>")
-    else:
-        out.append("<table border='1' cellpadding='4' cellspacing='0'>")
-        out.append("<tr><th>Deal</th><th>Company</th><th>Contact</th>"
-                   "<th>Days Since Refresh</th></tr>")
-        for r in stale:
-            n, e = r["contact"]
-            out.append(
-                "<tr>"
-                f"<td>{escape(r['title'])}</td>"
-                f"<td>{escape(r['company'])}</td>"
-                f"<td>{_contact_cell(n, e)}</td>"
-                f"<td>{r['days']}</td>"
+                f"<td>{_deal_link(r['deal'])}</td>"
                 "</tr>"
             )
         out.append("</table>")
@@ -407,9 +429,8 @@ def lambda_handler(event, context):
     crossed = _build_crossed(deals)
     tight = _build_tight(deals, companies)
     matched = _build_matched(deals, now)
-    stale = _build_stale(deals, now)
 
-    body_html = _render_html(crossed, tight, matched, stale, date_str)
+    body_html = _render_html(crossed, tight, matched, date_str)
     subject = f"Daily Brief — {date_str}"
 
     ses = boto3.client("ses", region_name=SES_REGION)
@@ -429,7 +450,6 @@ def lambda_handler(event, context):
             "crossed": len(crossed),
             "tight": len(tight),
             "matched": len(matched),
-            "stale": len(stale),
             "deals": len(deals),
             "companies": len(companies),
         },
