@@ -74,7 +74,7 @@ STAGE_LABELS = {
 TIGHT_PCT = 0.10
 TICKET_TOLERANCE = 0.10
 
-TO_CLOSE_ALL_STAGES = {STAGE_LOI_SIGNED}
+TO_CLOSE_ALL_STAGES = {STAGE_MATCHED, STAGE_LOI_SIGNED}
 TO_CLOSE_AGED_STAGE = STAGE_TRANSFER_NOTICE
 TO_CLOSE_AGE_DAYS = 30
 
@@ -286,7 +286,10 @@ def _confirm_email_link(deal, company, side):
     first_name = _person_first_name(pc)
     token = _make_token(did)
     url = f"{CONFIRM_URL}?deal_id={quote(str(did))}&token={quote(token)}"
-    subject = f"Confirming your {company} {side} order"
+    subject = (
+        f"Confirming your {company} {side} order"
+        if side else f"Confirming your {company} order"
+    )
     body = (
         f"Hello {first_name},\n\n"
         "Can you let me know if this deal is still valid? If so, we may "
@@ -466,23 +469,6 @@ def _build_tight(deals, companies):
     return rows
 
 
-def _build_matched(deals, now, people_by_id):
-    rows = []
-    for d in deals:
-        if _stage_id(d) != STAGE_MATCHED:
-            continue
-        days = _days_since(_parse_dt(d.get("updated_at")), now)
-        rows.append({
-            "title": _deal_title(d),
-            "company": _company_name(d),
-            "people": _deal_people(d, people_by_id),
-            "days": days if days is not None else 0,
-            "deal": d,
-        })
-    rows.sort(key=lambda r: r["days"], reverse=True)
-    return rows
-
-
 def _build_to_close(deals, now, people_by_id):
     rows = []
     for d in deals:
@@ -522,7 +508,7 @@ def _build_to_invoice(deals, now, people_by_id):
     return rows
 
 
-def _render_html(crossed, tight, matched, to_close, to_invoice, date_str):
+def _render_html(crossed, tight, to_close, to_invoice, date_str):
     out = [f"<html><body><h1>Daily Brief — {escape(date_str)}</h1>"]
 
     out.append("<h2>A. Crossed in Own Book</h2>")
@@ -589,27 +575,7 @@ def _render_html(crossed, tight, matched, to_close, to_invoice, date_str):
             prev_side = r["side"]
         out.append("</table>")
 
-    out.append("<h2>C. Matched — Follow Up</h2>")
-    if not matched:
-        out.append("<p>(No Matched deals — verify stage 2381534.)</p>")
-    else:
-        out.append("<table border='1' cellpadding='4' cellspacing='0'>")
-        out.append("<tr><th>Deal</th><th>Company</th><th>Contact</th>"
-                   "<th>Days Since Update</th><th>Deal ID</th></tr>")
-        for r in matched:
-            contact_html, _ = _people_cells(r["people"], r["company"])
-            out.append(
-                "<tr>"
-                f"<td>{escape(r['title'])}</td>"
-                f"<td>{escape(r['company'])}</td>"
-                f"<td>{contact_html}</td>"
-                f"<td>{r['days']}</td>"
-                f"<td>{_deal_link(r['deal'])}</td>"
-                "</tr>"
-            )
-        out.append("</table>")
-
-    out.append("<h2>D. To Close</h2>")
+    out.append("<h2>C. To Close</h2>")
     if not to_close:
         out.append("<p>(Nothing to close.)</p>")
     else:
@@ -619,6 +585,7 @@ def _render_html(crossed, tight, matched, to_close, to_invoice, date_str):
                    "<th>Deal ID</th></tr>")
         for r in to_close:
             contact_html, _ = _people_cells(r["people"], r["company"])
+            side = _deal_side(r["deal"])
             out.append(
                 "<tr>"
                 f"<td>{escape(r['stage'])}</td>"
@@ -626,12 +593,12 @@ def _render_html(crossed, tight, matched, to_close, to_invoice, date_str):
                 f"<td>{escape(r['title'])}</td>"
                 f"<td>{contact_html}</td>"
                 f"<td>{r['days']}</td>"
-                f"<td>{_deal_link(r['deal'])}</td>"
+                f"<td>{_deal_id_cell(r['deal'], r['company'], side)}</td>"
                 "</tr>"
             )
         out.append("</table>")
 
-    out.append("<h2>E. To Invoice</h2>")
+    out.append("<h2>D. To Invoice</h2>")
     if not to_invoice:
         out.append("<p>(No SPA-signed deals awaiting invoice.)</p>")
     else:
@@ -672,11 +639,10 @@ def lambda_handler(event, context):
 
     crossed = _build_crossed(deals)
     tight = _build_tight(deals, companies)
-    matched = _build_matched(deals, now, people_by_id)
     to_close = _build_to_close(deals, now, people_by_id)
     to_invoice = _build_to_invoice(deals, now, people_by_id)
 
-    body_html = _render_html(crossed, tight, matched, to_close, to_invoice, date_str)
+    body_html = _render_html(crossed, tight, to_close, to_invoice, date_str)
     subject = f"Daily Brief — {date_str}"
 
     ses = boto3.client("ses", region_name=SES_REGION)
@@ -695,7 +661,6 @@ def lambda_handler(event, context):
         "counts": {
             "crossed": len(crossed),
             "tight": len(tight),
-            "matched": len(matched),
             "to_close": len(to_close),
             "to_invoice": len(to_invoice),
             "deals": len(deals),
