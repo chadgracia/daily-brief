@@ -74,7 +74,7 @@ STAGE_LABELS = {
 TIGHT_PCT = 0.10
 TICKET_TOLERANCE = 0.10
 
-TO_CLOSE_ALL_STAGES = {STAGE_MATCHED, STAGE_LOI_SIGNED}
+TO_CLOSE_ALL_STAGES = {STAGE_LOI_SIGNED}
 TO_CLOSE_AGED_STAGE = STAGE_TRANSFER_NOTICE
 TO_CLOSE_AGE_DAYS = 30
 
@@ -595,15 +595,14 @@ def _render_html(crossed, tight, matched, to_close, to_invoice, date_str):
     else:
         out.append("<table border='1' cellpadding='4' cellspacing='0'>")
         out.append("<tr><th>Deal</th><th>Company</th><th>Contact</th>"
-                   "<th>IQF</th><th>Days Since Update</th><th>Deal ID</th></tr>")
+                   "<th>Days Since Update</th><th>Deal ID</th></tr>")
         for r in matched:
-            contact_html, iqf_html = _people_cells(r["people"], r["company"])
+            contact_html, _ = _people_cells(r["people"], r["company"])
             out.append(
                 "<tr>"
                 f"<td>{escape(r['title'])}</td>"
                 f"<td>{escape(r['company'])}</td>"
                 f"<td>{contact_html}</td>"
-                f"<td>{iqf_html}</td>"
                 f"<td>{r['days']}</td>"
                 f"<td>{_deal_link(r['deal'])}</td>"
                 "</tr>"
@@ -616,17 +615,16 @@ def _render_html(crossed, tight, matched, to_close, to_invoice, date_str):
     else:
         out.append("<table border='1' cellpadding='4' cellspacing='0'>")
         out.append("<tr><th>Stage</th><th>Company</th><th>Deal Title</th>"
-                   "<th>Contact</th><th>IQF</th><th>Days Since Update</th>"
+                   "<th>Contact</th><th>Days Since Update</th>"
                    "<th>Deal ID</th></tr>")
         for r in to_close:
-            contact_html, iqf_html = _people_cells(r["people"], r["company"])
+            contact_html, _ = _people_cells(r["people"], r["company"])
             out.append(
                 "<tr>"
                 f"<td>{escape(r['stage'])}</td>"
                 f"<td>{escape(r['company'])}</td>"
                 f"<td>{escape(r['title'])}</td>"
                 f"<td>{contact_html}</td>"
-                f"<td>{iqf_html}</td>"
                 f"<td>{r['days']}</td>"
                 f"<td>{_deal_link(r['deal'])}</td>"
                 "</tr>"
@@ -639,15 +637,16 @@ def _render_html(crossed, tight, matched, to_close, to_invoice, date_str):
     else:
         out.append("<table border='1' cellpadding='4' cellspacing='0'>")
         out.append("<tr><th>Company</th><th>Deal Title</th><th>Contact</th>"
-                   "<th>Days Since Update</th><th>Deal ID</th></tr>")
+                   "<th>IQF</th><th>Days Since Update</th><th>Deal ID</th></tr>")
         for r in to_invoice:
             side = _deal_side(r["deal"])
-            contact_html, _ = _people_cells(r["people"], r["company"], side)
+            contact_html, iqf_html = _people_cells(r["people"], r["company"], side)
             out.append(
                 "<tr>"
                 f"<td>{escape(r['company'])}</td>"
                 f"<td>{escape(r['title'])}</td>"
                 f"<td>{contact_html}</td>"
+                f"<td>{iqf_html}</td>"
                 f"<td>{r['days']}</td>"
                 f"<td>{_deal_link(r['deal'])}</td>"
                 "</tr>"
