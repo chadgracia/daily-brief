@@ -1,6 +1,7 @@
 import json
 from datetime import datetime, timezone
 from html import escape
+from urllib.parse import quote
 
 import boto3
 
@@ -37,7 +38,12 @@ STAGE_MATCHED = 2381534
 STAGE_INQUIRY = 2109142
 STAGE_HOLD = 2094373
 STAGE_CONFIRM = 2388323
+STAGE_LOI_SIGNED = 2517909
+STAGE_TRANSFER_NOTICE = 2533998
+STAGE_SPA_SIGNED = 2381535
+
 ACTIVE_STAGES = {STAGE_FIRM, STAGE_MATCHED, STAGE_INQUIRY, STAGE_HOLD, STAGE_CONFIRM}
+MARKET_STAGES = ACTIVE_STAGES - {STAGE_HOLD}
 
 STAGE_LABELS = {
     STAGE_FIRM: "FIRM",
@@ -45,10 +51,19 @@ STAGE_LABELS = {
     STAGE_INQUIRY: "INQUIRY",
     STAGE_HOLD: "HOLD",
     STAGE_CONFIRM: "CONFIRM",
+    STAGE_LOI_SIGNED: "LOI SIGNED",
+    STAGE_TRANSFER_NOTICE: "TRANSFER NOTICE",
+    STAGE_SPA_SIGNED: "SPA SIGNED",
 }
 
 TIGHT_PCT = 0.10
 TICKET_TOLERANCE = 0.10
+
+TO_CLOSE_ALL_STAGES = {STAGE_MATCHED, STAGE_LOI_SIGNED}
+TO_CLOSE_AGED_STAGE = STAGE_TRANSFER_NOTICE
+TO_CLOSE_AGE_DAYS = 30
+
+NEG_DISTANCE_BG = "#d4edda"
 
 
 def _cf(record, key):
@@ -124,6 +139,10 @@ def _deal_side(deal):
     return None
 
 
+def _deal_structure_label(deal):
+    return STRUCTURE_LABELS.get(_cf_option_id(deal, CF_STRUCTURE), "")
+
+
 def _stage_id(deal):
     stage = deal.get("deal_stage") or {}
     sid = stage.get("id") if isinstance(stage, dict) else None
@@ -190,6 +209,30 @@ def _deal_link(deal):
     return f'<a href="{PIPELINE_DEAL_URL.format(escape(s, quote=True))}">{escape(s)}</a>'
 
 
+def _contact_cell(name, email, company=None, side=None):
+    label = ""
+    if name and email:
+        label = f"{name} <{email}>"
+    elif name:
+        return escape(name)
+    elif email:
+        label = f"<{email}>"
+    else:
+        return ""
+    if not email:
+        return escape(label)
+    if company and side:
+        subject = f"Re: Your {company} {side} order"
+    elif company:
+        subject = f"Re: Your {company} order"
+    else:
+        subject = ""
+    href = f"mailto:{quote(email, safe='@')}"
+    if subject:
+        href += f"?subject={quote(subject)}"
+    return f'<a href="{escape(href, quote=True)}">{escape(label)}</a>'
+
+
 def _ticket_compat(buy, sell):
     buy_min = _cf_number(buy, CF_TICKET_MIN) or 0
     sell_min = _cf_number(sell, CF_TICKET_MIN) or 0
@@ -203,8 +246,10 @@ def _ticket_compat(buy, sell):
         return True
     gap = lo - hi
     max_size = max(buy_max, sell_max)
-    if max_size == float("inf") or max_size == 0:
-        return max_size == float("inf")
+    if max_size == float("inf"):
+        return True
+    if max_size == 0:
+        return False
     return (gap / max_size) <= TICKET_TOLERANCE
 
 
@@ -266,7 +311,7 @@ def _build_tight(deals, companies):
     rows = []
     for d in deals:
         sid = _stage_id(d)
-        if sid not in ACTIVE_STAGES:
+        if sid not in MARKET_STAGES:
             continue
         side = _deal_side(d)
         cid = _company_id(d)
@@ -275,6 +320,7 @@ def _build_tight(deals, companies):
             continue
         co_name = co.get("name") or _company_name(d)
         stage_label = STAGE_LABELS.get(sid, str(sid))
+        structure = _deal_structure_label(d)
         if side == "BUY":
             ask = _cf_number(co, CF_MKT_ASK)
             gross = _cf_number(d, CF_GROSS)
@@ -286,6 +332,7 @@ def _build_tight(deals, companies):
                     "company": co_name,
                     "side": "BUY",
                     "stage": stage_label,
+                    "structure": structure,
                     "your_price": gross,
                     "marketplace_price": ask,
                     "distance": dist,
@@ -302,12 +349,13 @@ def _build_tight(deals, companies):
                     "company": co_name,
                     "side": "SELL",
                     "stage": stage_label,
+                    "structure": structure,
                     "your_price": net,
                     "marketplace_price": bid,
                     "distance": dist,
                     "deal": d,
                 })
-    rows.sort(key=lambda r: abs(r["distance"]))
+    rows.sort(key=lambda r: (0 if r["side"] == "SELL" else 1, abs(r["distance"])))
     return rows
 
 
@@ -328,17 +376,46 @@ def _build_matched(deals, now):
     return rows
 
 
-def _contact_cell(name, email):
-    if name and email:
-        return f"{escape(name)} &lt;{escape(email)}&gt;"
-    if name:
-        return escape(name)
-    if email:
-        return f"&lt;{escape(email)}&gt;"
-    return ""
+def _build_to_close(deals, now):
+    rows = []
+    for d in deals:
+        sid = _stage_id(d)
+        if sid not in TO_CLOSE_ALL_STAGES and sid != TO_CLOSE_AGED_STAGE:
+            continue
+        days = _days_since(_parse_dt(d.get("updated_at")), now)
+        days = days if days is not None else 0
+        if sid == TO_CLOSE_AGED_STAGE and days < TO_CLOSE_AGE_DAYS:
+            continue
+        rows.append({
+            "stage": STAGE_LABELS.get(sid, str(sid)),
+            "title": _deal_title(d),
+            "company": _company_name(d),
+            "contact": _contact(d),
+            "days": days,
+            "deal": d,
+        })
+    rows.sort(key=lambda r: r["days"], reverse=True)
+    return rows
 
 
-def _render_html(crossed, tight, matched, date_str):
+def _build_to_invoice(deals, now):
+    rows = []
+    for d in deals:
+        if _stage_id(d) != STAGE_SPA_SIGNED:
+            continue
+        days = _days_since(_parse_dt(d.get("updated_at")), now)
+        rows.append({
+            "title": _deal_title(d),
+            "company": _company_name(d),
+            "contact": _contact(d),
+            "days": days if days is not None else 0,
+            "deal": d,
+        })
+    rows.sort(key=lambda r: r["days"], reverse=True)
+    return rows
+
+
+def _render_html(crossed, tight, matched, to_close, to_invoice, date_str):
     out = [f"<html><body><h1>Daily Brief — {escape(date_str)}</h1>"]
 
     out.append("<h2>A. Crossed in Own Book</h2>")
@@ -358,10 +435,10 @@ def _render_html(crossed, tight, matched, date_str):
                 f"<td>{escape(r['company'])}</td>"
                 f"<td>{escape(r['structure'])}</td>"
                 f"<td>{escape(_fmt_price(r['buy_price']))}</td>"
-                f"<td>{_contact_cell(bn, be)}</td>"
+                f"<td>{_contact_cell(bn, be, r['company'], 'BUY')}</td>"
                 f"<td>{_deal_link(r['buy_deal'])}</td>"
                 f"<td>{escape(_fmt_price(r['sell_price']))}</td>"
-                f"<td>{_contact_cell(sn, se)}</td>"
+                f"<td>{_contact_cell(sn, se, r['company'], 'SELL')}</td>"
                 f"<td>{_deal_link(r['sell_deal'])}</td>"
                 f"<td>{escape(_fmt_price(r['spread']))}</td>"
                 "</tr>"
@@ -374,19 +451,21 @@ def _render_html(crossed, tight, matched, date_str):
     else:
         out.append("<table border='1' cellpadding='4' cellspacing='0'>")
         out.append("<tr><th>Company</th><th>Side</th><th>Stage</th>"
-                   "<th>Your Price</th><th>Marketplace</th><th>% Distance</th>"
-                   "<th>Contact</th><th>Deal ID</th></tr>")
+                   "<th>Structure</th><th>Your Price</th><th>Marketplace</th>"
+                   "<th>% Distance</th><th>Contact</th><th>Deal ID</th></tr>")
         for r in tight:
             n, e = _contact(r["deal"])
+            dist_style = f' style="background-color:{NEG_DISTANCE_BG}"' if r["distance"] < 0 else ""
             out.append(
                 "<tr>"
                 f"<td>{escape(r['company'])}</td>"
                 f"<td>{escape(r['side'])}</td>"
                 f"<td>{escape(r['stage'])}</td>"
+                f"<td>{escape(r['structure'])}</td>"
                 f"<td>{escape(_fmt_price(r['your_price']))}</td>"
                 f"<td>{escape(_fmt_price(r['marketplace_price']))}</td>"
-                f"<td>{r['distance'] * 100:+.2f}%</td>"
-                f"<td>{_contact_cell(n, e)}</td>"
+                f"<td{dist_style}>{r['distance'] * 100:+.2f}%</td>"
+                f"<td>{_contact_cell(n, e, r['company'], r['side'])}</td>"
                 f"<td>{_deal_link(r['deal'])}</td>"
                 "</tr>"
             )
@@ -405,7 +484,49 @@ def _render_html(crossed, tight, matched, date_str):
                 "<tr>"
                 f"<td>{escape(r['title'])}</td>"
                 f"<td>{escape(r['company'])}</td>"
-                f"<td>{_contact_cell(n, e)}</td>"
+                f"<td>{_contact_cell(n, e, r['company'])}</td>"
+                f"<td>{r['days']}</td>"
+                f"<td>{_deal_link(r['deal'])}</td>"
+                "</tr>"
+            )
+        out.append("</table>")
+
+    out.append("<h2>D. To Close</h2>")
+    if not to_close:
+        out.append("<p>(Nothing to close.)</p>")
+    else:
+        out.append("<table border='1' cellpadding='4' cellspacing='0'>")
+        out.append("<tr><th>Stage</th><th>Company</th><th>Deal Title</th>"
+                   "<th>Contact</th><th>Days Since Update</th><th>Deal ID</th></tr>")
+        for r in to_close:
+            n, e = r["contact"]
+            out.append(
+                "<tr>"
+                f"<td>{escape(r['stage'])}</td>"
+                f"<td>{escape(r['company'])}</td>"
+                f"<td>{escape(r['title'])}</td>"
+                f"<td>{_contact_cell(n, e, r['company'])}</td>"
+                f"<td>{r['days']}</td>"
+                f"<td>{_deal_link(r['deal'])}</td>"
+                "</tr>"
+            )
+        out.append("</table>")
+
+    out.append("<h2>E. To Invoice</h2>")
+    if not to_invoice:
+        out.append("<p>(No SPA-signed deals awaiting invoice.)</p>")
+    else:
+        out.append("<table border='1' cellpadding='4' cellspacing='0'>")
+        out.append("<tr><th>Company</th><th>Deal Title</th><th>Contact</th>"
+                   "<th>Days Since Update</th><th>Deal ID</th></tr>")
+        for r in to_invoice:
+            n, e = r["contact"]
+            side = _deal_side(r["deal"])
+            out.append(
+                "<tr>"
+                f"<td>{escape(r['company'])}</td>"
+                f"<td>{escape(r['title'])}</td>"
+                f"<td>{_contact_cell(n, e, r['company'], side)}</td>"
                 f"<td>{r['days']}</td>"
                 f"<td>{_deal_link(r['deal'])}</td>"
                 "</tr>"
@@ -429,8 +550,10 @@ def lambda_handler(event, context):
     crossed = _build_crossed(deals)
     tight = _build_tight(deals, companies)
     matched = _build_matched(deals, now)
+    to_close = _build_to_close(deals, now)
+    to_invoice = _build_to_invoice(deals, now)
 
-    body_html = _render_html(crossed, tight, matched, date_str)
+    body_html = _render_html(crossed, tight, matched, to_close, to_invoice, date_str)
     subject = f"Daily Brief — {date_str}"
 
     ses = boto3.client("ses", region_name=SES_REGION)
@@ -450,6 +573,8 @@ def lambda_handler(event, context):
             "crossed": len(crossed),
             "tight": len(tight),
             "matched": len(matched),
+            "to_close": len(to_close),
+            "to_invoice": len(to_invoice),
             "deals": len(deals),
             "companies": len(companies),
         },
