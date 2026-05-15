@@ -630,7 +630,8 @@ def _build_leads_to_revive(people, companies):
     return rows
 
 
-def _render_html(crossed, tight, to_close, to_invoice, leads, newsletter_count, date_str):
+def _render_html(crossed, tight, to_close, to_invoice, leads,
+                 newsletter_recipient_count, leads_to_revive_count, date_str):
     out = [f"<html><body><h1>Daily Brief — {escape(date_str)}</h1>"]
 
     out.append("<h2>A. Crossed in Own Book</h2>")
@@ -743,10 +744,8 @@ def _render_html(crossed, tight, to_close, to_invoice, leads, newsletter_count, 
         out.append("</table>")
 
     out.append("<h2>F. Leads to Revive</h2>")
-    out.append(
-        f"<p>Total Newsletter Recipients: {newsletter_count}<br>"
-        f"Leads to Revive: {len(leads)}</p>"
-    )
+    out.append(f"<p>Total Newsletter Recipients: {newsletter_recipient_count}</p>")
+    out.append(f"<p>Leads to Revive: {leads_to_revive_count}</p>")
     if not leads:
         out.append("<p>(No leads to revive — clean book!)</p>")
     else:
@@ -807,10 +806,12 @@ def lambda_handler(event, context):
     to_close = _build_to_close(deals, now, people_by_id)
     to_invoice = _build_to_invoice(deals, now, people_by_id)
     leads = _build_leads_to_revive(people, companies)
-    newsletter_count = _count_newsletter_recipients(people)
+    leads_to_revive_count = len(leads)
+    newsletter_recipient_count = _count_newsletter_recipients(people)
 
     body_html = _render_html(
-        crossed, tight, to_close, to_invoice, leads, newsletter_count, date_str
+        crossed, tight, to_close, to_invoice, leads,
+        newsletter_recipient_count, leads_to_revive_count, date_str,
     )
     subject = f"Daily Brief — {date_str}"
 
@@ -832,8 +833,8 @@ def lambda_handler(event, context):
             "tight": len(tight),
             "to_close": len(to_close),
             "to_invoice": len(to_invoice),
-            "leads_to_revive": len(leads),
-            "newsletter_recipients": newsletter_count,
+            "leads_to_revive": leads_to_revive_count,
+            "newsletter_recipients": newsletter_recipient_count,
             "deals": len(deals),
             "companies": len(companies),
             "people": len(people),
