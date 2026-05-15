@@ -16,6 +16,7 @@ FROM_ADDR = "agent@agent.graciagroup.com"
 TO_ADDRS = ["cgracia@rainmakersecurities.com", "kate@graciagroup.com"]
 
 PIPELINE_DEAL_URL = "https://app.pipelinecrm.com/deals/{}"
+PIPELINE_PERSON_URL = "https://app.pipelinecrm.com/people/{}"
 CONFIRM_URL = "https://s5qv2qkmjt2qejliwchvqukseq0wgwff.lambda-url.us-east-1.on.aws"
 CONFIRM_SECRET = b"trade-update"
 
@@ -28,6 +29,8 @@ CF_TICKET_MAX = "custom_label_3064645"
 CF_MKT_ASK = "custom_label_3997297"
 CF_MKT_BID = "custom_label_3997298"
 CF_IQF = "custom_label_3763008"
+CF_NEWSLETTER = "custom_label_3775335"
+CF_EMAIL_STATUS = "custom_label_2447206"
 
 OPT_SELL = 5011675
 OPT_BUY = 5077819
@@ -36,6 +39,17 @@ OPT_STRUCT_FUND = 5077906
 OPT_IQF_YES = 6496840
 OPT_IQF_PENDING = 6496842
 OPT_IQF_NO = 6496841
+
+NEWSLETTER_OPTS = {6613674, 6613673, 6582981}
+
+EMAIL_STATUS_REASONS = {
+    3940558: "Bouncing",
+    4943722: "Blocked",
+    3940678: "Needed",
+}
+
+TAG_WHITELIST_CONTACT_ESTABLISHED = 3280123
+REASON_NO_WORK_EMAIL = "No work email"
 
 STRUCTURE_LABELS = {
     OPT_STRUCT_DIRECT: "Direct",
@@ -105,6 +119,26 @@ def _cf_option_id(record, key):
         return int(v)
     except (TypeError, ValueError):
         return None
+
+
+def _cf_option_ids(record, key):
+    v = _cf(record, key)
+    if v is None:
+        return set()
+    items = v if isinstance(v, list) else [v]
+    out = set()
+    for item in items:
+        if isinstance(item, dict):
+            raw = item.get("option_id") or item.get("id") or item.get("value")
+        else:
+            raw = item
+        if raw is None:
+            continue
+        try:
+            out.add(int(raw))
+        except (TypeError, ValueError):
+            continue
+    return out
 
 
 def _cf_number(record, key):
@@ -211,6 +245,43 @@ def _person_first_name(p):
 
 def _person_iqf(p):
     return IQF_LABELS.get(_cf_option_id(p, CF_IQF), "—")
+
+
+def _person_email(p):
+    if not isinstance(p, dict):
+        return ""
+    email = p.get("email")
+    if not email:
+        emails = p.get("emails") or []
+        if isinstance(emails, list) and emails:
+            first = emails[0]
+            email = first.get("address") if isinstance(first, dict) else first
+    if not isinstance(email, str):
+        return ""
+    return email.strip()
+
+
+def _person_full_name(p):
+    if not isinstance(p, dict):
+        return ""
+    n = p.get("full_name") or p.get("name")
+    if n:
+        return n
+    parts = [p.get("first_name"), p.get("last_name")]
+    return " ".join(x for x in parts if x).strip()
+
+
+def _has_tag(person, tag_id):
+    tags = person.get("predefined_contacts_tag_ids") or []
+    if not isinstance(tags, list):
+        return False
+    for t in tags:
+        try:
+            if int(t) == tag_id:
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False
 
 
 def _primary_contact(deal):
@@ -508,7 +579,58 @@ def _build_to_invoice(deals, now, people_by_id):
     return rows
 
 
-def _render_html(crossed, tight, to_close, to_invoice, date_str):
+def _count_newsletter_recipients(people):
+    n = 0
+    for p in people:
+        if not (_cf_option_ids(p, CF_NEWSLETTER) & NEWSLETTER_OPTS):
+            continue
+        if not _person_email(p):
+            continue
+        n += 1
+    return n
+
+
+def _build_leads_to_revive(people, companies):
+    co_by_id = {c.get("id"): c for c in companies if c.get("id") is not None}
+    rows_by_pid = {}
+    for p in people:
+        pid = p.get("id")
+        if pid is None:
+            continue
+
+        email = _person_email(p)
+        bucket1 = (not email) and _has_tag(p, TAG_WHITELIST_CONTACT_ESTABLISHED)
+
+        bucket2_reason = None
+        for opt in _cf_option_ids(p, CF_EMAIL_STATUS):
+            if opt in EMAIL_STATUS_REASONS:
+                bucket2_reason = EMAIL_STATUS_REASONS[opt]
+                break
+
+        if not bucket1 and not bucket2_reason:
+            continue
+
+        reason = REASON_NO_WORK_EMAIL if bucket1 else bucket2_reason
+
+        co = co_by_id.get(p.get("company_id")) or {}
+        co_name = co.get("name") or ""
+        co_website = co.get("website") or ""
+
+        rows_by_pid[pid] = {
+            "reason": reason,
+            "name": _person_full_name(p),
+            "person_id": pid,
+            "linked_in_url": p.get("linked_in_url") or "",
+            "company_name": co_name,
+            "company_website": co_website,
+        }
+
+    rows = list(rows_by_pid.values())
+    rows.sort(key=lambda r: (r["reason"], r["name"].lower()))
+    return rows
+
+
+def _render_html(crossed, tight, to_close, to_invoice, leads, newsletter_count, date_str):
     out = [f"<html><body><h1>Daily Brief — {escape(date_str)}</h1>"]
 
     out.append("<h2>A. Crossed in Own Book</h2>")
@@ -620,6 +742,49 @@ def _render_html(crossed, tight, to_close, to_invoice, date_str):
             )
         out.append("</table>")
 
+    out.append("<h2>F. Leads to Revive</h2>")
+    out.append(
+        f"<p>Total Newsletter Recipients: {newsletter_count}<br>"
+        f"Leads to Revive: {len(leads)}</p>"
+    )
+    if not leads:
+        out.append("<p>(No leads to revive — clean book!)</p>")
+    else:
+        out.append("<table border='1' cellpadding='4' cellspacing='0'>")
+        out.append("<tr><th>Reason</th><th>Name</th><th>Pipeline</th>"
+                   "<th>LinkedIn</th><th>Company</th></tr>")
+        for r in leads:
+            person_href = PIPELINE_PERSON_URL.format(
+                escape(str(r["person_id"]), quote=True)
+            )
+            pipeline_cell = f'<a href="{person_href}">open</a>'
+            if r["linked_in_url"]:
+                li_cell = (
+                    f'<a href="{escape(r["linked_in_url"], quote=True)}">'
+                    'LinkedIn</a>'
+                )
+            else:
+                li_cell = ""
+            if r["company_website"] and r["company_name"]:
+                co_cell = (
+                    f'<a href="{escape(r["company_website"], quote=True)}">'
+                    f'{escape(r["company_name"])}</a>'
+                )
+            elif r["company_name"]:
+                co_cell = escape(r["company_name"])
+            else:
+                co_cell = ""
+            out.append(
+                "<tr>"
+                f"<td>{escape(r['reason'])}</td>"
+                f"<td>{escape(r['name'])}</td>"
+                f"<td>{pipeline_cell}</td>"
+                f"<td>{li_cell}</td>"
+                f"<td>{co_cell}</td>"
+                "</tr>"
+            )
+        out.append("</table>")
+
     out.append("</body></html>")
     return "".join(out)
 
@@ -641,8 +806,12 @@ def lambda_handler(event, context):
     tight = _build_tight(deals, companies)
     to_close = _build_to_close(deals, now, people_by_id)
     to_invoice = _build_to_invoice(deals, now, people_by_id)
+    leads = _build_leads_to_revive(people, companies)
+    newsletter_count = _count_newsletter_recipients(people)
 
-    body_html = _render_html(crossed, tight, to_close, to_invoice, date_str)
+    body_html = _render_html(
+        crossed, tight, to_close, to_invoice, leads, newsletter_count, date_str
+    )
     subject = f"Daily Brief — {date_str}"
 
     ses = boto3.client("ses", region_name=SES_REGION)
@@ -663,6 +832,8 @@ def lambda_handler(event, context):
             "tight": len(tight),
             "to_close": len(to_close),
             "to_invoice": len(to_invoice),
+            "leads_to_revive": len(leads),
+            "newsletter_recipients": newsletter_count,
             "deals": len(deals),
             "companies": len(companies),
             "people": len(people),
