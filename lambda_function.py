@@ -93,7 +93,7 @@ TO_CLOSE_AGED_STAGE = STAGE_TRANSFER_NOTICE
 TO_CLOSE_AGE_DAYS = 30
 
 NEG_DISTANCE_BG = "#d4edda"
-SECTION_B_COLS = 9
+TIGHT_COLS = 9
 
 
 def _cf(record, key):
@@ -634,7 +634,52 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
                  newsletter_recipient_count, leads_to_revive_count, date_str):
     out = [f"<html><body><h1>Daily Brief — {escape(date_str)}</h1>"]
 
-    out.append("<h2>A. Crossed in Own Book</h2>")
+    out.append("<h2>A. INVOICE: Get paid and win deal</h2>")
+    if not to_invoice:
+        out.append("<p>(No SPA-signed deals awaiting invoice.)</p>")
+    else:
+        out.append("<table border='1' cellpadding='4' cellspacing='0'>")
+        out.append("<tr><th>Company</th><th>Deal Title</th><th>Contact</th>"
+                   "<th>IQF</th><th>Days Since Update</th><th>Deal ID</th></tr>")
+        for r in to_invoice:
+            side = _deal_side(r["deal"])
+            contact_html, iqf_html = _people_cells(r["people"], r["company"], side)
+            out.append(
+                "<tr>"
+                f"<td>{escape(r['company'])}</td>"
+                f"<td>{escape(r['title'])}</td>"
+                f"<td>{contact_html}</td>"
+                f"<td>{iqf_html}</td>"
+                f"<td>{r['days']}</td>"
+                f"<td>{_deal_link(r['deal'])}</td>"
+                "</tr>"
+            )
+        out.append("</table>")
+
+    out.append("<h2>B. CLOSE: Move toward finish line</h2>")
+    if not to_close:
+        out.append("<p>(Nothing to close.)</p>")
+    else:
+        out.append("<table border='1' cellpadding='4' cellspacing='0'>")
+        out.append("<tr><th>Stage</th><th>Company</th><th>Deal Title</th>"
+                   "<th>Contact</th><th>Days Since Update</th>"
+                   "<th>Deal ID</th></tr>")
+        for r in to_close:
+            contact_html, _ = _people_cells(r["people"], r["company"])
+            side = _deal_side(r["deal"])
+            out.append(
+                "<tr>"
+                f"<td>{escape(r['stage'])}</td>"
+                f"<td>{escape(r['company'])}</td>"
+                f"<td>{escape(r['title'])}</td>"
+                f"<td>{contact_html}</td>"
+                f"<td>{r['days']}</td>"
+                f"<td>{_deal_id_cell(r['deal'], r['company'], side)}</td>"
+                "</tr>"
+            )
+        out.append("</table>")
+
+    out.append("<h2>C. INTRODUCE: Crossed trades</h2>")
     if not crossed:
         out.append("<p>(None)</p>")
     else:
@@ -661,7 +706,7 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
             )
         out.append("</table>")
 
-    out.append("<h2>B. Trades Close to Marketplaces (within 10%)</h2>")
+    out.append("<h2>D. EXPLORE: Update or engage close matches</h2>")
     if not tight:
         out.append("<p>(None)</p>")
     else:
@@ -673,7 +718,7 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
         for r in tight:
             if prev_side == "SELL" and r["side"] == "BUY":
                 out.append(
-                    f'<tr><td colspan="{SECTION_B_COLS}" '
+                    f'<tr><td colspan="{TIGHT_COLS}" '
                     'style="border-top: 3px solid #000; height: 0; padding: 0;">'
                     '</td></tr>'
                 )
@@ -696,51 +741,6 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
                 "</tr>"
             )
             prev_side = r["side"]
-        out.append("</table>")
-
-    out.append("<h2>C. To Close</h2>")
-    if not to_close:
-        out.append("<p>(Nothing to close.)</p>")
-    else:
-        out.append("<table border='1' cellpadding='4' cellspacing='0'>")
-        out.append("<tr><th>Stage</th><th>Company</th><th>Deal Title</th>"
-                   "<th>Contact</th><th>Days Since Update</th>"
-                   "<th>Deal ID</th></tr>")
-        for r in to_close:
-            contact_html, _ = _people_cells(r["people"], r["company"])
-            side = _deal_side(r["deal"])
-            out.append(
-                "<tr>"
-                f"<td>{escape(r['stage'])}</td>"
-                f"<td>{escape(r['company'])}</td>"
-                f"<td>{escape(r['title'])}</td>"
-                f"<td>{contact_html}</td>"
-                f"<td>{r['days']}</td>"
-                f"<td>{_deal_id_cell(r['deal'], r['company'], side)}</td>"
-                "</tr>"
-            )
-        out.append("</table>")
-
-    out.append("<h2>D. To Invoice</h2>")
-    if not to_invoice:
-        out.append("<p>(No SPA-signed deals awaiting invoice.)</p>")
-    else:
-        out.append("<table border='1' cellpadding='4' cellspacing='0'>")
-        out.append("<tr><th>Company</th><th>Deal Title</th><th>Contact</th>"
-                   "<th>IQF</th><th>Days Since Update</th><th>Deal ID</th></tr>")
-        for r in to_invoice:
-            side = _deal_side(r["deal"])
-            contact_html, iqf_html = _people_cells(r["people"], r["company"], side)
-            out.append(
-                "<tr>"
-                f"<td>{escape(r['company'])}</td>"
-                f"<td>{escape(r['title'])}</td>"
-                f"<td>{contact_html}</td>"
-                f"<td>{iqf_html}</td>"
-                f"<td>{r['days']}</td>"
-                f"<td>{_deal_link(r['deal'])}</td>"
-                "</tr>"
-            )
         out.append("</table>")
 
     out.append("<h2>F. Leads to Revive</h2>")
