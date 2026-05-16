@@ -31,6 +31,8 @@ CF_MKT_BID = "custom_label_3997298"
 CF_IQF = "custom_label_3763008"
 CF_NEWSLETTER = "custom_label_3775335"
 CF_EMAIL_STATUS = "custom_label_2447206"
+CF_PERSON_BUY_INTERESTS = "custom_label_3322093"
+CF_PERSON_SELL_INTERESTS = "custom_label_3759156"
 
 OPT_SELL = 5011675
 OPT_BUY = 5077819
@@ -57,9 +59,9 @@ STRUCTURE_LABELS = {
 }
 
 IQF_LABELS = {
-    OPT_IQF_YES: "Yes",
-    OPT_IQF_PENDING: "Pending",
-    OPT_IQF_NO: "No",
+    OPT_IQF_YES: "✓",
+    OPT_IQF_PENDING: "…",
+    OPT_IQF_NO: "✗",
 }
 
 STAGE_FIRM = 111800
@@ -93,7 +95,7 @@ TO_CLOSE_AGED_STAGE = STAGE_TRANSFER_NOTICE
 TO_CLOSE_AGE_DAYS = 30
 
 NEG_DISTANCE_BG = "#d4edda"
-TIGHT_COLS = 9
+SECTION_GAP_HTML = '<div style="height: 24px;"></div>'
 
 
 def _cf(record, key):
@@ -189,6 +191,29 @@ def _deal_side(deal):
     return None
 
 
+def _deal_type(deal):
+    dt = deal.get("deal_type")
+    if isinstance(dt, dict):
+        dt = dt.get("name") or dt.get("type") or ""
+    return str(dt).strip().lower() if dt else ""
+
+
+def _buyer_seller_annotation(deal, person):
+    cid = _company_id(deal)
+    try:
+        cid_int = int(cid) if cid is not None else None
+    except (TypeError, ValueError):
+        cid_int = None
+    if person and cid_int is not None:
+        if cid_int in _cf_option_ids(person, CF_PERSON_BUY_INTERESTS):
+            return " (buyer)"
+        if cid_int in _cf_option_ids(person, CF_PERSON_SELL_INTERESTS):
+            return " (seller)"
+    if _deal_type(deal) == "sell":
+        return " (seller)"
+    return ""
+
+
 def _deal_structure_label(deal):
     return STRUCTURE_LABELS.get(_cf_option_id(deal, CF_STRUCTURE), "")
 
@@ -244,7 +269,7 @@ def _person_first_name(p):
 
 
 def _person_iqf(p):
-    return IQF_LABELS.get(_cf_option_id(p, CF_IQF), "—")
+    return IQF_LABELS.get(_cf_option_id(p, CF_IQF), "")
 
 
 def _person_email(p):
@@ -619,6 +644,7 @@ def _build_leads_to_revive(people, companies):
         rows_by_pid[pid] = {
             "reason": reason,
             "name": _person_full_name(p),
+            "iqf": _person_iqf(p),
             "person_id": pid,
             "linked_in_url": p.get("linked_in_url") or "",
             "company_name": co_name,
@@ -632,7 +658,7 @@ def _build_leads_to_revive(people, companies):
 
 def _render_html(crossed, tight, to_close, to_invoice, leads,
                  newsletter_recipient_count, leads_to_revive_count, date_str):
-    out = [f"<html><body><h1>Daily Brief — {escape(date_str)}</h1>"]
+    out = [f"<html><body><h1>Daily Brief -- {escape(date_str)}</h1>"]
 
     out.append("<h2>A. INVOICE: Get paid and win deal</h2>")
     if not to_invoice:
@@ -662,10 +688,10 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
     else:
         out.append("<table border='1' cellpadding='4' cellspacing='0'>")
         out.append("<tr><th>Stage</th><th>Company</th><th>Deal Title</th>"
-                   "<th>Contact</th><th>Days Since Update</th>"
+                   "<th>Contact</th><th>IQF</th><th>Days Since Update</th>"
                    "<th>Deal ID</th></tr>")
         for r in to_close:
-            contact_html, _ = _people_cells(r["people"], r["company"])
+            contact_html, iqf_html = _people_cells(r["people"], r["company"])
             side = _deal_side(r["deal"])
             out.append(
                 "<tr>"
@@ -673,6 +699,7 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
                 f"<td>{escape(r['company'])}</td>"
                 f"<td>{escape(r['title'])}</td>"
                 f"<td>{contact_html}</td>"
+                f"<td>{iqf_html}</td>"
                 f"<td>{r['days']}</td>"
                 f"<td>{_deal_id_cell(r['deal'], r['company'], side)}</td>"
                 "</tr>"
@@ -689,17 +716,27 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
                    "<th>Sell</th><th>Sell Contact</th><th>Sell Deal ID</th>"
                    "<th>% Diff</th></tr>")
         for r in crossed:
-            bn, be = _person_name_email(_primary_contact(r["buy_deal"]))
-            sn, se = _person_name_email(_primary_contact(r["sell_deal"]))
+            b_pc = _primary_contact(r["buy_deal"])
+            s_pc = _primary_contact(r["sell_deal"])
+            bn, be = _person_name_email(b_pc)
+            sn, se = _person_name_email(s_pc)
+            b_iqf = _person_iqf(b_pc)
+            s_iqf = _person_iqf(s_pc)
+            buy_contact = _contact_cell(bn, be, r['company'], 'BUY')
+            if b_iqf:
+                buy_contact = f"{buy_contact} {escape(b_iqf)}"
+            sell_contact = _contact_cell(sn, se, r['company'], 'SELL')
+            if s_iqf:
+                sell_contact = f"{sell_contact} {escape(s_iqf)}"
             out.append(
                 "<tr>"
                 f"<td>{escape(r['company'])}</td>"
                 f"<td>{escape(r['structure'])}</td>"
                 f"<td>{escape(_fmt_price(r['buy_price']))}</td>"
-                f"<td>{_contact_cell(bn, be, r['company'], 'BUY')}</td>"
+                f"<td>{buy_contact}</td>"
                 f"<td>{_deal_id_cell(r['buy_deal'], r['company'], 'BUY')}</td>"
                 f"<td>{escape(_fmt_price(r['sell_price']))}</td>"
-                f"<td>{_contact_cell(sn, se, r['company'], 'SELL')}</td>"
+                f"<td>{sell_contact}</td>"
                 f"<td>{_deal_id_cell(r['sell_deal'], r['company'], 'SELL')}</td>"
                 f"<td>{r['pct']:+.2f}%</td>"
                 "</tr>"
@@ -707,41 +744,50 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
         out.append("</table>")
 
     out.append("<h2>D. EXPLORE: Update or engage close matches</h2>")
+    tight_groups = [
+        ("SELL", [r for r in tight if r["side"] == "SELL"]),
+        ("BUY", [r for r in tight if r["side"] == "BUY"]),
+    ]
     if not tight:
         out.append("<p>(None)</p>")
     else:
-        out.append("<table border='1' cellpadding='4' cellspacing='0'>")
-        out.append("<tr><th>Company</th><th>Side</th><th>Stage</th>"
-                   "<th>Structure</th><th>Your Price</th><th>Marketplace</th>"
-                   "<th>% Distance</th><th>Contact</th><th>Deal ID</th></tr>")
-        prev_side = None
-        for r in tight:
-            if prev_side == "SELL" and r["side"] == "BUY":
-                out.append(
-                    f'<tr><td colspan="{TIGHT_COLS}" '
-                    'style="border-top: 3px solid #000; height: 0; padding: 0;">'
-                    '</td></tr>'
+        for idx, (_, group) in enumerate(tight_groups):
+            if not group:
+                continue
+            if idx > 0:
+                out.append(SECTION_GAP_HTML)
+            out.append("<table border='1' cellpadding='4' cellspacing='0'>")
+            out.append("<tr><th>Company</th><th>Side</th><th>Stage</th>"
+                       "<th>Structure</th><th>Your Price</th><th>Marketplace</th>"
+                       "<th>% Distance</th><th>Contact</th><th>IQF</th>"
+                       "<th>Deal ID</th></tr>")
+            for r in group:
+                pc = _primary_contact(r["deal"])
+                n, e = _person_name_email(pc)
+                iqf_sym = _person_iqf(pc)
+                contact_html = _contact_cell(n, e, r['company'], r['side'])
+                annotation = _buyer_seller_annotation(r["deal"], pc)
+                if annotation:
+                    contact_html = f"{contact_html}{escape(annotation)}"
+                dist_style = (
+                    f' style="background-color:{NEG_DISTANCE_BG}"'
+                    if r["distance"] < 0 else ""
                 )
-            n, e = _person_name_email(_primary_contact(r["deal"]))
-            dist_style = (
-                f' style="background-color:{NEG_DISTANCE_BG}"'
-                if r["distance"] < 0 else ""
-            )
-            out.append(
-                "<tr>"
-                f"<td>{escape(r['company'])}</td>"
-                f"<td>{escape(r['side'])}</td>"
-                f"<td>{escape(r['stage'])}</td>"
-                f"<td>{escape(r['structure'])}</td>"
-                f"<td>{escape(_fmt_price(r['your_price']))}</td>"
-                f"<td>{escape(_fmt_price(r['marketplace_price']))}</td>"
-                f"<td{dist_style}>{r['distance'] * 100:+.2f}%</td>"
-                f"<td>{_contact_cell(n, e, r['company'], r['side'])}</td>"
-                f"<td>{_deal_id_cell(r['deal'], r['company'], r['side'])}</td>"
-                "</tr>"
-            )
-            prev_side = r["side"]
-        out.append("</table>")
+                out.append(
+                    "<tr>"
+                    f"<td>{escape(r['company'])}</td>"
+                    f"<td>{escape(r['side'])}</td>"
+                    f"<td>{escape(r['stage'])}</td>"
+                    f"<td>{escape(r['structure'])}</td>"
+                    f"<td>{escape(_fmt_price(r['your_price']))}</td>"
+                    f"<td>{escape(_fmt_price(r['marketplace_price']))}</td>"
+                    f"<td{dist_style}>{r['distance'] * 100:+.2f}%</td>"
+                    f"<td>{contact_html}</td>"
+                    f"<td>{escape(iqf_sym)}</td>"
+                    f"<td>{_deal_id_cell(r['deal'], r['company'], r['side'])}</td>"
+                    "</tr>"
+                )
+            out.append("</table>")
 
     out.append("<h2>F. Leads to Revive</h2>")
     out.append(f"<p>Total Newsletter Recipients: {newsletter_recipient_count}</p>")
@@ -750,8 +796,8 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
         out.append("<p>(No leads to revive — clean book!)</p>")
     else:
         out.append("<table border='1' cellpadding='4' cellspacing='0'>")
-        out.append("<tr><th>Reason</th><th>Name</th><th>Pipeline</th>"
-                   "<th>LinkedIn</th><th>Company</th></tr>")
+        out.append("<tr><th>Reason</th><th>Name</th><th>IQF</th>"
+                   "<th>Pipeline</th><th>LinkedIn</th><th>Company</th></tr>")
         for r in leads:
             person_href = PIPELINE_PERSON_URL.format(
                 escape(str(r["person_id"]), quote=True)
@@ -777,6 +823,7 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
                 "<tr>"
                 f"<td>{escape(r['reason'])}</td>"
                 f"<td>{escape(r['name'])}</td>"
+                f"<td>{escape(r['iqf'])}</td>"
                 f"<td>{pipeline_cell}</td>"
                 f"<td>{li_cell}</td>"
                 f"<td>{co_cell}</td>"
@@ -790,7 +837,7 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
 
 def lambda_handler(event, context):
     now = datetime.now(timezone.utc)
-    date_str = now.strftime("%Y-%m-%d UTC")
+    date_str = f"{now:%B} {now.day}, {now.year}"
 
     s3 = boto3.client("s3", region_name=S3_REGION)
     deals_doc = _fetch_json(s3, "deals.json")
@@ -813,7 +860,7 @@ def lambda_handler(event, context):
         crossed, tight, to_close, to_invoice, leads,
         newsletter_recipient_count, leads_to_revive_count, date_str,
     )
-    subject = f"Daily Brief — {date_str}"
+    subject = f"Daily Brief -- {date_str}"
 
     ses = boto3.client("ses", region_name=SES_REGION)
     resp = ses.send_email(
