@@ -436,6 +436,17 @@ def _deal_title_link(deal):
     return f'<a href="{href}" style="{LINK_STYLE_500}">{escape(title)}</a>'
 
 
+def _resolve_person(snapshot, people_by_id):
+    if not isinstance(snapshot, dict):
+        return {}
+    if not people_by_id:
+        return snapshot
+    pid = _normalize_id(snapshot.get("id"))
+    if pid is None:
+        return snapshot
+    return people_by_id.get(pid) or snapshot
+
+
 def _envelope_link(email):
     if not email:
         return ""
@@ -447,23 +458,14 @@ def _envelope_link(email):
     )
 
 
-def _contact_cell(name, email, company=None, side=None):
-    if not email:
-        return escape(name) if name else ""
-    label = name or email
-    if company and side:
-        subject = f"Re: Your {company} {side} order"
-    elif company:
-        subject = f"Re: Your {company} order"
-    else:
-        subject = ""
-    href = f"mailto:{quote(email, safe='@')}"
-    if subject:
-        href += f"?subject={quote(subject)}"
-    return (
-        f'<a href="{escape(href, quote=True)}" style="{LINK_STYLE_500}">'
-        f'{escape(label)}</a>'
-    )
+def _contact_cell(name, email=None, person_id=None):
+    label = name or email or ""
+    if not label:
+        return ""
+    if person_id in (None, ""):
+        return escape(label)
+    href = PIPELINE_PERSON_URL.format(escape(str(person_id), quote=True))
+    return f'<a href="{href}" style="{LINK_STYLE_500}">{escape(label)}</a>'
 
 
 def _colorize_symbol(sym):
@@ -476,13 +478,13 @@ def _colorize_symbol(sym):
     return escape(sym)
 
 
-def _people_cells(people, company, side=None, deal=None):
+def _people_cells(people, deal=None):
     entries = []
     for p in people:
         n, e = _person_name_email(p)
         if not n and not e:
             continue
-        contact_link = _contact_cell(n, e, company, side)
+        contact_link = _contact_cell(n, email=e, person_id=p.get("id"))
         annotation = _buyer_seller_annotation(deal, p) if deal is not None else ""
         envelope = _envelope_link(e)
         cell = contact_link
@@ -560,7 +562,7 @@ def _ticket_compat(buy, sell):
     return (gap / max_size) <= TICKET_TOLERANCE
 
 
-def _build_crossed(deals):
+def _build_crossed(deals, people_by_id):
     by_co = {}
     for d in deals:
         if _stage_id(d) != STAGE_FIRM:
@@ -603,8 +605,14 @@ def _build_crossed(deals):
                         "structure": STRUCTURE_LABELS[buy_struct],
                         "buy_price": g,
                         "buy_deal": buy,
+                        "buy_primary": _resolve_person(
+                            _primary_contact(buy), people_by_id
+                        ),
                         "sell_price": n,
                         "sell_deal": sell,
+                        "sell_primary": _resolve_person(
+                            _primary_contact(sell), people_by_id
+                        ),
                         "pct": pct,
                     }
         if best:
@@ -613,7 +621,7 @@ def _build_crossed(deals):
     return rows
 
 
-def _build_tight(deals, companies):
+def _build_tight(deals, companies, people_by_id):
     co_by_id = {c.get("id"): c for c in companies if c.get("id") is not None}
     rows = []
     for d in deals:
@@ -644,6 +652,7 @@ def _build_tight(deals, companies):
                     "marketplace_price": ask,
                     "distance": dist,
                     "deal": d,
+                    "primary": _resolve_person(_primary_contact(d), people_by_id),
                 })
         elif side == "SELL":
             bid = _cf_number(co, CF_MKT_BID)
@@ -661,6 +670,7 @@ def _build_tight(deals, companies):
                     "marketplace_price": bid,
                     "distance": dist,
                     "deal": d,
+                    "primary": _resolve_person(_primary_contact(d), people_by_id),
                 })
     rows.sort(key=lambda r: (0 if r["side"] == "SELL" else 1, r["distance"]))
     return rows
@@ -778,10 +788,7 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
             "Company", "Deal Title", "Contact", "IQF", "Days Since Update",
         ]))
         for r in to_invoice:
-            side = _deal_side(r["deal"])
-            contact_html, iqf_html = _people_cells(
-                r["people"], r["company"], side, deal=r["deal"]
-            )
+            contact_html, iqf_html = _people_cells(r["people"], deal=r["deal"])
             out.append(
                 "<tr>"
                 + _td(escape(r["company"]))
@@ -804,10 +811,7 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
             "Agent Agreement", "Days Since Update",
         ]))
         for r in to_close:
-            side = _deal_side(r["deal"])
-            contact_html, iqf_html = _people_cells(
-                r["people"], r["company"], side, deal=r["deal"]
-            )
+            contact_html, iqf_html = _people_cells(r["people"], deal=r["deal"])
             out.append(
                 "<tr>"
                 + _td(escape(r["stage"]))
@@ -833,13 +837,13 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
             "% Diff",
         ]))
         for r in crossed:
-            b_pc = _primary_contact(r["buy_deal"])
-            s_pc = _primary_contact(r["sell_deal"])
+            b_pc = r["buy_primary"]
+            s_pc = r["sell_primary"]
             bn, be = _person_name_email(b_pc)
             sn, se = _person_name_email(s_pc)
             b_iqf = _colorize_symbol(_person_iqf(b_pc))
             s_iqf = _colorize_symbol(_person_iqf(s_pc))
-            buy_contact = _contact_cell(bn, be, r["company"], "BUY")
+            buy_contact = _contact_cell(bn, email=be, person_id=b_pc.get("id"))
             buy_annot = _buyer_seller_annotation(r["buy_deal"], b_pc)
             if buy_annot:
                 buy_contact = f"{buy_contact}{escape(buy_annot)}"
@@ -848,7 +852,7 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
                 buy_contact = f"{buy_contact}{be_env}"
             if b_iqf:
                 buy_contact = f"{buy_contact} {b_iqf}"
-            sell_contact = _contact_cell(sn, se, r["company"], "SELL")
+            sell_contact = _contact_cell(sn, email=se, person_id=s_pc.get("id"))
             sell_annot = _buyer_seller_annotation(r["sell_deal"], s_pc)
             if sell_annot:
                 sell_contact = f"{sell_contact}{escape(sell_annot)}"
@@ -903,11 +907,11 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
             out.append(_open_table())
             out.append(_header_row(labels))
             for r in group:
-                pc = _primary_contact(r["deal"])
+                pc = r["primary"]
                 n, e = _person_name_email(pc)
                 iqf_html = _colorize_symbol(_person_iqf(pc))
                 cef_html = _colorize_symbol(_person_cef(pc))
-                contact_html = _contact_cell(n, e, r["company"], r["side"])
+                contact_html = _contact_cell(n, email=e, person_id=pc.get("id"))
                 annotation = _buyer_seller_annotation(r["deal"], pc)
                 if annotation:
                     contact_html = f"{contact_html}{escape(annotation)}"
@@ -1004,8 +1008,8 @@ def lambda_handler(event, context):
         if nid is not None:
             people_by_id[nid] = p
 
-    crossed = _build_crossed(deals)
-    tight = _build_tight(deals, companies)
+    crossed = _build_crossed(deals, people_by_id)
+    tight = _build_tight(deals, companies, people_by_id)
     to_close = _build_to_close(deals, now, people_by_id)
     to_invoice = _build_to_invoice(deals, now, people_by_id)
     leads = _build_leads_to_revive(people, companies)
