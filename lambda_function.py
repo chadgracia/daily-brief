@@ -109,7 +109,7 @@ BODY_STYLE = (
     f"font-family:{FONT_STACK}; margin:0; padding:0; background:#ffffff;"
     " color:#1f2937; font-size:14px; line-height:1.5;"
 )
-CONTAINER_STYLE = "max-width:720px; margin:0 auto; padding:24px;"
+CONTAINER_STYLE = "max-width:960px; margin:0 auto; padding:24px;"
 H1_STYLE = (
     "font-size:22px; font-weight:bold; color:#111827; margin:0 0 24px 0;"
 )
@@ -124,7 +124,7 @@ SUB_SUMMARY_STYLE = (
 TABLE_STYLE = "width:100%; border-collapse:collapse; table-layout:fixed;"
 TH_BASE = (
     "background:#f9fafb; font-weight:600; font-size:12px;"
-    " text-transform:uppercase; letter-spacing:0.03em; color:#6b7280;"
+    " color:#6b7280;"
     " padding:8px 10px; text-align:left;"
     " border-bottom:1px solid #f3f4f6;"
     " word-wrap:break-word; overflow-wrap:break-word;"
@@ -414,6 +414,15 @@ def _deal_link(deal):
     return f'<a href="{href}" style="{LINK_STYLE}">{escape(s)}</a>'
 
 
+def _deal_title_link(deal):
+    title = _deal_title(deal)
+    did = deal.get("id")
+    if did in (None, ""):
+        return escape(title)
+    href = PIPELINE_DEAL_URL.format(escape(str(did), quote=True))
+    return f'<a href="{href}" style="{LINK_STYLE_500}">{escape(title)}</a>'
+
+
 def _make_token(deal_id):
     msg = str(deal_id).encode()
     sig = hmac.new(CONFIRM_SECRET, msg, hashlib.sha256).digest()
@@ -491,17 +500,29 @@ def _colorize_symbol(sym):
 
 
 def _people_cells(people, company, side=None):
-    contacts = []
-    iqfs = []
+    entries = []
     for p in people:
         n, e = _person_name_email(p)
         if not n and not e:
             continue
-        contacts.append(_contact_cell(n, e, company, side))
-        iqfs.append(_colorize_symbol(_person_iqf(p)))
-    contact_html = "<br>".join(contacts) if contacts else ""
-    iqf_html = "<br>".join(iqfs) if iqfs else ""
-    return contact_html, iqf_html
+        entries.append((
+            _contact_cell(n, e, company, side),
+            _colorize_symbol(_person_iqf(p)),
+        ))
+    if not entries:
+        return "", ""
+    last = len(entries) - 1
+    contact_parts = []
+    iqf_parts = []
+    for i, (c, q) in enumerate(entries):
+        mb = "0" if i == last else "8px"
+        contact_parts.append(
+            f'<div style="margin-bottom:{mb}; white-space:nowrap;">{c}</div>'
+        )
+        iqf_parts.append(
+            f'<div style="margin-bottom:{mb};">{q}</div>'
+        )
+    return "".join(contact_parts), "".join(iqf_parts)
 
 
 def _commission_cell(deal):
@@ -666,18 +687,14 @@ def _build_tight(deals, companies):
 def _build_to_close(deals, now, people_by_id):
     rows = []
     for d in deals:
-        sid = _stage_id(d)
-        if sid not in TO_CLOSE_ALL_STAGES and sid != TO_CLOSE_AGED_STAGE:
+        if _stage_id(d) != STAGE_MATCHED:
             continue
         days = _days_since(_parse_dt(d.get("updated_at")), now)
         days = days if days is not None else 0
-        if sid == TO_CLOSE_AGED_STAGE and days < TO_CLOSE_AGE_DAYS:
-            continue
         max_s = _cf_number(d, CF_TICKET_MAX)
         min_s = _cf_number(d, CF_TICKET_MIN)
         size = max_s if max_s is not None else min_s
         rows.append({
-            "stage": STAGE_LABELS.get(sid, str(sid)),
             "title": _deal_title(d),
             "company": _company_name(d),
             "people": _deal_people(d, people_by_id),
@@ -772,8 +789,7 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
     else:
         out.append(_open_table())
         out.append(_header_row([
-            "Company", "Deal Title", "Contact", "IQF",
-            "Days Since Update", "Deal ID",
+            "Company", "Deal Title", "Contact", "IQF", "Days Since Update",
         ]))
         for r in to_invoice:
             side = _deal_side(r["deal"])
@@ -781,38 +797,37 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
             out.append(
                 "<tr>"
                 + _td(escape(r["company"]))
-                + _td(escape(r["title"]))
+                + _td(_deal_title_link(r["deal"]))
                 + _td(contact_html)
                 + _td(iqf_html)
                 + _td(f"{r['days']}")
-                + _td(_deal_link(r["deal"]))
                 + "</tr>"
             )
         out.append("</table>")
 
     # ── B. CLOSE ──────────────────────────────────────────────────────────
-    out.append(_section_heading("B. CLOSE: Move toward finish line"))
+    out.append(_section_heading("B. CLOSE: Move matched deals toward finish line"))
     if not to_close:
         out.append(_muted_p("(Nothing to close.)"))
     else:
         out.append(_open_table())
         out.append(_header_row([
-            "Stage", "Company", "Deal Title", "Contact", "IQF",
-            "Commission?", "Days Since Update", "Deal ID",
+            "Deal Title", "Contact", "IQF",
+            "Commission?", "Days Since Update",
         ]))
         for r in to_close:
             contact_html, iqf_html = _people_cells(r["people"], r["company"])
             side = _deal_side(r["deal"])
+            title_link = _deal_title_link(r["deal"])
+            confirm = _confirm_email_link(r["deal"], r["company"], side)
+            title_cell = f"{title_link} {confirm}" if confirm else title_link
             out.append(
                 "<tr>"
-                + _td(escape(r["stage"]))
-                + _td(escape(r["company"]))
-                + _td(escape(r["title"]))
+                + _td(title_cell)
                 + _td(contact_html)
                 + _td(iqf_html)
                 + _td(_commission_cell(r["deal"]))
                 + _td(f"{r['days']}")
-                + _td(_deal_id_cell(r["deal"], r["company"], side))
                 + "</tr>"
             )
         out.append("</table>")
@@ -876,13 +891,13 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
             if side_key == "BUY":
                 labels = [
                     "Company", "Side", "Stage", "Structure",
-                    "Your Bid", "Market Ask", "% Distance",
+                    "Your Bid", "Market Ask", "% Diff",
                     "Contact", "IQF", "Deal ID",
                 ]
             else:
                 labels = [
                     "Company", "Side", "Stage", "Structure",
-                    "Your Offer", "Market Bid", "% Distance",
+                    "Your Offer", "Market Bid", "% Diff",
                     "Contact", "IQF", "Deal ID",
                 ]
             out.append(_open_table())
