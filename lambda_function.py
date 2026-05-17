@@ -189,7 +189,12 @@ def _cf_option_ids(record, key):
     out = set()
     for item in items:
         if isinstance(item, dict):
-            raw = item.get("option_id") or item.get("id") or item.get("value")
+            raw = (
+                item.get("option_id")
+                or item.get("id")
+                or item.get("company_id")
+                or item.get("value")
+            )
         else:
             raw = item
         if raw is None:
@@ -265,7 +270,10 @@ def _buyer_seller_annotation(deal, person):
             return " (b)"
         if cid in _cf_option_ids(person, CF_PERSON_SELL_INTERESTS):
             return " (s)"
-    if _deal_type(deal) == "sell":
+    # No buy-side fallback per spec; sell-side falls back to either the
+    # custom-field deal side (canonical for this org) or the built-in
+    # deal_type string.
+    if _deal_side(deal) == "SELL" or _deal_type(deal) == "sell":
         return " (s)"
     return ""
 
@@ -1011,6 +1019,28 @@ def lambda_handler(event, context):
     crossed = _build_crossed(deals, people_by_id)
     tight = _build_tight(deals, companies, people_by_id)
     to_close = _build_to_close(deals, now, people_by_id)
+    # TEMP DEBUG — verify (b)/(s) annotation + days-since for Section B.
+    # Remove once the cause is confirmed.
+    for r in to_close[:3]:
+        d = r["deal"]
+        raw_updated = d.get("updated_at")
+        parsed_updated = _parse_dt(raw_updated)
+        print(f"[B-DEBUG] deal_id={d.get('id')} stage={r['stage']!r} "
+              f"deal_type={d.get('deal_type')!r} ({type(d.get('deal_type')).__name__}) "
+              f"_deal_side={_deal_side(d)!r} _deal_type={_deal_type(d)!r} "
+              f"company_id={_company_id(d)} "
+              f"raw_updated_at={raw_updated!r} parsed={parsed_updated} "
+              f"days={r['days']}")
+        for p in r["people"]:
+            ann = _buyer_seller_annotation(d, p)
+            raw_buy = _cf(p, CF_PERSON_BUY_INTERESTS)
+            raw_sell = _cf(p, CF_PERSON_SELL_INTERESTS)
+            print(f"[B-DEBUG]   person_id={p.get('id')} name={p.get('first_name')!r} "
+                  f"raw_buy={raw_buy!r} raw_sell={raw_sell!r} "
+                  f"buy_ids={_cf_option_ids(p, CF_PERSON_BUY_INTERESTS)} "
+                  f"sell_ids={_cf_option_ids(p, CF_PERSON_SELL_INTERESTS)} "
+                  f"-> annotation={ann!r}")
+
     to_invoice = _build_to_invoice(deals, now, people_by_id)
     leads = _build_leads_to_revive(people, companies)
     leads_to_revive_count = len(leads)
