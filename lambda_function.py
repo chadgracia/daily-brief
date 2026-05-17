@@ -1,6 +1,3 @@
-import base64
-import hashlib
-import hmac
 import json
 from datetime import datetime, timezone
 from html import escape
@@ -17,8 +14,6 @@ TO_ADDRS = ["cgracia@rainmakersecurities.com", "kate@graciagroup.com"]
 
 PIPELINE_DEAL_URL = "https://app.pipelinecrm.com/deals/{}"
 PIPELINE_PERSON_URL = "https://app.pipelinecrm.com/people/{}"
-CONFIRM_URL = "https://s5qv2qkmjt2qejliwchvqukseq0wgwff.lambda-url.us-east-1.on.aws"
-CONFIRM_SECRET = b"trade-update"
 
 CF_DEAL_SIDE = "custom_label_1958"
 CF_GROSS = "custom_label_3064339"
@@ -29,6 +24,7 @@ CF_TICKET_MAX = "custom_label_3064645"
 CF_MKT_ASK = "custom_label_3997297"
 CF_MKT_BID = "custom_label_3997298"
 CF_IQF = "custom_label_3763008"
+CF_CEF = "custom_label_3796440"
 CF_NEWSLETTER = "custom_label_3775335"
 CF_EMAIL_STATUS = "custom_label_2447206"
 CF_PERSON_BUY_INTERESTS = "custom_label_3322093"
@@ -42,6 +38,10 @@ OPT_STRUCT_FUND = 5077906
 OPT_IQF_YES = 6496840
 OPT_IQF_PENDING = 6496842
 OPT_IQF_NO = 6496841
+OPT_CEF_YES = 6600515
+OPT_CEF_PENDING = 6600514
+OPT_CEF_NO = 6600513
+OPT_CEF_NA = 6600516
 OPT_AGENT_YES_BUYSIDE = 6354274
 OPT_AGENT_YES_SELLSIDE = 6354277
 
@@ -67,6 +67,13 @@ IQF_LABELS = {
     OPT_IQF_YES: "✓",
     OPT_IQF_PENDING: "…",
     OPT_IQF_NO: "✗",
+}
+
+CEF_LABELS = {
+    OPT_CEF_YES: "✓",
+    OPT_CEF_PENDING: "…",
+    OPT_CEF_NO: "✗",
+    OPT_CEF_NA: "✗",
 }
 
 STAGE_FIRM = 111800
@@ -250,14 +257,16 @@ def _deal_type(deal):
 
 
 def _buyer_seller_annotation(deal, person):
+    if deal is None:
+        return ""
     cid = _normalize_id(_company_id(deal))
     if person and cid is not None:
         if cid in _cf_option_ids(person, CF_PERSON_BUY_INTERESTS):
-            return " (buyer)"
+            return " (b)"
         if cid in _cf_option_ids(person, CF_PERSON_SELL_INTERESTS):
-            return " (seller)"
+            return " (s)"
     if _deal_type(deal) == "sell":
-        return " (seller)"
+        return " (s)"
     return ""
 
 
@@ -317,6 +326,10 @@ def _person_first_name(p):
 
 def _person_iqf(p):
     return IQF_LABELS.get(_cf_option_id(p, CF_IQF), "")
+
+
+def _person_cef(p):
+    return CEF_LABELS.get(_cf_option_id(p, CF_CEF), "")
 
 
 def _person_email(p):
@@ -423,51 +436,15 @@ def _deal_title_link(deal):
     return f'<a href="{href}" style="{LINK_STYLE_500}">{escape(title)}</a>'
 
 
-def _make_token(deal_id):
-    msg = str(deal_id).encode()
-    sig = hmac.new(CONFIRM_SECRET, msg, hashlib.sha256).digest()
-    return base64.urlsafe_b64encode(sig).decode().rstrip("=")
-
-
-def _confirm_email_link(deal, company, side):
-    did = deal.get("id")
-    if did in (None, ""):
-        return ""
-    pc = _primary_contact(deal)
-    _, email = _person_name_email(pc)
+def _envelope_link(email):
     if not email:
         return ""
-    first_name = _person_first_name(pc)
-    token = _make_token(did)
-    url = f"{CONFIRM_URL}?deal_id={quote(str(did))}&token={quote(token)}"
-    subject = (
-        f"Confirming your {company} {side} order"
-        if side else f"Confirming your {company} order"
-    )
-    body = (
-        f"Hello {first_name},\n\n"
-        "Can you let me know if this deal is still valid? If so, we may "
-        "have a match. Please confirm the terms here:\n\n"
-        f"{url}\n\n"
-        "Thanks,\n"
-        "Chad"
-    )
-    href = (
-        f"mailto:{quote(email, safe='@')}"
-        f"?subject={quote(subject)}&body={quote(body)}"
-    )
+    href = f"mailto:{quote(email, safe='@')}"
     return (
-        f'<a href="{escape(href, quote=True)}" style="{LINK_STYLE}"'
-        ' title="Send confirmation email">✉</a>'
+        f'<a href="{escape(href, quote=True)}"'
+        ' style="color:#2563eb; text-decoration:none; margin-left:6px;"'
+        ' title="Email">✉</a>'
     )
-
-
-def _deal_id_cell(deal, company, side):
-    link = _deal_link(deal)
-    confirm = _confirm_email_link(deal, company, side)
-    if confirm:
-        return f"{link} {confirm}" if link else confirm
-    return link
 
 
 def _contact_cell(name, email, company=None, side=None):
@@ -499,16 +476,21 @@ def _colorize_symbol(sym):
     return escape(sym)
 
 
-def _people_cells(people, company, side=None):
+def _people_cells(people, company, side=None, deal=None):
     entries = []
     for p in people:
         n, e = _person_name_email(p)
         if not n and not e:
             continue
-        entries.append((
-            _contact_cell(n, e, company, side),
-            _colorize_symbol(_person_iqf(p)),
-        ))
+        contact_link = _contact_cell(n, e, company, side)
+        annotation = _buyer_seller_annotation(deal, p) if deal is not None else ""
+        envelope = _envelope_link(e)
+        cell = contact_link
+        if annotation:
+            cell = f"{cell}{escape(annotation)}"
+        if envelope:
+            cell = f"{cell}{envelope}"
+        entries.append((cell, _colorize_symbol(_person_iqf(p))))
     if not entries:
         return "", ""
     last = len(entries) - 1
@@ -793,7 +775,9 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
         ]))
         for r in to_invoice:
             side = _deal_side(r["deal"])
-            contact_html, iqf_html = _people_cells(r["people"], r["company"], side)
+            contact_html, iqf_html = _people_cells(
+                r["people"], r["company"], side, deal=r["deal"]
+            )
             out.append(
                 "<tr>"
                 + _td(escape(r["company"]))
@@ -813,17 +797,16 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
         out.append(_open_table())
         out.append(_header_row([
             "Deal Title", "Contact", "IQF",
-            "Commission?", "Days Since Update",
+            "Agent Agreement", "Days Since Update",
         ]))
         for r in to_close:
-            contact_html, iqf_html = _people_cells(r["people"], r["company"])
             side = _deal_side(r["deal"])
-            title_link = _deal_title_link(r["deal"])
-            confirm = _confirm_email_link(r["deal"], r["company"], side)
-            title_cell = f"{title_link} {confirm}" if confirm else title_link
+            contact_html, iqf_html = _people_cells(
+                r["people"], r["company"], side, deal=r["deal"]
+            )
             out.append(
                 "<tr>"
-                + _td(title_cell)
+                + _td(_deal_title_link(r["deal"]))
                 + _td(contact_html)
                 + _td(iqf_html)
                 + _td(_commission_cell(r["deal"]))
@@ -852,9 +835,21 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
             b_iqf = _colorize_symbol(_person_iqf(b_pc))
             s_iqf = _colorize_symbol(_person_iqf(s_pc))
             buy_contact = _contact_cell(bn, be, r["company"], "BUY")
+            buy_annot = _buyer_seller_annotation(r["buy_deal"], b_pc)
+            if buy_annot:
+                buy_contact = f"{buy_contact}{escape(buy_annot)}"
+            be_env = _envelope_link(be)
+            if be_env:
+                buy_contact = f"{buy_contact}{be_env}"
             if b_iqf:
                 buy_contact = f"{buy_contact} {b_iqf}"
             sell_contact = _contact_cell(sn, se, r["company"], "SELL")
+            sell_annot = _buyer_seller_annotation(r["sell_deal"], s_pc)
+            if sell_annot:
+                sell_contact = f"{sell_contact}{escape(sell_annot)}"
+            se_env = _envelope_link(se)
+            if se_env:
+                sell_contact = f"{sell_contact}{se_env}"
             if s_iqf:
                 sell_contact = f"{sell_contact} {s_iqf}"
             out.append(
@@ -863,10 +858,10 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
                 + _td(escape(r["structure"]))
                 + _td(escape(_fmt_price(r["buy_price"])))
                 + _td(buy_contact)
-                + _td(_deal_id_cell(r["buy_deal"], r["company"], "BUY"))
+                + _td(_deal_link(r["buy_deal"]))
                 + _td(escape(_fmt_price(r["sell_price"])))
                 + _td(sell_contact)
-                + _td(_deal_id_cell(r["sell_deal"], r["company"], "SELL"))
+                + _td(_deal_link(r["sell_deal"]))
                 + _td(f"{r['pct']:+.2f}%")
                 + "</tr>"
             )
@@ -890,15 +885,15 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
             rendered_any = True
             if side_key == "BUY":
                 labels = [
-                    "Company", "Side", "Stage", "Structure",
+                    "Deal Title", "Stage", "Structure",
                     "Your Bid", "Market Ask", "% Diff",
-                    "Contact", "IQF", "Deal ID",
+                    "Contact", "IQF", "CEF",
                 ]
             else:
                 labels = [
-                    "Company", "Side", "Stage", "Structure",
+                    "Deal Title", "Stage", "Structure",
                     "Your Offer", "Market Bid", "% Diff",
-                    "Contact", "IQF", "Deal ID",
+                    "Contact", "IQF", "CEF",
                 ]
             out.append(_open_table())
             out.append(_header_row(labels))
@@ -906,18 +901,21 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
                 pc = _primary_contact(r["deal"])
                 n, e = _person_name_email(pc)
                 iqf_html = _colorize_symbol(_person_iqf(pc))
+                cef_html = _colorize_symbol(_person_cef(pc))
                 contact_html = _contact_cell(n, e, r["company"], r["side"])
                 annotation = _buyer_seller_annotation(r["deal"], pc)
                 if annotation:
                     contact_html = f"{contact_html}{escape(annotation)}"
+                env = _envelope_link(e)
+                if env:
+                    contact_html = f"{contact_html}{env}"
                 dist_extra = (
                     f" background-color:{NEG_DISTANCE_BG};"
                     if r["distance"] < 0 else ""
                 )
                 out.append(
                     "<tr>"
-                    + _td(escape(r["company"]))
-                    + _td(escape(r["side"]))
+                    + _td(_deal_title_link(r["deal"]))
                     + _td(escape(r["stage"]))
                     + _td(escape(r["structure"]))
                     + _td(escape(_fmt_price(r["your_price"])))
@@ -925,7 +923,7 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
                     + _td(f"{r['distance'] * 100:+.2f}%", extra=dist_extra)
                     + _td(contact_html)
                     + _td(iqf_html)
-                    + _td(_deal_id_cell(r["deal"], r["company"], r["side"]))
+                    + _td(cef_html)
                     + "</tr>"
                 )
             out.append("</table>")
