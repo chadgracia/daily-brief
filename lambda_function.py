@@ -464,7 +464,7 @@ def _deal_id_cell(deal, company, side):
 def _contact_cell(name, email, company=None, side=None):
     if not email:
         return escape(name) if name else ""
-    label = f"{name} <{email}>" if name else f"<{email}>"
+    label = name or email
     if company and side:
         subject = f"Re: Your {company} {side} order"
     elif company:
@@ -475,7 +475,7 @@ def _contact_cell(name, email, company=None, side=None):
     if subject:
         href += f"?subject={quote(subject)}"
     return (
-        f'<a href="{escape(href, quote=True)}" style="{LINK_STYLE}">'
+        f'<a href="{escape(href, quote=True)}" style="{LINK_STYLE_500}">'
         f'{escape(label)}</a>'
     )
 
