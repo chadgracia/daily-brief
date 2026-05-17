@@ -669,14 +669,18 @@ def _build_tight(deals, companies):
 def _build_to_close(deals, now, people_by_id):
     rows = []
     for d in deals:
-        if _stage_id(d) != STAGE_MATCHED:
+        sid = _stage_id(d)
+        if sid not in TO_CLOSE_ALL_STAGES and sid != TO_CLOSE_AGED_STAGE:
             continue
         days = _days_since(_parse_dt(d.get("updated_at")), now)
         days = days if days is not None else 0
+        if sid == TO_CLOSE_AGED_STAGE and days < TO_CLOSE_AGE_DAYS:
+            continue
         max_s = _cf_number(d, CF_TICKET_MAX)
         min_s = _cf_number(d, CF_TICKET_MIN)
         size = max_s if max_s is not None else min_s
         rows.append({
+            "stage": STAGE_LABELS.get(sid, str(sid)),
             "title": _deal_title(d),
             "company": _company_name(d),
             "people": _deal_people(d, people_by_id),
@@ -790,13 +794,13 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
         out.append("</table>")
 
     # ── B. CLOSE ──────────────────────────────────────────────────────────
-    out.append(_section_heading("B. CLOSE: Move matched deals toward finish line"))
+    out.append(_section_heading("B. CLOSE: Move toward finish line"))
     if not to_close:
         out.append(_muted_p("(Nothing to close.)"))
     else:
         out.append(_open_table())
         out.append(_header_row([
-            "Deal Title", "Contact", "IQF",
+            "Stage", "Deal Title", "Contact", "IQF",
             "Agent Agreement", "Days Since Update",
         ]))
         for r in to_close:
@@ -806,6 +810,7 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
             )
             out.append(
                 "<tr>"
+                + _td(escape(r["stage"]))
                 + _td(_deal_title_link(r["deal"]))
                 + _td(contact_html)
                 + _td(iqf_html)
