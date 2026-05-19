@@ -332,25 +332,52 @@ def _iqf_cell(person, deal):
 
 
 def _split_contacts_by_role(people, deal):
+    people = [p for p in people if isinstance(p, dict)]
+    if not people:
+        return None, None
+
     buyer = None
     seller = None
-    unresolved_first = None
+    unresolved = []
     for p in people:
-        if not isinstance(p, dict):
-            continue
         role = _person_role(deal, p)
-        if role == "buyer" and buyer is None:
-            buyer = p
-        elif role == "seller" and seller is None:
-            seller = p
-        elif role is None and unresolved_first is None:
-            unresolved_first = p
-    if buyer is None and seller is None and unresolved_first is not None:
-        if _deal_side(deal) == "SELL" or _deal_type(deal) == "sell":
-            seller = unresolved_first
+        if role == "buyer":
+            if buyer is None:
+                buyer = p
+        elif role == "seller":
+            if seller is None:
+                seller = p
         else:
-            buyer = unresolved_first
-    return buyer, seller
+            unresolved.append(p)
+
+    if buyer is not None or seller is not None:
+        return buyer, seller
+
+    is_sell = _deal_side(deal) == "SELL" or _deal_type(deal) == "sell"
+
+    if len(unresolved) == 1:
+        if is_sell:
+            return None, unresolved[0]
+        return unresolved[0], None
+
+    primary_id = _normalize_id(deal.get("primary_contact_id"))
+    if primary_id is None:
+        pc = deal.get("primary_contact") or {}
+        if isinstance(pc, dict):
+            primary_id = _normalize_id(pc.get("id"))
+    if primary_id is not None:
+        primary = next(
+            (p for p in unresolved
+             if _normalize_id(p.get("id")) == primary_id),
+            None,
+        )
+        if primary is not None:
+            other = next((p for p in unresolved if p is not primary), None)
+            if is_sell:
+                return other, primary
+            return primary, other
+
+    return unresolved[0], unresolved[1] if len(unresolved) > 1 else None
 
 
 def _single_contact_cell(person, deal, company):
@@ -366,20 +393,31 @@ def _single_contact_cell(person, deal, company):
     return cell
 
 
-def _stacked_cef_cell(buyer, seller):
-    parts = []
-    if buyer is not None:
-        parts.append(_colorize_symbol(_person_cef(buyer)))
-    if seller is not None:
-        parts.append(_colorize_symbol(_person_cef(seller)))
-    if not parts:
+def _stack2(top, bottom):
+    if not top and not bottom:
         return ""
-    last = len(parts) - 1
-    out = []
-    for i, sym in enumerate(parts):
-        mb = "0" if i == last else "8px"
-        out.append(f'<div style="margin-bottom:{mb};">{sym}</div>')
-    return "".join(out)
+    return (
+        f'<div style="margin-bottom:8px;">{top or "&nbsp;"}</div>'
+        f'<div style="margin-bottom:0;">{bottom or "&nbsp;"}</div>'
+    )
+
+
+def _stacked_contact_cell(buyer, seller, deal, company):
+    top = _single_contact_cell(buyer, deal, company) if buyer else ""
+    bottom = _single_contact_cell(seller, deal, company) if seller else ""
+    return _stack2(top, bottom)
+
+
+def _stacked_iqf_cell(buyer, seller, deal):
+    top = _iqf_cell(buyer, deal) if buyer else ""
+    bottom = '<span style="color:#6b7280;">—</span>' if seller else ""
+    return _stack2(top, bottom)
+
+
+def _stacked_cef_cell(buyer, seller):
+    top = _colorize_symbol(_person_cef(buyer)) if buyer else ""
+    bottom = _colorize_symbol(_person_cef(seller)) if seller else ""
+    return _stack2(top, bottom)
 
 
 def _deal_structure_label(deal):
@@ -703,7 +741,14 @@ def _header_row(labels, with_checkbox=False):
         cells.append(f'<th style="width:32px; {TH_BASE}"></th>')
     for lbl in labels:
         style = f"width:{pct:.4f}%; {TH_BASE}"
-        cells.append(f'<th style="{style}">{escape(lbl)}</th>')
+        if isinstance(lbl, (list, tuple)):
+            inner = "".join(
+                f'<div style="line-height:1.3;">{escape(line)}</div>'
+                for line in lbl
+            )
+        else:
+            inner = escape(lbl)
+        cells.append(f'<th style="{style}">{inner}</th>')
     return "<tr>" + "".join(cells) + "</tr>"
 
 
@@ -1259,15 +1304,14 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
     else:
         out.append(_open_table())
         out.append(_header_row([
-            "Stage", "Deal Title", "Buyer", "Seller",
+            "Stage", "Deal Title", ("Buyer", "Seller"),
             "IQF", "CEF", "Agent Agreement",
         ], with_checkbox=interactive))
         for r in to_close:
             co = companies_by_id.get(_normalize_id(_company_id(r["deal"])))
             buyer, seller = _split_contacts_by_role(r["people"], r["deal"])
-            buyer_cell = _single_contact_cell(buyer, r["deal"], co)
-            seller_cell = _single_contact_cell(seller, r["deal"], co)
-            iqf_html = _iqf_cell(buyer, r["deal"]) if buyer is not None else ""
+            contact_html = _stacked_contact_cell(buyer, seller, r["deal"], co)
+            iqf_html = _stacked_iqf_cell(buyer, seller, r["deal"])
             cef_html = _stacked_cef_cell(buyer, seller)
             did = r["deal"].get("id")
             out.append(
@@ -1275,8 +1319,7 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
                 + _checkbox_td("B", did, interactive)
                 + _td(escape(r["stage"]))
                 + _td(_deal_title_link(r["deal"]))
-                + _td(buyer_cell)
-                + _td(seller_cell)
+                + _td(contact_html)
                 + _td(iqf_html)
                 + _td(cef_html)
                 + _td(_commission_cell(r["deal"]))
@@ -1292,8 +1335,9 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
         out.append(_open_table())
         out.append(_header_row([
             "Company", "Structure",
-            "Buy", "Buyer", "Buy Deal ID",
-            "Sell", "Seller", "Sell Deal ID",
+            "Buy", "Buy Deal ID",
+            "Sell", "Sell Deal ID",
+            ("Buyer", "Seller"),
             "% Diff",
         ], with_checkbox=interactive))
         for r in crossed:
@@ -1301,8 +1345,9 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
             s_pc = r["sell_primary"]
             buy_co = companies_by_id.get(_normalize_id(_company_id(r["buy_deal"])))
             sell_co = companies_by_id.get(_normalize_id(_company_id(r["sell_deal"])))
-            buyer_cell = _single_contact_cell(b_pc, r["buy_deal"], buy_co)
-            seller_cell = _single_contact_cell(s_pc, r["sell_deal"], sell_co)
+            buyer_html = _single_contact_cell(b_pc, r["buy_deal"], buy_co)
+            seller_html = _single_contact_cell(s_pc, r["sell_deal"], sell_co)
+            contact_html = _stack2(buyer_html, seller_html)
             buy_id = r["buy_deal"].get("id")
             sell_id = r["sell_deal"].get("id")
             row_id = f"{buy_id}_{sell_id}" if buy_id and sell_id else (buy_id or sell_id)
@@ -1312,11 +1357,10 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
                 + _td(escape(r["company"]))
                 + _td(escape(r["structure"]))
                 + _td(escape(_fmt_price(r["buy_price"])))
-                + _td(buyer_cell)
                 + _td(_deal_link(r["buy_deal"]))
                 + _td(escape(_fmt_price(r["sell_price"])))
-                + _td(seller_cell)
                 + _td(_deal_link(r["sell_deal"]))
+                + _td(contact_html)
                 + _td(f"{r['pct']:+.2f}%")
                 + "</tr>"
             )
