@@ -179,6 +179,10 @@ TD_STYLE = (
 LINK_STYLE = "color:#2563eb; text-decoration:none;"
 LINK_STYLE_500 = "color:#2563eb; text-decoration:none; font-weight:500;"
 SECTION_GAP_HTML = '<div style="height: 24px;"></div>'
+SUB_HEADING_STYLE = (
+    "font-size:14px; font-weight:600; color:#4b5563;"
+    " margin:16px 0 6px 0;"
+)
 
 
 def _normalize_id(v):
@@ -325,6 +329,57 @@ def _iqf_cell(person, deal):
     if _person_role(deal, person) == "seller":
         return '<span style="color:#6b7280;">—</span>'
     return _colorize_symbol(_person_iqf(person))
+
+
+def _split_contacts_by_role(people, deal):
+    buyer = None
+    seller = None
+    unresolved_first = None
+    for p in people:
+        if not isinstance(p, dict):
+            continue
+        role = _person_role(deal, p)
+        if role == "buyer" and buyer is None:
+            buyer = p
+        elif role == "seller" and seller is None:
+            seller = p
+        elif role is None and unresolved_first is None:
+            unresolved_first = p
+    if buyer is None and seller is None and unresolved_first is not None:
+        if _deal_side(deal) == "SELL" or _deal_type(deal) == "sell":
+            seller = unresolved_first
+        else:
+            buyer = unresolved_first
+    return buyer, seller
+
+
+def _single_contact_cell(person, deal, company):
+    if not isinstance(person, dict):
+        return ""
+    n, e = _person_name_email(person)
+    if not n and not e:
+        return ""
+    cell = _contact_cell(n, email=e, person_id=person.get("id"))
+    env = _envelope_link(deal, person, company)
+    if env:
+        cell = f"{cell}{env}"
+    return cell
+
+
+def _stacked_cef_cell(buyer, seller):
+    parts = []
+    if buyer is not None:
+        parts.append(_colorize_symbol(_person_cef(buyer)))
+    if seller is not None:
+        parts.append(_colorize_symbol(_person_cef(seller)))
+    if not parts:
+        return ""
+    last = len(parts) - 1
+    out = []
+    for i, sym in enumerate(parts):
+        mb = "0" if i == last else "8px"
+        out.append(f'<div style="margin-bottom:{mb};">{sym}</div>')
+    return "".join(out)
 
 
 def _deal_structure_label(deal):
@@ -1204,20 +1259,24 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
     else:
         out.append(_open_table())
         out.append(_header_row([
-            "Stage", "Deal Title", "Contact", "IQF", "CEF", "Agent Agreement",
+            "Stage", "Deal Title", "Buyer", "Seller",
+            "IQF", "CEF", "Agent Agreement",
         ], with_checkbox=interactive))
         for r in to_close:
             co = companies_by_id.get(_normalize_id(_company_id(r["deal"])))
-            contact_html, iqf_html, cef_html = _people_cells(
-                r["people"], deal=r["deal"], company=co
-            )
+            buyer, seller = _split_contacts_by_role(r["people"], r["deal"])
+            buyer_cell = _single_contact_cell(buyer, r["deal"], co)
+            seller_cell = _single_contact_cell(seller, r["deal"], co)
+            iqf_html = _iqf_cell(buyer, r["deal"]) if buyer is not None else ""
+            cef_html = _stacked_cef_cell(buyer, seller)
             did = r["deal"].get("id")
             out.append(
                 _row_open("B", did, interactive)
                 + _checkbox_td("B", did, interactive)
                 + _td(escape(r["stage"]))
                 + _td(_deal_title_link(r["deal"]))
-                + _td(contact_html)
+                + _td(buyer_cell)
+                + _td(seller_cell)
                 + _td(iqf_html)
                 + _td(cef_html)
                 + _td(_commission_cell(r["deal"]))
@@ -1233,37 +1292,17 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
         out.append(_open_table())
         out.append(_header_row([
             "Company", "Structure",
-            "Buy", "Buy Contact", "Buy Deal ID",
-            "Sell", "Sell Contact", "Sell Deal ID",
+            "Buy", "Buyer", "Buy Deal ID",
+            "Sell", "Seller", "Sell Deal ID",
             "% Diff",
         ], with_checkbox=interactive))
         for r in crossed:
             b_pc = r["buy_primary"]
             s_pc = r["sell_primary"]
-            bn, be = _person_name_email(b_pc)
-            sn, se = _person_name_email(s_pc)
-            b_iqf = _iqf_cell(b_pc, r["buy_deal"])
-            s_iqf = _iqf_cell(s_pc, r["sell_deal"])
             buy_co = companies_by_id.get(_normalize_id(_company_id(r["buy_deal"])))
             sell_co = companies_by_id.get(_normalize_id(_company_id(r["sell_deal"])))
-            buy_contact = _contact_cell(bn, email=be, person_id=b_pc.get("id"))
-            buy_annot = _buyer_seller_annotation(r["buy_deal"], b_pc)
-            if buy_annot:
-                buy_contact = f"{buy_contact}{escape(buy_annot)}"
-            be_env = _envelope_link(r["buy_deal"], b_pc, buy_co)
-            if be_env:
-                buy_contact = f"{buy_contact}{be_env}"
-            if b_iqf:
-                buy_contact = f"{buy_contact} {b_iqf}"
-            sell_contact = _contact_cell(sn, email=se, person_id=s_pc.get("id"))
-            sell_annot = _buyer_seller_annotation(r["sell_deal"], s_pc)
-            if sell_annot:
-                sell_contact = f"{sell_contact}{escape(sell_annot)}"
-            se_env = _envelope_link(r["sell_deal"], s_pc, sell_co)
-            if se_env:
-                sell_contact = f"{sell_contact}{se_env}"
-            if s_iqf:
-                sell_contact = f"{sell_contact} {s_iqf}"
+            buyer_cell = _single_contact_cell(b_pc, r["buy_deal"], buy_co)
+            seller_cell = _single_contact_cell(s_pc, r["sell_deal"], sell_co)
             buy_id = r["buy_deal"].get("id")
             sell_id = r["sell_deal"].get("id")
             row_id = f"{buy_id}_{sell_id}" if buy_id and sell_id else (buy_id or sell_id)
@@ -1273,10 +1312,10 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
                 + _td(escape(r["company"]))
                 + _td(escape(r["structure"]))
                 + _td(escape(_fmt_price(r["buy_price"])))
-                + _td(buy_contact)
+                + _td(buyer_cell)
                 + _td(_deal_link(r["buy_deal"]))
                 + _td(escape(_fmt_price(r["sell_price"])))
-                + _td(sell_contact)
+                + _td(seller_cell)
                 + _td(_deal_link(r["sell_deal"]))
                 + _td(f"{r['pct']:+.2f}%")
                 + "</tr>"
@@ -1289,16 +1328,21 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
         out.append(_muted_p("(None)"))
     else:
         groups = [
-            ("SELL", [r for r in tight if r["side"] == "SELL"]),
-            ("BUY", [r for r in tight if r["side"] == "BUY"]),
+            ("BUY", "BUY trades close to ask",
+             [r for r in tight if r["side"] == "BUY"]),
+            ("SELL", "SELL trades close to bid",
+             [r for r in tight if r["side"] == "SELL"]),
         ]
         rendered_any = False
-        for side_key, group in groups:
+        for side_key, sub_heading, group in groups:
             if not group:
                 continue
             if rendered_any:
                 out.append(SECTION_GAP_HTML)
             rendered_any = True
+            out.append(
+                f'<p style="{SUB_HEADING_STYLE}">{escape(sub_heading)}</p>'
+            )
             if side_key == "BUY":
                 labels = [
                     "Deal Title", "Stage", "Structure",
@@ -1320,9 +1364,6 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
                 cef_html = _colorize_symbol(_person_cef(pc))
                 co = companies_by_id.get(_normalize_id(_company_id(r["deal"])))
                 contact_html = _contact_cell(n, email=e, person_id=pc.get("id"))
-                annotation = _buyer_seller_annotation(r["deal"], pc)
-                if annotation:
-                    contact_html = f"{contact_html}{escape(annotation)}"
                 env = _envelope_link(r["deal"], pc, co)
                 if env:
                     contact_html = f"{contact_html}{env}"
