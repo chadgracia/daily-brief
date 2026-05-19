@@ -824,7 +824,72 @@ def _count_newsletter_recipients(people):
     return n
 
 
-def _build_leads_to_revive(people, companies):
+def _build_priority_leads_no_email(people, deals):
+    active_pids = set()
+    deals_by_pid = {}
+    for d in deals:
+        if _stage_id(d) not in ACTIVE_STAGES:
+            continue
+        pids_in_deal = set()
+        pc = d.get("primary_contact") or {}
+        if isinstance(pc, dict):
+            pid = _normalize_id(pc.get("id"))
+            if pid is not None:
+                pids_in_deal.add(pid)
+        pcid = _normalize_id(d.get("primary_contact_id"))
+        if pcid is not None:
+            pids_in_deal.add(pcid)
+        people_list = d.get("people") or []
+        if isinstance(people_list, list):
+            for p in people_list:
+                if isinstance(p, dict):
+                    pid = _normalize_id(p.get("id"))
+                    if pid is not None:
+                        pids_in_deal.add(pid)
+        for pid in pids_in_deal:
+            active_pids.add(pid)
+            deals_by_pid.setdefault(pid, []).append(d)
+
+    out = []
+    for p in people:
+        if (p.get("type") or "").strip().lower() != "lead":
+            continue
+        if _person_email(p):
+            continue
+        pid = _normalize_id(p.get("id"))
+        if pid is None or pid not in active_pids:
+            continue
+        related = deals_by_pid.get(pid, [])
+        companies_seen = []
+        seen_company = set()
+        for d in related:
+            cname = ""
+            co = d.get("company")
+            if isinstance(co, dict):
+                cname = (co.get("name") or "").strip()
+            if not cname:
+                cname = (d.get("company_name") or "").strip()
+            if not cname:
+                dname = (d.get("name") or "").strip()
+                if dname:
+                    cname = dname.split(" - ")[0].split(" – ")[0].strip()
+            if not cname or cname in seen_company:
+                continue
+            seen_company.add(cname)
+            companies_seen.append(cname)
+        out.append({
+            "person_id": pid,
+            "name": _person_full_name(p),
+            "active_deal_count": len(related),
+            "companies": companies_seen,
+            "linked_in_url": p.get("linked_in_url") or "",
+        })
+    out.sort(key=lambda r: (-r["active_deal_count"], r["name"].lower()))
+    return out
+
+
+def _build_leads_to_revive(people, companies, priority_pids=None):
+    priority_pids = priority_pids or set()
     co_by_id = {c.get("id"): c for c in companies if c.get("id") is not None}
     rows_by_pid = {}
     for p in people:
@@ -832,8 +897,13 @@ def _build_leads_to_revive(people, companies):
         if pid is None:
             continue
 
+        npid = _normalize_id(pid)
         email = _person_email(p)
-        bucket1 = (not email) and _has_tag(p, TAG_WHITELIST_CONTACT_ESTABLISHED)
+        bucket1 = (
+            (not email)
+            and _has_tag(p, TAG_WHITELIST_CONTACT_ESTABLISHED)
+            and npid not in priority_pids
+        )
 
         bucket2_reason = None
         for opt in _cf_option_ids(p, CF_EMAIL_STATUS):
@@ -866,7 +936,7 @@ def _build_leads_to_revive(people, companies):
 
 def _render_html(crossed, tight, to_close, to_invoice, leads,
                  newsletter_recipient_count, leads_to_revive_count, date_str,
-                 companies_by_id):
+                 companies_by_id, priority_leads):
     out = [
         "<html><body style=\"" + BODY_STYLE + "\">"
         f'<div style="{CONTAINER_STYLE}">'
@@ -1043,11 +1113,65 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
     # ── F. Leads to Revive ────────────────────────────────────────────────
     out.append(_section_heading("F. Leads to Revive"))
     out.append(_muted_p(
+        f"Priority Leads (active deals, no work email): {len(priority_leads)}"
+    ))
+    out.append(_muted_p(
         f"Total Newsletter Recipients: {newsletter_recipient_count}"
     ))
     out.append(_muted_p(
         f"Leads to Revive: {leads_to_revive_count}"
     ))
+
+    priority_heading_style = (
+        "font-size:14px; font-weight:600; color:#374151;"
+        " margin:16px 0 6px 0;"
+    )
+    out.append(
+        f'<p style="{priority_heading_style}">'
+        'Priority — active deals with no work email (research these first)'
+        '</p>'
+    )
+    if not priority_leads:
+        out.append(_muted_p("(No priority leads — clean book!)"))
+    else:
+        out.append(_open_table())
+        out.append(_header_row([
+            "Name", "# Active Deals", "Companies", "LinkedIn",
+        ]))
+        for r in priority_leads:
+            name_href = PIPELINE_PERSON_URL.format(
+                escape(str(r["person_id"]), quote=True)
+            )
+            name_cell = (
+                f'<a href="{name_href}" style="{LINK_STYLE_500}">'
+                f'{escape(r["name"])}</a>'
+            )
+            companies = r["companies"]
+            if len(companies) > 3:
+                companies_text = (
+                    ", ".join(companies[:3])
+                    + f" + {len(companies) - 3} more"
+                )
+            else:
+                companies_text = ", ".join(companies)
+            if r["linked_in_url"]:
+                li_cell = (
+                    f'<a href="{escape(r["linked_in_url"], quote=True)}"'
+                    f' style="{LINK_STYLE_500}">LinkedIn</a>'
+                )
+            else:
+                li_cell = ""
+            out.append(
+                "<tr>"
+                + _td(name_cell)
+                + _td(escape(str(r["active_deal_count"])))
+                + _td(escape(companies_text))
+                + _td(li_cell)
+                + "</tr>"
+            )
+        out.append("</table>")
+        out.append(SECTION_GAP_HTML)
+
     if not leads:
         out.append(_muted_p("(No leads to revive — clean book!)"))
     else:
@@ -1120,14 +1244,16 @@ def lambda_handler(event, context):
     tight = _build_tight(deals, companies, people_by_id)
     to_close = _build_to_close(deals, now, people_by_id)
     to_invoice = _build_to_invoice(deals, now, people_by_id)
-    leads = _build_leads_to_revive(people, companies)
+    priority_leads = _build_priority_leads_no_email(people, deals)
+    priority_pids = {r["person_id"] for r in priority_leads}
+    leads = _build_leads_to_revive(people, companies, priority_pids)
     leads_to_revive_count = len(leads)
     newsletter_recipient_count = _count_newsletter_recipients(people)
 
     body_html = _render_html(
         crossed, tight, to_close, to_invoice, leads,
         newsletter_recipient_count, leads_to_revive_count, date_str,
-        companies_by_id,
+        companies_by_id, priority_leads,
     )
     subject = f"Daily Brief — {date_str}"
 
@@ -1150,6 +1276,7 @@ def lambda_handler(event, context):
             "to_close": len(to_close),
             "to_invoice": len(to_invoice),
             "leads_to_revive": leads_to_revive_count,
+            "priority_leads_no_email": len(priority_leads),
             "newsletter_recipients": newsletter_recipient_count,
             "deals": len(deals),
             "companies": len(companies),
