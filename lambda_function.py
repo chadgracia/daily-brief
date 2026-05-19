@@ -297,6 +297,21 @@ def _buyer_seller_annotation(deal, person):
     return ""
 
 
+def _person_role(deal, person):
+    annot = _buyer_seller_annotation(deal, person)
+    if annot == " (b)":
+        return "buyer"
+    if annot == " (s)":
+        return "seller"
+    return None
+
+
+def _iqf_cell(person, deal):
+    if _person_role(deal, person) == "seller":
+        return '<span style="color:#6b7280;">—</span>'
+    return _colorize_symbol(_person_iqf(person))
+
+
 def _deal_structure_label(deal):
     return STRUCTURE_LABELS.get(_cf_option_id(deal, CF_STRUCTURE), "")
 
@@ -587,7 +602,7 @@ def _people_cells(people, deal=None, company=None):
             cell = f"{cell}{envelope}"
         entries.append((
             cell,
-            _colorize_symbol(_person_iqf(p)),
+            _iqf_cell(p, deal),
             _colorize_symbol(_person_cef(p)),
         ))
     if not entries:
@@ -1159,8 +1174,8 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
             s_pc = r["sell_primary"]
             bn, be = _person_name_email(b_pc)
             sn, se = _person_name_email(s_pc)
-            b_iqf = _colorize_symbol(_person_iqf(b_pc))
-            s_iqf = _colorize_symbol(_person_iqf(s_pc))
+            b_iqf = _iqf_cell(b_pc, r["buy_deal"])
+            s_iqf = _iqf_cell(s_pc, r["sell_deal"])
             buy_co = companies_by_id.get(_normalize_id(_company_id(r["buy_deal"])))
             sell_co = companies_by_id.get(_normalize_id(_company_id(r["sell_deal"])))
             buy_contact = _contact_cell(bn, email=be, person_id=b_pc.get("id"))
@@ -1233,7 +1248,7 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
             for r in group:
                 pc = r["primary"]
                 n, e = _person_name_email(pc)
-                iqf_html = _colorize_symbol(_person_iqf(pc))
+                iqf_html = _iqf_cell(pc, r["deal"])
                 cef_html = _colorize_symbol(_person_cef(pc))
                 co = companies_by_id.get(_normalize_id(_company_id(r["deal"])))
                 contact_html = _contact_cell(n, email=e, person_id=pc.get("id"))
