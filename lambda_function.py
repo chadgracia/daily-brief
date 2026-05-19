@@ -49,6 +49,9 @@ CF_EMAIL_STATUS = "custom_label_2447206"
 CF_PERSON_BUY_INTERESTS = "custom_label_3322093"
 CF_PERSON_SELL_INTERESTS = "custom_label_3759156"
 CF_AGENT_AGREEMENT = "custom_label_3714334"
+CF_NOTICE = "custom_label_3815544"
+CF_MAX_SIZE = "custom_label_3064645"
+CF_SHARE_COUNT = "custom_label_3070843"
 
 OPT_SELL = 5011675
 OPT_BUY = 5077819
@@ -65,6 +68,18 @@ OPT_AGENT_YES_BUYSIDE = 6354274
 OPT_AGENT_YES_SELLSIDE = 6354277
 
 AGENT_YES_OPTS = {OPT_AGENT_YES_BUYSIDE, OPT_AGENT_YES_SELLSIDE}
+
+OPT_NOTICE_POST = 6762534
+OPT_NOTICE_UPDATE = 6762537
+NOTICE_ACTIONABLE = {OPT_NOTICE_POST, OPT_NOTICE_UPDATE}
+
+POST_STRUCTURE_LABELS = {
+    6250090: "Direct",
+    5077906: "Fund/SPV",
+    5077903: "Forward",
+    6361933: "Unknown",
+    5077909: "None",
+}
 
 NEWSLETTER_OPTS = {6613674, 6613673, 6582981}
 
@@ -851,6 +866,59 @@ def _build_to_invoice(deals, now, people_by_id):
     return rows
 
 
+def _build_to_post(deals):
+    rows = []
+    for d in deals:
+        actionable = _cf_option_ids(d, CF_NOTICE) & NOTICE_ACTIONABLE
+        if not actionable:
+            continue
+        has_post = OPT_NOTICE_POST in actionable
+        has_update = OPT_NOTICE_UPDATE in actionable
+        if has_post and has_update:
+            action = "Post / Update"
+        elif has_post:
+            action = "Post"
+        else:
+            action = "Update"
+        rows.append({"deal": d, "action": action})
+    rows.sort(key=lambda r: (_deal_title(r["deal"]) or "").lower())
+    return rows
+
+
+def _post_structure_label(deal):
+    opts = _cf_option_ids(deal, CF_STRUCTURE)
+    if not opts:
+        return "—"
+    names = [POST_STRUCTURE_LABELS[o] for o in opts if o in POST_STRUCTURE_LABELS]
+    if not names:
+        return "—"
+    return ", ".join(sorted(names))
+
+
+def _post_price(deal):
+    side = _deal_side(deal)
+    if side == "SELL":
+        return _cf_number(deal, CF_NET)
+    if side == "BUY":
+        return _cf_number(deal, CF_GROSS)
+    return None
+
+
+def _fmt_int_or_dash(v):
+    if v is None:
+        return "—"
+    try:
+        return f"{int(v):,}"
+    except (TypeError, ValueError):
+        return "—"
+
+
+def _fmt_price_or_dash(v):
+    if v is None:
+        return "—"
+    return _fmt_price(v)
+
+
 def _count_newsletter_recipients(people):
     n = 0
     for p in people:
@@ -1072,7 +1140,7 @@ INTERACTIVE_JS = """
 
 def _render_html(crossed, tight, to_close, to_invoice, leads,
                  newsletter_recipient_count, leads_to_revive_count, date_str,
-                 companies_by_id, priority_leads, interactive=False):
+                 companies_by_id, priority_leads, to_post, interactive=False):
     out = []
     if interactive:
         out.append(
@@ -1279,10 +1347,38 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
                 )
             out.append("</table>")
 
-    # ── Kate — Leads to research ──────────────────────────────────────────
+    # ── Kate — Queue ──────────────────────────────────────────────────────
     out.append(
-        f'<h1 style="{QUEUE_H1_STYLE_TOP}">Kate — Leads to research</h1>'
+        f'<h1 style="{QUEUE_H1_STYLE_TOP}">Kate — Queue</h1>'
     )
+
+    # ── E. POST: Trades to post to Notice ─────────────────────────────────
+    out.append(_section_heading("E. POST: Trades to post to Notice"))
+    if not to_post:
+        out.append(_muted_p("(Nothing to post — clean book!)"))
+    else:
+        out.append(_open_table())
+        out.append(_header_row([
+            "Action", "Deal Title", "Volume", "Structure", "Shares", "Price",
+        ], with_checkbox=interactive))
+        for r in to_post:
+            d = r["deal"]
+            did = d.get("id")
+            volume = _cf_number(d, CF_MAX_SIZE)
+            shares = _cf_number(d, CF_SHARE_COUNT)
+            price = _post_price(d)
+            out.append(
+                _row_open("E", did, interactive)
+                + _checkbox_td("E", did, interactive)
+                + _td(escape(r["action"]))
+                + _td(_deal_title_link(d))
+                + _td(escape(_fmt_price_or_dash(volume)))
+                + _td(escape(_post_structure_label(d)))
+                + _td(escape(_fmt_int_or_dash(shares)))
+                + _td(escape(_fmt_price_or_dash(price)))
+                + "</tr>"
+            )
+        out.append("</table>")
 
     # ── F. Leads to Revive ────────────────────────────────────────────────
     out.append(_section_heading("F. Leads to Revive"))
@@ -1427,6 +1523,7 @@ def _build_brief_html(interactive):
     tight = _build_tight(deals, companies, people_by_id)
     to_close = _build_to_close(deals, now, people_by_id)
     to_invoice = _build_to_invoice(deals, now, people_by_id)
+    to_post = _build_to_post(deals)
     priority_leads = _build_priority_leads_no_email(people, deals)
     priority_pids = {r["person_id"] for r in priority_leads}
     leads = _build_leads_to_revive(people, companies, priority_pids)
@@ -1436,7 +1533,7 @@ def _build_brief_html(interactive):
     body_html = _render_html(
         crossed, tight, to_close, to_invoice, leads,
         newsletter_recipient_count, leads_to_revive_count, date_str,
-        companies_by_id, priority_leads, interactive=interactive,
+        companies_by_id, priority_leads, to_post, interactive=interactive,
     )
 
     counts = {
@@ -1444,6 +1541,7 @@ def _build_brief_html(interactive):
         "tight": len(tight),
         "to_close": len(to_close),
         "to_invoice": len(to_invoice),
+        "to_post": len(to_post),
         "leads_to_revive": leads_to_revive_count,
         "priority_leads_no_email": len(priority_leads),
         "newsletter_recipients": newsletter_recipient_count,
