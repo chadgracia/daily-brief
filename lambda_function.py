@@ -1,4 +1,5 @@
 import json
+import os
 from datetime import datetime, timezone
 from html import escape
 from urllib.parse import quote
@@ -609,14 +610,36 @@ def _commission_cell(deal):
     return ""
 
 
-def _header_row(labels):
+def _header_row(labels, with_checkbox=False):
     n = len(labels)
     pct = 100.0 / n if n else 100.0
     cells = []
+    if with_checkbox:
+        cells.append(f'<th style="width:32px; {TH_BASE}"></th>')
     for lbl in labels:
         style = f"width:{pct:.4f}%; {TH_BASE}"
         cells.append(f'<th style="{style}">{escape(lbl)}</th>')
     return "<tr>" + "".join(cells) + "</tr>"
+
+
+def _row_open(section, row_id, interactive):
+    if interactive and row_id not in (None, ""):
+        key = f"{section}:{row_id}"
+        return f'<tr data-row-key="{escape(key, quote=True)}">'
+    return "<tr>"
+
+
+def _checkbox_td(section, row_id, interactive):
+    if not interactive or row_id in (None, ""):
+        return ""
+    key = f"{section}:{row_id}"
+    return (
+        '<td style="width:32px; text-align:center; padding:10px;'
+        ' border-bottom:1px solid #f3f4f6; vertical-align:top;">'
+        f'<input type="checkbox" class="row-dismiss"'
+        f' data-row-key="{escape(key, quote=True)}" />'
+        '</td>'
+    )
 
 
 def _td(content, extra=""):
@@ -934,14 +957,135 @@ def _build_leads_to_revive(people, companies, priority_pids=None):
     return rows
 
 
+QUEUE_H1_STYLE = (
+    "font-size:22px; font-weight:700; color:#111827;"
+    " margin:32px 0 8px 0;"
+)
+QUEUE_H1_STYLE_TOP = (
+    "font-size:22px; font-weight:700; color:#111827;"
+    " margin:48px 0 8px 0;"
+)
+
+DISMISS_BANNER_HTML = (
+    '<p id="dismiss-counter" style="font-size:13px; color:#4b5563;'
+    ' margin:8px 0 24px 0; display:none;">'
+    '<span id="dismiss-n">0</span> dismissed today.'
+    ' <a href="#" id="show-all"'
+    ' style="color:#2563eb; font-weight:500; margin-left:8px;">'
+    'Show all</a></p>'
+)
+
+INTERACTIVE_JS = """
+<script>
+(function() {
+  const STORAGE_KEY = "dailyBriefDismissed";
+  const today = new Date().toISOString().slice(0, 10);
+
+  function readAll() {
+    try { return JSON.parse(localStorage.getItem(STORAGE_KEY) || "{}"); }
+    catch (e) { return {}; }
+  }
+  function writeAll(obj) {
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(obj));
+  }
+  function getToday() {
+    const all = readAll();
+    return all[today] || [];
+  }
+  function setToday(list) {
+    const fresh = {};
+    if (list.length) fresh[today] = list;
+    writeAll(fresh);
+  }
+  function updateCounter() {
+    const list = getToday();
+    const counter = document.getElementById("dismiss-counter");
+    const n = document.getElementById("dismiss-n");
+    if (!counter || !n) return;
+    n.textContent = list.length;
+    counter.style.display = list.length ? "block" : "none";
+  }
+  function applyDismissed() {
+    const list = new Set(getToday());
+    document.querySelectorAll("tr[data-row-key]").forEach(tr => {
+      const key = tr.getAttribute("data-row-key");
+      if (list.has(key)) {
+        tr.style.display = "none";
+        const cb = tr.querySelector("input.row-dismiss");
+        if (cb) cb.checked = true;
+      }
+    });
+    updateCounter();
+  }
+  document.addEventListener("DOMContentLoaded", function() {
+    applyDismissed();
+    document.querySelectorAll("input.row-dismiss").forEach(cb => {
+      cb.addEventListener("change", function() {
+        const key = this.getAttribute("data-row-key");
+        const list = getToday();
+        const tr = this.closest("tr[data-row-key]");
+        if (this.checked) {
+          if (!list.includes(key)) list.push(key);
+          if (tr) tr.style.display = "none";
+        } else {
+          const idx = list.indexOf(key);
+          if (idx >= 0) list.splice(idx, 1);
+          if (tr) tr.style.display = "";
+        }
+        setToday(list);
+        updateCounter();
+      });
+    });
+    const showAll = document.getElementById("show-all");
+    if (showAll) {
+      showAll.addEventListener("click", function(e) {
+        e.preventDefault();
+        setToday([]);
+        document.querySelectorAll("tr[data-row-key]").forEach(tr => {
+          tr.style.display = "";
+          const cb = tr.querySelector("input.row-dismiss");
+          if (cb) cb.checked = false;
+        });
+        updateCounter();
+      });
+    }
+  });
+})();
+</script>
+"""
+
+
 def _render_html(crossed, tight, to_close, to_invoice, leads,
                  newsletter_recipient_count, leads_to_revive_count, date_str,
-                 companies_by_id, priority_leads):
-    out = [
-        "<html><body style=\"" + BODY_STYLE + "\">"
-        f'<div style="{CONTAINER_STYLE}">'
-        f'<h1 style="{H1_STYLE}">Daily Brief — {escape(date_str)}</h1>'
-    ]
+                 companies_by_id, priority_leads, interactive=False):
+    out = []
+    if interactive:
+        out.append(
+            "<!doctype html>"
+            '<html lang="en"><head>'
+            '<meta charset="utf-8">'
+            '<meta name="viewport" content="width=device-width, initial-scale=1">'
+            f'<title>Daily Brief — {escape(date_str)}</title>'
+            "<style>"
+            "body { margin: 0; background: #f5f5f5; }"
+            ".reset-anchor a { text-decoration: none; }"
+            "</style>"
+            '</head><body class="reset-anchor">'
+            f'<div style="background:#ffffff; {CONTAINER_STYLE}">'
+            f'<h1 style="{H1_STYLE}">Daily Brief — {escape(date_str)}</h1>'
+        )
+        out.append(DISMISS_BANNER_HTML)
+    else:
+        out.append(
+            "<html><body style=\"" + BODY_STYLE + "\">"
+            f'<div style="{CONTAINER_STYLE}">'
+            f'<h1 style="{H1_STYLE}">Daily Brief — {escape(date_str)}</h1>'
+        )
+
+    # ── Chad — Trading queue ──────────────────────────────────────────────
+    out.append(
+        f'<h1 style="{QUEUE_H1_STYLE}">Chad — Trading queue</h1>'
+    )
 
     # ── A. INVOICE ────────────────────────────────────────────────────────
     out.append(_section_heading("A. INVOICE: Get paid and win deal"))
@@ -951,14 +1095,16 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
         out.append(_open_table())
         out.append(_header_row([
             "Deal Title", "Contact", "IQF", "CEF", "Agent Agreement",
-        ]))
+        ], with_checkbox=interactive))
         for r in to_invoice:
             co = companies_by_id.get(_normalize_id(_company_id(r["deal"])))
             contact_html, iqf_html, cef_html = _people_cells(
                 r["people"], deal=r["deal"], company=co
             )
+            did = r["deal"].get("id")
             out.append(
-                "<tr>"
+                _row_open("A", did, interactive)
+                + _checkbox_td("A", did, interactive)
                 + _td(_deal_title_link(r["deal"]))
                 + _td(contact_html)
                 + _td(iqf_html)
@@ -976,14 +1122,16 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
         out.append(_open_table())
         out.append(_header_row([
             "Stage", "Deal Title", "Contact", "IQF", "CEF", "Agent Agreement",
-        ]))
+        ], with_checkbox=interactive))
         for r in to_close:
             co = companies_by_id.get(_normalize_id(_company_id(r["deal"])))
             contact_html, iqf_html, cef_html = _people_cells(
                 r["people"], deal=r["deal"], company=co
             )
+            did = r["deal"].get("id")
             out.append(
-                "<tr>"
+                _row_open("B", did, interactive)
+                + _checkbox_td("B", did, interactive)
                 + _td(escape(r["stage"]))
                 + _td(_deal_title_link(r["deal"]))
                 + _td(contact_html)
@@ -1005,7 +1153,7 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
             "Buy", "Buy Contact", "Buy Deal ID",
             "Sell", "Sell Contact", "Sell Deal ID",
             "% Diff",
-        ]))
+        ], with_checkbox=interactive))
         for r in crossed:
             b_pc = r["buy_primary"]
             s_pc = r["sell_primary"]
@@ -1033,8 +1181,12 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
                 sell_contact = f"{sell_contact}{se_env}"
             if s_iqf:
                 sell_contact = f"{sell_contact} {s_iqf}"
+            buy_id = r["buy_deal"].get("id")
+            sell_id = r["sell_deal"].get("id")
+            row_id = f"{buy_id}_{sell_id}" if buy_id and sell_id else (buy_id or sell_id)
             out.append(
-                "<tr>"
+                _row_open("C", row_id, interactive)
+                + _checkbox_td("C", row_id, interactive)
                 + _td(escape(r["company"]))
                 + _td(escape(r["structure"]))
                 + _td(escape(_fmt_price(r["buy_price"])))
@@ -1077,7 +1229,7 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
                     "Contact", "IQF", "CEF",
                 ]
             out.append(_open_table())
-            out.append(_header_row(labels))
+            out.append(_header_row(labels, with_checkbox=interactive))
             for r in group:
                 pc = r["primary"]
                 n, e = _person_name_email(pc)
@@ -1095,8 +1247,10 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
                     f" background-color:{NEG_DISTANCE_BG};"
                     if r["distance"] < 0 else ""
                 )
+                did = r["deal"].get("id")
                 out.append(
-                    "<tr>"
+                    _row_open("D", did, interactive)
+                    + _checkbox_td("D", did, interactive)
                     + _td(_deal_title_link(r["deal"]))
                     + _td(escape(r["stage"]))
                     + _td(escape(r["structure"]))
@@ -1109,6 +1263,11 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
                     + "</tr>"
                 )
             out.append("</table>")
+
+    # ── Kate — Leads to research ──────────────────────────────────────────
+    out.append(
+        f'<h1 style="{QUEUE_H1_STYLE_TOP}">Kate — Leads to research</h1>'
+    )
 
     # ── F. Leads to Revive ────────────────────────────────────────────────
     out.append(_section_heading("F. Leads to Revive"))
@@ -1137,7 +1296,7 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
         out.append(_open_table())
         out.append(_header_row([
             "Name", "# Active Deals", "Companies", "LinkedIn",
-        ]))
+        ], with_checkbox=interactive))
         for r in priority_leads:
             name_href = PIPELINE_PERSON_URL.format(
                 escape(str(r["person_id"]), quote=True)
@@ -1161,8 +1320,10 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
                 )
             else:
                 li_cell = ""
+            pid = r["person_id"]
             out.append(
-                "<tr>"
+                _row_open("Fpri", pid, interactive)
+                + _checkbox_td("Fpri", pid, interactive)
                 + _td(name_cell)
                 + _td(escape(str(r["active_deal_count"])))
                 + _td(escape(companies_text))
@@ -1178,7 +1339,7 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
         out.append(_open_table())
         out.append(_header_row([
             "Reason", "Name", "Pipeline", "LinkedIn", "Company",
-        ]))
+        ], with_checkbox=interactive))
         for r in leads:
             person_href = PIPELINE_PERSON_URL.format(
                 escape(str(r["person_id"]), quote=True)
@@ -1202,8 +1363,10 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
                 co_cell = escape(r["company_name"])
             else:
                 co_cell = ""
+            pid = r["person_id"]
             out.append(
-                "<tr>"
+                _row_open("Fmain", pid, interactive)
+                + _checkbox_td("Fmain", pid, interactive)
                 + _td(escape(r["reason"]))
                 + _td(escape(r["name"]))
                 + _td(pipeline_cell)
@@ -1213,11 +1376,16 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
             )
         out.append("</table>")
 
-    out.append("</div></body></html>")
+    if interactive:
+        out.append("</div>")
+        out.append(INTERACTIVE_JS)
+        out.append("</body></html>")
+    else:
+        out.append("</div></body></html>")
     return "".join(out)
 
 
-def lambda_handler(event, context):
+def _build_brief_html(interactive):
     now = datetime.now(timezone.utc)
     date_str = f"{now:%B} {now.day}, {now.year}"
 
@@ -1253,8 +1421,45 @@ def lambda_handler(event, context):
     body_html = _render_html(
         crossed, tight, to_close, to_invoice, leads,
         newsletter_recipient_count, leads_to_revive_count, date_str,
-        companies_by_id, priority_leads,
+        companies_by_id, priority_leads, interactive=interactive,
     )
+
+    counts = {
+        "crossed": len(crossed),
+        "tight": len(tight),
+        "to_close": len(to_close),
+        "to_invoice": len(to_invoice),
+        "leads_to_revive": leads_to_revive_count,
+        "priority_leads_no_email": len(priority_leads),
+        "newsletter_recipients": newsletter_recipient_count,
+        "deals": len(deals),
+        "companies": len(companies),
+        "people": len(people),
+    }
+    return body_html, date_str, counts
+
+
+def handle_http_request(event):
+    params = event.get("queryStringParameters") or {}
+    key = params.get("key") if isinstance(params, dict) else None
+    expected = os.environ.get("BRIEF_PAGE_KEY")
+    if not expected or key != expected:
+        return {"statusCode": 403, "body": "Forbidden"}
+
+    body_html, _date_str, _counts = _build_brief_html(interactive=True)
+    return {
+        "statusCode": 200,
+        "headers": {"Content-Type": "text/html; charset=utf-8"},
+        "body": body_html,
+    }
+
+
+def lambda_handler(event, context):
+    http = (event.get("requestContext") or {}).get("http")
+    if http:
+        return handle_http_request(event)
+
+    body_html, date_str, counts = _build_brief_html(interactive=False)
     subject = f"Daily Brief — {date_str}"
 
     ses = boto3.client("ses", region_name=SES_REGION)
@@ -1270,16 +1475,5 @@ def lambda_handler(event, context):
     return {
         "statusCode": 200,
         "message_id": resp.get("MessageId"),
-        "counts": {
-            "crossed": len(crossed),
-            "tight": len(tight),
-            "to_close": len(to_close),
-            "to_invoice": len(to_invoice),
-            "leads_to_revive": leads_to_revive_count,
-            "priority_leads_no_email": len(priority_leads),
-            "newsletter_recipients": newsletter_recipient_count,
-            "deals": len(deals),
-            "companies": len(companies),
-            "people": len(people),
-        },
+        "counts": counts,
     }
