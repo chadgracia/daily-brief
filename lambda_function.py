@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
@@ -611,6 +612,39 @@ def call_pipeline_api(method, endpoint, payload=None, jwt=None, timeout=15):
         return {"status": 500, "data": str(e)}
 
 
+SYSTEM_NOTE_PREFIXES = (
+    "deal stage was changed",
+    "stage was changed",
+    "stage changed",
+    "custom field",
+    "deal was created",
+    "deal owner was changed",
+    "deal owner changed",
+    "person was added",
+    "person was removed",
+    "company was changed",
+    "primary contact was changed",
+    "deal was updated",
+)
+
+
+def _strip_html(s):
+    if not s:
+        return ""
+    s = re.sub(r'<[^>]+>', '', s)
+    s = s.replace("&nbsp;", " ").replace("&amp;", "&")
+    s = s.replace("&lt;", "<").replace("&gt;", ">").replace("&quot;", '"')
+    return s.strip()
+
+
+def _is_system_note(note):
+    if not isinstance(note, dict):
+        return False
+    raw = note.get("title") or note.get("content") or ""
+    cleaned = _strip_html(raw).lower()
+    return any(cleaned.startswith(prefix) for prefix in SYSTEM_NOTE_PREFIXES)
+
+
 def _fetch_latest_note(deal_id, jwt):
     if deal_id in (None, "") or not jwt:
         return None
@@ -623,6 +657,9 @@ def _fetch_latest_note(deal_id, jwt):
         return None
     entries = data.get("entries") or []
     if not isinstance(entries, list) or not entries:
+        return None
+    entries = [e for e in entries if not _is_system_note(e)]
+    if not entries:
         return None
     epoch = datetime.min.replace(tzinfo=timezone.utc)
     entries.sort(
@@ -637,9 +674,9 @@ def _latest_activity_cell(note):
         return '<span style="color:#9ca3af;">—</span>'
     created = _parse_dt(note.get("created_at"))
     date_str = created.strftime("%m/%d") if created else ""
-    title = note.get("title") or ""
+    title = _strip_html(note.get("title"))
     if not title:
-        content = (note.get("content") or "").strip()
+        content = _strip_html(note.get("content"))
         if content:
             truncated = content[:40]
             title = truncated + "..." if len(content) > 40 else truncated
