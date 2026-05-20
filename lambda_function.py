@@ -645,46 +645,61 @@ def _is_system_note(note):
     return any(cleaned.startswith(prefix) for prefix in SYSTEM_NOTE_PREFIXES)
 
 
-def _fetch_latest_note(deal_id, jwt):
+def _fetch_latest_notes(deal_id, jwt):
     if deal_id in (None, "") or not jwt:
-        return None
+        return []
     endpoint = f"/notes.json?conditions[deal_id]={deal_id}"
     result = call_pipeline_api("GET", endpoint, jwt=jwt, timeout=3)
     if result.get("status") != 200:
-        return None
+        return []
     data = result.get("data")
     if not isinstance(data, dict):
-        return None
+        return []
     entries = data.get("entries") or []
     if not isinstance(entries, list) or not entries:
-        return None
+        return []
     entries = [e for e in entries if not _is_system_note(e)]
     if not entries:
-        return None
+        return []
     epoch = datetime.min.replace(tzinfo=timezone.utc)
     entries.sort(
         key=lambda n: _parse_dt(n.get("created_at")) or epoch,
         reverse=True,
     )
-    return entries[0]
+    return entries[:3]
 
 
-def _latest_activity_cell(note):
-    if not note:
+def _latest_activity_cell(notes):
+    if not notes:
         return '<span style="color:#9ca3af;">—</span>'
-    created = _parse_dt(note.get("created_at"))
-    date_str = created.strftime("%m/%d") if created else ""
-    title = _strip_html(note.get("title"))
-    if not title:
-        content = _strip_html(note.get("content"))
-        if content:
-            truncated = content[:40]
-            title = truncated + "..." if len(content) > 40 else truncated
-    parts = ['<div style="font-size:12px;">']
-    if date_str:
-        parts.append(f'<div style="color:#6b7280;">{escape(date_str)}</div>')
-    parts.append(f'<div>{escape(title)}</div>')
-    parts.append('</div>')
+    parts = []
+    last = len(notes) - 1
+    for i, note in enumerate(notes):
+        created = _parse_dt(note.get("created_at"))
+        date_str = created.strftime("%m/%d") if created else ""
+        body = _strip_html(note.get("title"))
+        if not body:
+            body = _strip_html(note.get("content"))
+        truncated = body[:40]
+        if len(body) > 40:
+            snippet = truncated + "..."
+        else:
+            snippet = truncated
+        mb = "0" if i == last else "8px"
+        parts.append(
+            f'<div class="activity-entry" data-row-key-skip="1"'
+            f' style="margin-bottom:{mb}; font-size:12px; line-height:1.3;">'
+        )
+        if date_str:
+            parts.append(
+                f'<div style="color:#6b7280;">{escape(date_str)}</div>'
+            )
+        parts.append(f'<div class="activity-snippet">{escape(snippet)}</div>')
+        parts.append(
+            '<div class="activity-full" style="display:none;">'
+            f'{escape(body)}</div>'
+        )
+        parts.append('</div>')
     return "".join(parts)
 
 
@@ -1113,7 +1128,7 @@ def _build_to_close(deals, now, people_by_id, jwt=None):
     # short per-call timeout (~3s) so a hung Pipeline API can't block the
     # whole brief; on any error the cell falls back to an em dash.
     for r in rows:
-        r["latest_note"] = _fetch_latest_note(r["deal"].get("id"), jwt)
+        r["latest_notes"] = _fetch_latest_notes(r["deal"].get("id"), jwt)
     return rows
 
 
@@ -1537,6 +1552,23 @@ INTERACTIVE_JS = """
         applyFilter(isActive ? null : target);
       });
     });
+
+    document.querySelectorAll(".activity-entry").forEach(entry => {
+      const snippet = entry.querySelector(".activity-snippet");
+      const full = entry.querySelector(".activity-full");
+      if (!snippet || !full) return;
+      const snippetText = snippet.textContent.replace(/\\.\\.\\.$/, "").trim();
+      const fullText = full.textContent.trim();
+      if (snippetText === fullText) return;
+      entry.style.cursor = "pointer";
+      entry.addEventListener("click", function(e) {
+        e.stopPropagation();
+        const expanded = entry.dataset.expanded === "true";
+        snippet.style.display = expanded ? "" : "none";
+        full.style.display = expanded ? "none" : "";
+        entry.dataset.expanded = expanded ? "false" : "true";
+      });
+    });
   });
 })();
 </script>
@@ -1657,7 +1689,7 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
                 + _td(iqf_html)
                 + _td(cef_html)
                 + _td(_commission_cell(r["deal"]))
-                + _td(_latest_activity_cell(r.get("latest_note")))
+                + _td(_latest_activity_cell(r.get("latest_notes") or []))
                 + "</tr>"
             )
         out.append("</table>")
