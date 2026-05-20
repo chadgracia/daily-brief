@@ -48,7 +48,10 @@ CF_NEWSLETTER = "custom_label_3775335"
 CF_EMAIL_STATUS = "custom_label_2447206"
 CF_PERSON_BUY_INTERESTS = "custom_label_3322093"
 CF_PERSON_SELL_INTERESTS = "custom_label_3759156"
+CF_PERSON_HOLD_INTERESTS = "custom_label_3740611"
 CF_AGENT_AGREEMENT = "custom_label_3714334"
+CF_TOP_SPV_MANAGER = "custom_label_3948282"
+CF_SEC_PRIORITY = "custom_label_3912746"
 CF_NOTICE = "custom_label_3815544"
 CF_MAX_SIZE = "custom_label_3064645"
 CF_SHARE_COUNT = "custom_label_3070843"
@@ -69,6 +72,18 @@ OPT_AGENT_YES_SELLSIDE = 6354277
 
 AGENT_YES_OPTS = {OPT_AGENT_YES_BUYSIDE, OPT_AGENT_YES_SELLSIDE}
 
+OPT_SPV_BUILD_CONNECTION = 7026574   # Whitelisted: Build Connection
+OPT_SPV_MONTHLY_UPDATES = 7026575    # Whitelisted: Monthly Updates
+SPV_WHITELISTED_OPTS = {OPT_SPV_BUILD_CONNECTION, OPT_SPV_MONTHLY_UPDATES}
+SPV_OPT_LABELS = {
+    OPT_SPV_BUILD_CONNECTION: "Whitelisted: Build Connection",
+    OPT_SPV_MONTHLY_UPDATES: "Whitelisted: Monthly Updates",
+}
+
+OPT_SEC_PRIORITY_HIGH = 6919452      # High - Decision-Maker with Cash
+
+OPT_NEWSLETTER_SUBSCRIBED_WEEKLY = 6613674
+
 OPT_NOTICE_POST = 6762534
 OPT_NOTICE_UPDATE = 6762537
 NOTICE_ACTIONABLE = {OPT_NOTICE_POST, OPT_NOTICE_UPDATE}
@@ -81,7 +96,7 @@ POST_STRUCTURE_LABELS = {
     5077909: "None",
 }
 
-NEWSLETTER_OPTS = {6613674, 6613673, 6582981}
+NEWSLETTER_OPTS = {OPT_NEWSLETTER_SUBSCRIBED_WEEKLY, 6613673, 6582981}
 
 EMAIL_STATUS_REASONS = {
     3940558: "Bouncing",
@@ -558,6 +573,15 @@ def _fetch_json(s3, key):
     return json.loads(obj["Body"].read())
 
 
+def _load_security_names(s3):
+    try:
+        obj = s3.get_object(Bucket=S3_BUCKET, Key="security_names.json")
+        data = json.loads(obj["Body"].read())
+        return {int(k): v for k, v in data.items()}
+    except Exception:
+        return {}
+
+
 def _fmt_price(v):
     if v is None:
         return ""
@@ -682,6 +706,16 @@ def _contact_cell(name, email=None, person_id=None):
         return escape(label)
     href = PIPELINE_PERSON_URL.format(escape(str(person_id), quote=True))
     return f'<a href="{href}" style="{LINK_STYLE_500}">{escape(label)}</a>'
+
+
+def _email_link(email):
+    if not email:
+        return ""
+    href = f"mailto:{quote(email, safe='@')}"
+    return (
+        f'<a href="{escape(href, quote=True)}" style="{LINK_STYLE}">'
+        f"{escape(email)}</a>"
+    )
 
 
 def _colorize_symbol(sym):
@@ -1140,6 +1174,83 @@ def _build_leads_to_revive(people, companies, priority_pids=None):
     return rows
 
 
+def _build_spv_managers_to_warm(people):
+    rows = []
+    for p in people:
+        opt = _cf_option_id(p, CF_TOP_SPV_MANAGER)
+        if opt not in SPV_WHITELISTED_OPTS:
+            continue
+        name = _person_full_name(p) or ""
+        rows.append({
+            "person_id": p.get("id"),
+            "name": name,
+            "email": _person_email(p),
+            "spv_value": SPV_OPT_LABELS.get(opt, ""),
+            "sell_count": len(_cf_option_ids(p, CF_PERSON_SELL_INTERESTS)),
+            "buy_count": len(_cf_option_ids(p, CF_PERSON_BUY_INTERESTS)),
+            "_opt": opt,
+        })
+    rows.sort(key=lambda r: (
+        0 if r["_opt"] == OPT_SPV_BUILD_CONNECTION else 1,
+        r["name"].lower(),
+    ))
+    return rows
+
+
+def _build_top_buyers_to_warm(people):
+    rows = []
+    for p in people:
+        buy_ids = _cf_option_ids(p, CF_PERSON_BUY_INTERESTS)
+        if not buy_ids:
+            continue
+        if _cf_option_id(p, CF_SEC_PRIORITY) != OPT_SEC_PRIORITY_HIGH:
+            continue
+        name = _person_full_name(p) or ""
+        rows.append({
+            "person_id": p.get("id"),
+            "name": name,
+            "email": _person_email(p),
+            "buy_count": len(buy_ids),
+        })
+    rows.sort(key=lambda r: (-r["buy_count"], r["name"].lower()))
+    return rows[:30]
+
+
+def _build_popular_spv_managers(people, security_names):
+    buyer_counts = {}
+    for p in people:
+        for eid in _cf_option_ids(p, CF_PERSON_BUY_INTERESTS):
+            buyer_counts[eid] = buyer_counts.get(eid, 0) + 1
+    top10 = set(
+        sorted(buyer_counts, key=lambda e: buyer_counts[e], reverse=True)[:10]
+    )
+
+    rows = []
+    for p in people:
+        spv_opt = _cf_option_id(p, CF_TOP_SPV_MANAGER)
+        if spv_opt not in SPV_WHITELISTED_OPTS:
+            continue
+        if _cf_option_id(p, CF_NEWSLETTER) == OPT_NEWSLETTER_SUBSCRIBED_WEEKLY:
+            continue
+        hold_ids = _cf_option_ids(p, CF_PERSON_HOLD_INTERESTS)
+        matches = hold_ids & top10
+        if not matches:
+            continue
+        sorted_eids = sorted(
+            matches, key=lambda e: buyer_counts.get(e, 0), reverse=True
+        )
+        holdings = [security_names.get(eid, f"#{eid}") for eid in sorted_eids]
+        rows.append({
+            "person_id": p.get("id"),
+            "name": _person_full_name(p) or "",
+            "email": _person_email(p),
+            "spv_value": SPV_OPT_LABELS.get(spv_opt, ""),
+            "holdings": holdings,
+        })
+    rows.sort(key=lambda r: (-len(r["holdings"]), r["name"].lower()))
+    return rows
+
+
 QUEUE_H1_STYLE = (
     "font-size:22px; font-weight:700; color:#111827;"
     " margin:32px 0 8px 0;"
@@ -1240,7 +1351,9 @@ INTERACTIVE_JS = """
 
 def _render_html(crossed, tight, to_close, to_invoice, leads,
                  newsletter_recipient_count, leads_to_revive_count, date_str,
-                 companies_by_id, priority_leads, to_post, interactive=False):
+                 companies_by_id, priority_leads, to_post,
+                 spv_managers_to_warm, top_buyers_to_warm,
+                 popular_spv_managers, interactive=False):
     out = []
     if interactive:
         out.append(
@@ -1465,6 +1578,50 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
             )
         out.append("</table>")
 
+    # ── G. SPV MANAGERS TO WARM ───────────────────────────────────────────
+    out.append(_section_heading("G. SPV MANAGERS TO WARM"))
+    out.append(_muted_p(f"{len(spv_managers_to_warm)} SPV managers to warm"))
+    if not spv_managers_to_warm:
+        out.append(_muted_p("(None)"))
+    else:
+        out.append(_open_table())
+        out.append(_header_row([
+            "Name", "Email", "Top SPV Manager", "# Sells", "# Buys",
+        ]))
+        for r in spv_managers_to_warm:
+            out.append(
+                "<tr>"
+                + _td(_contact_cell(
+                    r["name"], email=r["email"], person_id=r["person_id"]
+                ))
+                + _td(_email_link(r["email"]))
+                + _td(escape(r["spv_value"]))
+                + _td(f"{r['sell_count']}")
+                + _td(f"{r['buy_count']}")
+                + "</tr>"
+            )
+        out.append("</table>")
+
+    # ── H. TOP BUYERS TO WARM ─────────────────────────────────────────────
+    out.append(_section_heading("H. TOP BUYERS TO WARM"))
+    out.append(_muted_p(f"{len(top_buyers_to_warm)} top buyers to warm"))
+    if not top_buyers_to_warm:
+        out.append(_muted_p("(None)"))
+    else:
+        out.append(_open_table())
+        out.append(_header_row(["Name", "Email", "# Buy Interests"]))
+        for r in top_buyers_to_warm:
+            out.append(
+                "<tr>"
+                + _td(_contact_cell(
+                    r["name"], email=r["email"], person_id=r["person_id"]
+                ))
+                + _td(_email_link(r["email"]))
+                + _td(f"{r['buy_count']}")
+                + "</tr>"
+            )
+        out.append("</table>")
+
     # ── F. Leads to Revive ────────────────────────────────────────────────
     out.append(_section_heading("F. Leads to Revive"))
     out.append(_muted_p(
@@ -1572,6 +1729,35 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
             )
         out.append("</table>")
 
+    # ── I. POPULAR SPV MANAGERS: Not yet on newsletter ────────────────────
+    out.append(_section_heading("I. POPULAR SPV MANAGERS: Not yet on newsletter"))
+    out.append(_muted_p(
+        "SPV managers who hold top-10 most-wanted securities but aren't "
+        "receiving the weekly newsletter"
+    ))
+    if not popular_spv_managers:
+        out.append(_muted_p(
+            "(None — all qualifying SPV managers are already subscribed.)"
+        ))
+    else:
+        out.append(_open_table())
+        out.append(_header_row([
+            "Name", "Email", "Top SPV Manager", "Holdings in Top 10",
+        ]))
+        for r in popular_spv_managers:
+            holdings_html = escape(", ".join(r["holdings"]))
+            out.append(
+                "<tr>"
+                + _td(_contact_cell(
+                    r["name"], email=r["email"], person_id=r["person_id"]
+                ))
+                + _td(_email_link(r["email"]))
+                + _td(escape(r["spv_value"]))
+                + _td(holdings_html)
+                + "</tr>"
+            )
+        out.append("</table>")
+
     if interactive:
         out.append("</div>")
         out.append(INTERACTIVE_JS)
@@ -1589,6 +1775,7 @@ def _build_brief_html(interactive):
     deals_doc = _fetch_json(s3, "deals.json")
     companies_doc = _fetch_json(s3, "companies.json")
     people_doc = _fetch_json(s3, "people.json")
+    security_names = _load_security_names(s3)
     deals = deals_doc.get("deals", []) or []
     companies = companies_doc.get("companies", []) or []
     people = people_doc.get("people", []) or []
@@ -1614,11 +1801,16 @@ def _build_brief_html(interactive):
     leads = _build_leads_to_revive(people, companies, priority_pids)
     leads_to_revive_count = len(leads)
     newsletter_recipient_count = _count_newsletter_recipients(people)
+    spv_managers_to_warm = _build_spv_managers_to_warm(people)
+    top_buyers_to_warm = _build_top_buyers_to_warm(people)
+    popular_spv_managers = _build_popular_spv_managers(people, security_names)
 
     body_html = _render_html(
         crossed, tight, to_close, to_invoice, leads,
         newsletter_recipient_count, leads_to_revive_count, date_str,
-        companies_by_id, priority_leads, to_post, interactive=interactive,
+        companies_by_id, priority_leads, to_post,
+        spv_managers_to_warm, top_buyers_to_warm, popular_spv_managers,
+        interactive=interactive,
     )
 
     counts = {
@@ -1630,6 +1822,9 @@ def _build_brief_html(interactive):
         "leads_to_revive": leads_to_revive_count,
         "priority_leads_no_email": len(priority_leads),
         "newsletter_recipients": newsletter_recipient_count,
+        "spv_managers_to_warm": len(spv_managers_to_warm),
+        "top_buyers_to_warm": len(top_buyers_to_warm),
+        "popular_spv_managers": len(popular_spv_managers),
         "deals": len(deals),
         "companies": len(companies),
         "people": len(people),
