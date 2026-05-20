@@ -1,5 +1,7 @@
 import json
 import os
+import urllib.error
+import urllib.request
 from datetime import datetime, timezone
 from html import escape
 from urllib.parse import quote
@@ -585,6 +587,70 @@ def _load_security_names(s3):
         return {}
 
 
+def get_jwt():
+    s3 = boto3.client('s3')
+    obj = s3.get_object(Bucket="pipeline-token", Key="pipeline-jwt.json")
+    return json.loads(obj['Body'].read())['jwt']
+
+
+def call_pipeline_api(method, endpoint, payload=None, jwt=None, timeout=15):
+    base = "https://api.pipelinecrm.com/api/v3"
+    url  = f"{base}{endpoint}"
+    headers = {
+        "Authorization": f"Bearer {jwt}",
+        "Content-Type":  "application/json"
+    }
+    data = json.dumps(payload).encode() if payload else None
+    req  = urllib.request.Request(url, data=data, headers=headers, method=method)
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return {"status": r.status, "data": json.loads(r.read().decode())}
+    except urllib.error.HTTPError as e:
+        return {"status": e.code, "data": e.read().decode()}
+    except Exception as e:
+        return {"status": 500, "data": str(e)}
+
+
+def _fetch_latest_note(deal_id, jwt):
+    if deal_id in (None, "") or not jwt:
+        return None
+    endpoint = f"/notes.json?conditions[deal_id]={deal_id}"
+    result = call_pipeline_api("GET", endpoint, jwt=jwt, timeout=3)
+    if result.get("status") != 200:
+        return None
+    data = result.get("data")
+    if not isinstance(data, dict):
+        return None
+    entries = data.get("entries") or []
+    if not isinstance(entries, list) or not entries:
+        return None
+    epoch = datetime.min.replace(tzinfo=timezone.utc)
+    entries.sort(
+        key=lambda n: _parse_dt(n.get("created_at")) or epoch,
+        reverse=True,
+    )
+    return entries[0]
+
+
+def _latest_activity_cell(note):
+    if not note:
+        return '<span style="color:#9ca3af;">—</span>'
+    created = _parse_dt(note.get("created_at"))
+    date_str = created.strftime("%m/%d") if created else ""
+    title = note.get("title") or ""
+    if not title:
+        content = (note.get("content") or "").strip()
+        if content:
+            truncated = content[:40]
+            title = truncated + "..." if len(content) > 40 else truncated
+    parts = ['<div style="font-size:12px;">']
+    if date_str:
+        parts.append(f'<div style="color:#6b7280;">{escape(date_str)}</div>')
+    parts.append(f'<div>{escape(title)}</div>')
+    parts.append('</div>')
+    return "".join(parts)
+
+
 def _fmt_price(v):
     if v is None:
         return ""
@@ -983,7 +1049,7 @@ def _build_tight(deals, companies, people_by_id):
     return rows
 
 
-def _build_to_close(deals, now, people_by_id):
+def _build_to_close(deals, now, people_by_id, jwt=None):
     rows = []
     for d in deals:
         sid = _stage_id(d)
@@ -1006,6 +1072,11 @@ def _build_to_close(deals, now, people_by_id):
             "_size": size,
         })
     rows.sort(key=lambda r: (r["_size"] is None, -(r["_size"] or 0.0)))
+    # Fetch the most recent note for each displayed deal. Sequential with a
+    # short per-call timeout (~3s) so a hung Pipeline API can't block the
+    # whole brief; on any error the cell falls back to an em dash.
+    for r in rows:
+        r["latest_note"] = _fetch_latest_note(r["deal"].get("id"), jwt)
     return rows
 
 
@@ -1531,7 +1602,7 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
         out.append(_open_table())
         out.append(_header_row([
             "Stage", "Deal Title", ("Buyer", "Seller"),
-            "IQF", "CEF", "Agent Agreement",
+            "IQF", "CEF", "Agent Agreement", "Latest activity",
         ], with_checkbox=interactive))
         for r in to_close:
             co = companies_by_id.get(_normalize_id(_company_id(r["deal"])))
@@ -1549,6 +1620,7 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
                 + _td(iqf_html)
                 + _td(cef_html)
                 + _td(_commission_cell(r["deal"]))
+                + _td(_latest_activity_cell(r.get("latest_note")))
                 + "</tr>"
             )
         out.append("</table>")
@@ -1935,9 +2007,18 @@ def _build_brief_html(interactive):
         if cid is not None:
             companies_by_id[cid] = c
 
+    # Pipeline JWT for Section B's per-row "Latest activity" lookups.
+    # Fetched once per brief render; failure (missing IAM permission, S3
+    # error, missing key) falls back to None and notes silently become
+    # em dashes in the rendered cells.
+    try:
+        jwt = get_jwt()
+    except Exception:
+        jwt = None
+
     crossed = _build_crossed(deals, people_by_id)
     tight = _build_tight(deals, companies, people_by_id)
-    to_close = _build_to_close(deals, now, people_by_id)
+    to_close = _build_to_close(deals, now, people_by_id, jwt=jwt)
     to_invoice = _build_to_invoice(deals, now, people_by_id)
     to_post = _build_to_post(deals)
     priority_leads = _build_priority_leads_no_email(people, deals)
