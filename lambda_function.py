@@ -1343,6 +1343,25 @@ INTERACTIVE_JS = """
         updateCounter();
       });
     }
+
+    const filterButtons = document.querySelectorAll("[data-filter-btn]");
+    const queues = document.querySelectorAll("[data-owner]");
+    function applyFilter(owner) {
+      queues.forEach(q => {
+        q.style.display = (!owner || q.getAttribute("data-owner") === owner)
+          ? "" : "none";
+      });
+      filterButtons.forEach(b => {
+        b.classList.toggle("active", b.getAttribute("data-filter-btn") === owner);
+      });
+    }
+    filterButtons.forEach(btn => {
+      btn.addEventListener("click", function() {
+        const target = btn.getAttribute("data-filter-btn");
+        const isActive = btn.classList.contains("active");
+        applyFilter(isActive ? null : target);
+      });
+    });
   });
 })();
 </script>
@@ -1365,10 +1384,24 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
             "<style>"
             "body { margin: 0; background: #f5f5f5; }"
             ".reset-anchor a { text-decoration: none; }"
+            ".filter-bar { display: flex; gap: 8px; margin: 16px 0 24px 0; }"
+            ".filter-btn { padding: 8px 18px; border: 1px solid #d1d5db;"
+            " background: #ffffff; color: #374151; font-size: 14px;"
+            " font-weight: 500; border-radius: 6px; cursor: pointer;"
+            " font-family: inherit; }"
+            ".filter-btn:hover { background: #f9fafb; }"
+            ".filter-btn.active { background: #2563eb; color: #ffffff;"
+            " border-color: #2563eb; }"
             "</style>"
             '</head><body class="reset-anchor">'
             f'<div style="background:#ffffff; {CONTAINER_STYLE}">'
             f'<h1 style="{H1_STYLE}">Daily Brief — {escape(date_str)}</h1>'
+            '<div class="filter-bar">'
+            '<button type="button" class="filter-btn"'
+            ' data-filter-btn="chad">Chad</button>'
+            '<button type="button" class="filter-btn"'
+            ' data-filter-btn="kate">Kate</button>'
+            '</div>'
         )
         out.append(DISMISS_BANNER_HTML)
     else:
@@ -1379,12 +1412,13 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
         )
 
     # ── Chad — Trading queue ──────────────────────────────────────────────
+    out.append('<div data-owner="chad">')
     out.append(
         f'<h1 style="{QUEUE_H1_STYLE}">Chad — Trading queue</h1>'
     )
 
     # ── A. INVOICE ────────────────────────────────────────────────────────
-    out.append(_section_heading("A. INVOICE: Get paid and win deal"))
+    out.append(_section_heading("1. INVOICE: Get paid and win deal"))
     if not to_invoice:
         out.append(_muted_p("(No SPA-signed deals awaiting invoice.)"))
     else:
@@ -1411,7 +1445,7 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
         out.append("</table>")
 
     # ── B. CLOSE ──────────────────────────────────────────────────────────
-    out.append(_section_heading("B. CLOSE: Move toward finish line"))
+    out.append(_section_heading("2. CLOSE: Move toward finish line"))
     if not to_close:
         out.append(_muted_p("(Nothing to close.)"))
     else:
@@ -1441,7 +1475,7 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
         out.append("</table>")
 
     # ── C. INTRODUCE ──────────────────────────────────────────────────────
-    out.append(_section_heading("C. INTRODUCE: Crossed trades"))
+    out.append(_section_heading("3. INTRODUCE: Crossed trades"))
     if not crossed:
         out.append(_muted_p("(None)"))
     else:
@@ -1480,7 +1514,7 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
         out.append("</table>")
 
     # ── D. EXPLORE ────────────────────────────────────────────────────────
-    out.append(_section_heading("D. EXPLORE: Update or engage close matches"))
+    out.append(_section_heading("4. EXPLORE: Update or engage close matches"))
     if not tight:
         out.append(_muted_p("(None)"))
     else:
@@ -1545,13 +1579,60 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
                 )
             out.append("</table>")
 
+    # ── 5. SPV MANAGERS TO WARM ───────────────────────────────────────────
+    out.append(_section_heading("5. SPV MANAGERS TO WARM"))
+    out.append(_muted_p(f"{len(spv_managers_to_warm)} SPV managers to warm"))
+    if not spv_managers_to_warm:
+        out.append(_muted_p("(None)"))
+    else:
+        out.append(_open_table())
+        out.append(_header_row([
+            "Name", "Email", "Top SPV Manager", "# Sells", "# Buys",
+        ]))
+        for r in spv_managers_to_warm:
+            out.append(
+                "<tr>"
+                + _td(_contact_cell(
+                    r["name"], email=r["email"], person_id=r["person_id"]
+                ))
+                + _td(_email_link(r["email"]))
+                + _td(escape(r["spv_value"]))
+                + _td(f"{r['sell_count']}")
+                + _td(f"{r['buy_count']}")
+                + "</tr>"
+            )
+        out.append("</table>")
+
+    # ── 6. TOP BUYERS TO WARM ─────────────────────────────────────────────
+    out.append(_section_heading("6. TOP BUYERS TO WARM"))
+    out.append(_muted_p(f"{len(top_buyers_to_warm)} top buyers to warm"))
+    if not top_buyers_to_warm:
+        out.append(_muted_p("(None)"))
+    else:
+        out.append(_open_table())
+        out.append(_header_row(["Name", "Email", "# Buy Interests"]))
+        for r in top_buyers_to_warm:
+            out.append(
+                "<tr>"
+                + _td(_contact_cell(
+                    r["name"], email=r["email"], person_id=r["person_id"]
+                ))
+                + _td(_email_link(r["email"]))
+                + _td(f"{r['buy_count']}")
+                + "</tr>"
+            )
+        out.append("</table>")
+
+    out.append("</div>")  # close data-owner="chad"
+
     # ── Kate — Queue ──────────────────────────────────────────────────────
+    out.append('<div data-owner="kate">')
     out.append(
         f'<h1 style="{QUEUE_H1_STYLE_TOP}">Kate — Queue</h1>'
     )
 
     # ── E. POST: Trades to post to Notice ─────────────────────────────────
-    out.append(_section_heading("E. POST: Trades to post to Notice"))
+    out.append(_section_heading("1. POST: Trades to post to Notice"))
     if not to_post:
         out.append(_muted_p("(Nothing to post — clean book!)"))
     else:
@@ -1578,52 +1659,8 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
             )
         out.append("</table>")
 
-    # ── G. SPV MANAGERS TO WARM ───────────────────────────────────────────
-    out.append(_section_heading("G. SPV MANAGERS TO WARM"))
-    out.append(_muted_p(f"{len(spv_managers_to_warm)} SPV managers to warm"))
-    if not spv_managers_to_warm:
-        out.append(_muted_p("(None)"))
-    else:
-        out.append(_open_table())
-        out.append(_header_row([
-            "Name", "Email", "Top SPV Manager", "# Sells", "# Buys",
-        ]))
-        for r in spv_managers_to_warm:
-            out.append(
-                "<tr>"
-                + _td(_contact_cell(
-                    r["name"], email=r["email"], person_id=r["person_id"]
-                ))
-                + _td(_email_link(r["email"]))
-                + _td(escape(r["spv_value"]))
-                + _td(f"{r['sell_count']}")
-                + _td(f"{r['buy_count']}")
-                + "</tr>"
-            )
-        out.append("</table>")
-
-    # ── H. TOP BUYERS TO WARM ─────────────────────────────────────────────
-    out.append(_section_heading("H. TOP BUYERS TO WARM"))
-    out.append(_muted_p(f"{len(top_buyers_to_warm)} top buyers to warm"))
-    if not top_buyers_to_warm:
-        out.append(_muted_p("(None)"))
-    else:
-        out.append(_open_table())
-        out.append(_header_row(["Name", "Email", "# Buy Interests"]))
-        for r in top_buyers_to_warm:
-            out.append(
-                "<tr>"
-                + _td(_contact_cell(
-                    r["name"], email=r["email"], person_id=r["person_id"]
-                ))
-                + _td(_email_link(r["email"]))
-                + _td(f"{r['buy_count']}")
-                + "</tr>"
-            )
-        out.append("</table>")
-
-    # ── F. Leads to Revive ────────────────────────────────────────────────
-    out.append(_section_heading("F. Leads to Revive"))
+    # ── 2. Leads to Revive ────────────────────────────────────────────────
+    out.append(_section_heading("2. Leads to Revive"))
     out.append(_muted_p(
         f"Priority Leads (active deals, no work email): {len(priority_leads)}"
     ))
@@ -1730,7 +1767,7 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
         out.append("</table>")
 
     # ── I. POPULAR SPV MANAGERS: Not yet on newsletter ────────────────────
-    out.append(_section_heading("I. POPULAR SPV MANAGERS: Not yet on newsletter"))
+    out.append(_section_heading("3. POPULAR SPV MANAGERS: Not yet on newsletter"))
     out.append(_muted_p(
         "SPV managers who hold top-10 most-wanted securities but aren't "
         "receiving the weekly newsletter"
@@ -1757,6 +1794,8 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
                 + "</tr>"
             )
         out.append("</table>")
+
+    out.append("</div>")  # close data-owner="kate"
 
     if interactive:
         out.append("</div>")
