@@ -167,10 +167,13 @@ BODY_STYLE = (
 )
 CONTAINER_STYLE = "max-width:960px; margin:0 auto; padding:24px;"
 H1_STYLE = (
-    "font-size:22px; font-weight:bold; color:#111827; margin:0 0 24px 0;"
+    f"font-family:{FONT_STACK}; font-size:40px; font-weight:700;"
+    " color:#0f172a; letter-spacing:-0.02em; line-height:1.1;"
+    " margin:0 0 24px 0;"
 )
 H2_STYLE = (
-    "font-size:18px; font-weight:bold; color:#111827;"
+    f"font-family:{FONT_STACK}; font-size:20px; font-weight:600;"
+    " color:#111827; letter-spacing:-0.01em;"
     " border-bottom:1px solid #e5e7eb; padding-bottom:6px;"
     " margin:32px 0 12px 0;"
 )
@@ -815,6 +818,29 @@ def _section_heading(text):
     return f'<h2 style="{H2_STYLE}">{escape(text)}</h2>'
 
 
+def _section_open(key, text, interactive):
+    """Open a dismissable section wrapper. Emits the wrapper div and the
+    section heading. The renderer must close with _section_close() once
+    the section's table/fallback markup has been appended."""
+    hide_btn = ""
+    if interactive:
+        hide_btn = (
+            '<button type="button" class="section-hide"'
+            ' title="Hide this section"'
+            ' style="float:right; background:none; border:none; cursor:pointer;'
+            ' color:#9ca3af; font-size:18px; line-height:1; padding:4px 8px;'
+            ' font-family:inherit;">&times;</button>'
+        )
+    return (
+        f'<div class="section" data-section-key="{escape(key, quote=True)}">'
+        f'<h2 style="{H2_STYLE}">{hide_btn}{escape(text)}</h2>'
+    )
+
+
+def _section_close():
+    return "</div>"
+
+
 def _muted_p(text):
     return f'<p style="{SUB_SUMMARY_STYLE}">{escape(text)}</p>'
 
@@ -1252,12 +1278,14 @@ def _build_popular_spv_managers(people, security_names):
 
 
 QUEUE_H1_STYLE = (
-    "font-size:22px; font-weight:700; color:#111827;"
-    " margin:32px 0 8px 0;"
+    f"font-family:{FONT_STACK}; font-size:26px; font-weight:700;"
+    " color:#111827; letter-spacing:-0.015em;"
+    " margin:40px 0 12px 0;"
 )
 QUEUE_H1_STYLE_TOP = (
-    "font-size:22px; font-weight:700; color:#111827;"
-    " margin:48px 0 8px 0;"
+    f"font-family:{FONT_STACK}; font-size:26px; font-weight:700;"
+    " color:#111827; letter-spacing:-0.015em;"
+    " margin:56px 0 12px 0;"
 )
 
 DISMISS_BANNER_HTML = (
@@ -1273,6 +1301,7 @@ INTERACTIVE_JS = """
 <script>
 (function() {
   const STORAGE_KEY = "dailyBriefDismissed";
+  const SECTION_STORAGE_KEY = "dailyBriefSectionsDismissed";
   const today = new Date().toISOString().slice(0, 10);
 
   function readAll() {
@@ -1290,6 +1319,28 @@ INTERACTIVE_JS = """
     const fresh = {};
     if (list.length) fresh[today] = list;
     writeAll(fresh);
+  }
+  function readAllSections() {
+    try { return JSON.parse(localStorage.getItem(SECTION_STORAGE_KEY) || "{}"); }
+    catch (e) { return {}; }
+  }
+  function writeAllSections(obj) {
+    localStorage.setItem(SECTION_STORAGE_KEY, JSON.stringify(obj));
+  }
+  function getTodaySections() {
+    return readAllSections()[today] || [];
+  }
+  function setTodaySections(list) {
+    const fresh = {};
+    if (list.length) fresh[today] = list;
+    writeAllSections(fresh);
+  }
+  function applyDismissedSections() {
+    const list = new Set(getTodaySections());
+    document.querySelectorAll("[data-section-key]").forEach(section => {
+      const key = section.getAttribute("data-section-key");
+      if (list.has(key)) section.style.display = "none";
+    });
   }
   function updateCounter() {
     const list = getToday();
@@ -1313,6 +1364,18 @@ INTERACTIVE_JS = """
   }
   document.addEventListener("DOMContentLoaded", function() {
     applyDismissed();
+    applyDismissedSections();
+    document.querySelectorAll(".section-hide").forEach(btn => {
+      btn.addEventListener("click", function() {
+        const section = btn.closest("[data-section-key]");
+        if (!section) return;
+        const key = section.getAttribute("data-section-key");
+        const list = getTodaySections();
+        if (!list.includes(key)) list.push(key);
+        setTodaySections(list);
+        section.style.display = "none";
+      });
+    });
     document.querySelectorAll("input.row-dismiss").forEach(cb => {
       cb.addEventListener("change", function() {
         const key = this.getAttribute("data-row-key");
@@ -1335,10 +1398,14 @@ INTERACTIVE_JS = """
       showAll.addEventListener("click", function(e) {
         e.preventDefault();
         setToday([]);
+        setTodaySections([]);
         document.querySelectorAll("tr[data-row-key]").forEach(tr => {
           tr.style.display = "";
           const cb = tr.querySelector("input.row-dismiss");
           if (cb) cb.checked = false;
+        });
+        document.querySelectorAll("[data-section-key]").forEach(section => {
+          section.style.display = "";
         });
         updateCounter();
       });
@@ -1373,6 +1440,11 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
                  companies_by_id, priority_leads, to_post,
                  spv_managers_to_warm, top_buyers_to_warm,
                  popular_spv_managers, interactive=False):
+    chad_count = (
+        len(to_invoice) + len(to_close) + len(crossed) + len(tight)
+        + len(spv_managers_to_warm) + len(top_buyers_to_warm)
+    )
+    kate_count = len(to_post) + len(leads) + len(popular_spv_managers)
     out = []
     if interactive:
         out.append(
@@ -1398,9 +1470,11 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
             f'<h1 style="{H1_STYLE}">Daily Brief — {escape(date_str)}</h1>'
             '<div class="filter-bar">'
             '<button type="button" class="filter-btn"'
-            ' data-filter-btn="chad">Chad</button>'
+            f' data-filter-btn="chad">Chad: {chad_count}'
+            f" To Do{'' if chad_count == 1 else 's'}</button>"
             '<button type="button" class="filter-btn"'
-            ' data-filter-btn="kate">Kate</button>'
+            f' data-filter-btn="kate">Kate: {kate_count}'
+            f" To Do{'' if kate_count == 1 else 's'}</button>"
             '</div>'
         )
         out.append(DISMISS_BANNER_HTML)
@@ -1418,7 +1492,9 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
     )
 
     # ── A. INVOICE ────────────────────────────────────────────────────────
-    out.append(_section_heading("1. INVOICE: Get paid and win deal"))
+    out.append(_section_open(
+        "chad-1-invoice", "1. INVOICE: Get paid and win deal", interactive,
+    ))
     if not to_invoice:
         out.append(_muted_p("(No SPA-signed deals awaiting invoice.)"))
     else:
@@ -1443,9 +1519,12 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
                 + "</tr>"
             )
         out.append("</table>")
+    out.append(_section_close())
 
     # ── B. CLOSE ──────────────────────────────────────────────────────────
-    out.append(_section_heading("2. CLOSE: Move toward finish line"))
+    out.append(_section_open(
+        "chad-2-close", "2. CLOSE: Move toward finish line", interactive,
+    ))
     if not to_close:
         out.append(_muted_p("(Nothing to close.)"))
     else:
@@ -1473,9 +1552,12 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
                 + "</tr>"
             )
         out.append("</table>")
+    out.append(_section_close())
 
     # ── C. INTRODUCE ──────────────────────────────────────────────────────
-    out.append(_section_heading("3. INTRODUCE: Crossed trades"))
+    out.append(_section_open(
+        "chad-3-introduce", "3. INTRODUCE: Crossed trades", interactive,
+    ))
     if not crossed:
         out.append(_muted_p("(None)"))
     else:
@@ -1512,9 +1594,14 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
                 + "</tr>"
             )
         out.append("</table>")
+    out.append(_section_close())
 
     # ── D. EXPLORE ────────────────────────────────────────────────────────
-    out.append(_section_heading("4. EXPLORE: Update or engage close matches"))
+    out.append(_section_open(
+        "chad-4-explore",
+        "4. EXPLORE: Update or engage close matches",
+        interactive,
+    ))
     if not tight:
         out.append(_muted_p("(None)"))
     else:
@@ -1578,9 +1665,12 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
                     + "</tr>"
                 )
             out.append("</table>")
+    out.append(_section_close())
 
     # ── 5. SPV MANAGERS TO WARM ───────────────────────────────────────────
-    out.append(_section_heading("5. SPV MANAGERS TO WARM"))
+    out.append(_section_open(
+        "chad-5-spv-managers", "5. SPV MANAGERS TO WARM", interactive,
+    ))
     out.append(_muted_p(f"{len(spv_managers_to_warm)} SPV managers to warm"))
     if not spv_managers_to_warm:
         out.append(_muted_p("(None)"))
@@ -1602,9 +1692,12 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
                 + "</tr>"
             )
         out.append("</table>")
+    out.append(_section_close())
 
     # ── 6. TOP BUYERS TO WARM ─────────────────────────────────────────────
-    out.append(_section_heading("6. TOP BUYERS TO WARM"))
+    out.append(_section_open(
+        "chad-6-top-buyers", "6. TOP BUYERS TO WARM", interactive,
+    ))
     out.append(_muted_p(f"{len(top_buyers_to_warm)} top buyers to warm"))
     if not top_buyers_to_warm:
         out.append(_muted_p("(None)"))
@@ -1622,6 +1715,7 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
                 + "</tr>"
             )
         out.append("</table>")
+    out.append(_section_close())
 
     out.append("</div>")  # close data-owner="chad"
 
@@ -1632,7 +1726,9 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
     )
 
     # ── E. POST: Trades to post to Notice ─────────────────────────────────
-    out.append(_section_heading("1. POST: Trades to post to Notice"))
+    out.append(_section_open(
+        "kate-1-post", "1. POST: Trades to post to Notice", interactive,
+    ))
     if not to_post:
         out.append(_muted_p("(Nothing to post — clean book!)"))
     else:
@@ -1658,9 +1754,12 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
                 + "</tr>"
             )
         out.append("</table>")
+    out.append(_section_close())
 
     # ── 2. Leads to Revive ────────────────────────────────────────────────
-    out.append(_section_heading("2. Leads to Revive"))
+    out.append(_section_open(
+        "kate-2-leads", "2. Leads to Revive", interactive,
+    ))
     out.append(_muted_p(
         f"Priority Leads (active deals, no work email): {len(priority_leads)}"
     ))
@@ -1765,9 +1864,14 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
                 + "</tr>"
             )
         out.append("</table>")
+    out.append(_section_close())
 
     # ── I. POPULAR SPV MANAGERS: Not yet on newsletter ────────────────────
-    out.append(_section_heading("3. POPULAR SPV MANAGERS: Not yet on newsletter"))
+    out.append(_section_open(
+        "kate-3-popular-spv",
+        "3. POPULAR SPV MANAGERS: Not yet on newsletter",
+        interactive,
+    ))
     out.append(_muted_p(
         "SPV managers who hold top-10 most-wanted securities but aren't "
         "receiving the weekly newsletter"
@@ -1794,6 +1898,7 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
                 + "</tr>"
             )
         out.append("</table>")
+    out.append(_section_close())
 
     out.append("</div>")  # close data-owner="kate"
 
