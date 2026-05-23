@@ -1819,12 +1819,14 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
         out.append(_open_table())
         out.append(_header_row([
             "Name", "Email", "Top SPV Manager", "# Sells", "# Buys",
-        ]))
+        ], with_checkbox=interactive))
         for r in spv_managers_to_warm:
+            pid = r["person_id"]
             out.append(
-                "<tr>"
+                _row_open("G", pid, interactive)
+                + _checkbox_td("G", pid, interactive)
                 + _td(_contact_cell(
-                    r["name"], email=r["email"], person_id=r["person_id"]
+                    r["name"], email=r["email"], person_id=pid
                 ))
                 + _td(_email_link(r["email"]))
                 + _td(escape(r["spv_value"]))
@@ -1844,12 +1846,17 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
         out.append(_muted_p("(None)"))
     else:
         out.append(_open_table())
-        out.append(_header_row(["Name", "Email", "# Buy Interests"]))
+        out.append(_header_row(
+            ["Name", "Email", "# Buy Interests"],
+            with_checkbox=interactive,
+        ))
         for r in top_buyers_to_warm:
+            pid = r["person_id"]
             out.append(
-                "<tr>"
+                _row_open("H", pid, interactive)
+                + _checkbox_td("H", pid, interactive)
                 + _td(_contact_cell(
-                    r["name"], email=r["email"], person_id=r["person_id"]
+                    r["name"], email=r["email"], person_id=pid
                 ))
                 + _td(_email_link(r["email"]))
                 + _td(f"{r['buy_count']}")
