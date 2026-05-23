@@ -914,15 +914,16 @@ def _row_open(section, row_id, interactive):
     return "<tr>"
 
 
-def _checkbox_td(section, row_id, interactive):
+def _checkbox_td(section, row_id, interactive, long_dismiss=False):
     if not interactive or row_id in (None, ""):
         return ""
     key = f"{section}:{row_id}"
+    long_attr = ' data-long-dismiss="1"' if long_dismiss else ""
     return (
         '<td style="width:32px; text-align:center; padding:10px;'
         ' border-bottom:1px solid #f3f4f6; vertical-align:top;">'
         f'<input type="checkbox" class="row-dismiss"'
-        f' data-row-key="{escape(key, quote=True)}" />'
+        f' data-row-key="{escape(key, quote=True)}"{long_attr} />'
         '</td>'
     )
 
@@ -1327,7 +1328,7 @@ def _build_spv_managers_to_warm(people):
     rows = []
     for p in people:
         opt = _cf_option_id(p, CF_TOP_SPV_MANAGER)
-        if opt not in SPV_WHITELISTED_OPTS:
+        if opt != OPT_SPV_BUILD_CONNECTION:
             continue
         name = _person_full_name(p) or ""
         rows.append({
@@ -1425,6 +1426,8 @@ INTERACTIVE_JS = """
 (function() {
   const STORAGE_KEY = "dailyBriefDismissed";
   const SECTION_STORAGE_KEY = "dailyBriefSectionsDismissed";
+  const LONG_DISMISS_KEY = "dailyBriefLongDismissed";
+  const LONG_DISMISS_MS = 60 * 24 * 60 * 60 * 1000;
   const today = new Date().toISOString().slice(0, 10);
 
   function readAll() {
@@ -1442,6 +1445,33 @@ INTERACTIVE_JS = """
     const fresh = {};
     if (list.length) fresh[today] = list;
     writeAll(fresh);
+  }
+  function readLong() {
+    try { return JSON.parse(localStorage.getItem(LONG_DISMISS_KEY) || "{}"); }
+    catch (e) { return {}; }
+  }
+  function writeLong(obj) {
+    localStorage.setItem(LONG_DISMISS_KEY, JSON.stringify(obj));
+  }
+  function getLongDismissed() {
+    const obj = readLong();
+    const now = Date.now();
+    let changed = false;
+    for (const k of Object.keys(obj)) {
+      if (!obj[k] || obj[k] < now) { delete obj[k]; changed = true; }
+    }
+    if (changed) writeLong(obj);
+    return obj;
+  }
+  function addLongDismissed(key) {
+    const obj = readLong();
+    obj[key] = Date.now() + LONG_DISMISS_MS;
+    writeLong(obj);
+  }
+  function removeLongDismissed(key) {
+    const obj = readLong();
+    delete obj[key];
+    writeLong(obj);
   }
   function readAllSections() {
     try { return JSON.parse(localStorage.getItem(SECTION_STORAGE_KEY) || "{}"); }
@@ -1475,9 +1505,10 @@ INTERACTIVE_JS = """
   }
   function applyDismissed() {
     const list = new Set(getToday());
+    const longSet = new Set(Object.keys(getLongDismissed()));
     document.querySelectorAll("tr[data-row-key]").forEach(tr => {
       const key = tr.getAttribute("data-row-key");
-      if (list.has(key)) {
+      if (list.has(key) || longSet.has(key)) {
         tr.style.display = "none";
         const cb = tr.querySelector("input.row-dismiss");
         if (cb) cb.checked = true;
@@ -1502,8 +1533,19 @@ INTERACTIVE_JS = """
     document.querySelectorAll("input.row-dismiss").forEach(cb => {
       cb.addEventListener("change", function() {
         const key = this.getAttribute("data-row-key");
-        const list = getToday();
+        const isLong = this.getAttribute("data-long-dismiss") === "1";
         const tr = this.closest("tr[data-row-key]");
+        if (isLong) {
+          if (this.checked) {
+            addLongDismissed(key);
+            if (tr) tr.style.display = "none";
+          } else {
+            removeLongDismissed(key);
+            if (tr) tr.style.display = "";
+          }
+          return;
+        }
+        const list = getToday();
         if (this.checked) {
           if (!list.includes(key)) list.push(key);
           if (tr) tr.style.display = "none";
@@ -1522,6 +1564,7 @@ INTERACTIVE_JS = """
         e.preventDefault();
         setToday([]);
         setTodaySections([]);
+        writeLong({});
         document.querySelectorAll("tr[data-row-key]").forEach(tr => {
           tr.style.display = "";
           const cb = tr.querySelector("input.row-dismiss");
@@ -1819,12 +1862,14 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
         out.append(_open_table())
         out.append(_header_row([
             "Name", "Email", "Top SPV Manager", "# Sells", "# Buys",
-        ]))
+        ], with_checkbox=interactive))
         for r in spv_managers_to_warm:
+            pid = r["person_id"]
             out.append(
-                "<tr>"
+                _row_open("G", pid, interactive)
+                + _checkbox_td("G", pid, interactive, long_dismiss=True)
                 + _td(_contact_cell(
-                    r["name"], email=r["email"], person_id=r["person_id"]
+                    r["name"], email=r["email"], person_id=pid
                 ))
                 + _td(_email_link(r["email"]))
                 + _td(escape(r["spv_value"]))
@@ -1844,12 +1889,17 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
         out.append(_muted_p("(None)"))
     else:
         out.append(_open_table())
-        out.append(_header_row(["Name", "Email", "# Buy Interests"]))
+        out.append(_header_row(
+            ["Name", "Email", "# Buy Interests"],
+            with_checkbox=interactive,
+        ))
         for r in top_buyers_to_warm:
+            pid = r["person_id"]
             out.append(
-                "<tr>"
+                _row_open("H", pid, interactive)
+                + _checkbox_td("H", pid, interactive, long_dismiss=True)
                 + _td(_contact_cell(
-                    r["name"], email=r["email"], person_id=r["person_id"]
+                    r["name"], email=r["email"], person_id=pid
                 ))
                 + _td(_email_link(r["email"]))
                 + _td(f"{r['buy_count']}")
