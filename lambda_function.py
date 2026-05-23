@@ -1328,7 +1328,7 @@ def _build_spv_managers_to_warm(people):
     rows = []
     for p in people:
         opt = _cf_option_id(p, CF_TOP_SPV_MANAGER)
-        if opt not in SPV_WHITELISTED_OPTS:
+        if opt != OPT_SPV_BUILD_CONNECTION:
             continue
         name = _person_full_name(p) or ""
         rows.append({
