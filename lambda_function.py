@@ -1335,6 +1335,7 @@ def _build_spv_managers_to_warm(people):
             "person_id": p.get("id"),
             "name": name,
             "email": _person_email(p),
+            "cef": _person_cef(p),
             "spv_value": SPV_OPT_LABELS.get(opt, ""),
             "sell_count": len(_cf_option_ids(p, CF_PERSON_SELL_INTERESTS)),
             "buy_count": len(_cf_option_ids(p, CF_PERSON_BUY_INTERESTS)),
@@ -1360,6 +1361,7 @@ def _build_top_buyers_to_warm(people):
             "person_id": p.get("id"),
             "name": name,
             "email": _person_email(p),
+            "iqf": _person_iqf(p),
             "buy_count": len(buy_ids),
         })
     rows.sort(key=lambda r: (-r["buy_count"], r["name"].lower()))
@@ -1861,7 +1863,7 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
     else:
         out.append(_open_table())
         out.append(_header_row([
-            "Name", "Email", "Top SPV Manager", "# Sells", "# Buys",
+            "Name", "Email", "CEF", "Top SPV Manager", "# Sells", "# Buys",
         ], with_checkbox=interactive))
         for r in spv_managers_to_warm:
             pid = r["person_id"]
@@ -1872,6 +1874,7 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
                     r["name"], email=r["email"], person_id=pid
                 ))
                 + _td(_email_link(r["email"]))
+                + _td(_colorize_symbol(r["cef"]))
                 + _td(escape(r["spv_value"]))
                 + _td(f"{r['sell_count']}")
                 + _td(f"{r['buy_count']}")
@@ -1890,7 +1893,7 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
     else:
         out.append(_open_table())
         out.append(_header_row(
-            ["Name", "Email", "# Buy Interests"],
+            ["Name", "Email", "IQF", "# Buy Interests"],
             with_checkbox=interactive,
         ))
         for r in top_buyers_to_warm:
@@ -1902,6 +1905,7 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
                     r["name"], email=r["email"], person_id=pid
                 ))
                 + _td(_email_link(r["email"]))
+                + _td(_colorize_symbol(r["iqf"]))
                 + _td(f"{r['buy_count']}")
                 + "</tr>"
             )
