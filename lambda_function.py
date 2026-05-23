@@ -1863,7 +1863,7 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
     else:
         out.append(_open_table())
         out.append(_header_row([
-            "Name", "Email", "CEF", "Top SPV Manager", "# Sells", "# Buys",
+            "Name", "Email", "Top SPV Manager", "# Sells", "# Buys", "CEF",
         ], with_checkbox=interactive))
         for r in spv_managers_to_warm:
             pid = r["person_id"]
@@ -1874,10 +1874,10 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
                     r["name"], email=r["email"], person_id=pid
                 ))
                 + _td(_email_link(r["email"]))
-                + _td(_colorize_symbol(r["cef"]))
                 + _td(escape(r["spv_value"]))
                 + _td(f"{r['sell_count']}")
                 + _td(f"{r['buy_count']}")
+                + _td(_colorize_symbol(r["cef"]))
                 + "</tr>"
             )
         out.append("</table>")
@@ -1893,7 +1893,7 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
     else:
         out.append(_open_table())
         out.append(_header_row(
-            ["Name", "Email", "IQF", "# Buy Interests"],
+            ["Name", "Email", "# Buy Interests", "IQF"],
             with_checkbox=interactive,
         ))
         for r in top_buyers_to_warm:
@@ -1905,8 +1905,8 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
                     r["name"], email=r["email"], person_id=pid
                 ))
                 + _td(_email_link(r["email"]))
-                + _td(_colorize_symbol(r["iqf"]))
                 + _td(f"{r['buy_count']}")
+                + _td(_colorize_symbol(r["iqf"]))
                 + "</tr>"
             )
         out.append("</table>")
