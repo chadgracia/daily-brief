@@ -1356,6 +1356,8 @@ def _build_top_buyers_to_warm(people):
             continue
         if _cf_option_id(p, CF_SEC_PRIORITY) != OPT_SEC_PRIORITY_HIGH:
             continue
+        if _cf_option_id(p, CF_IQF) == OPT_IQF_YES:
+            continue
         name = _person_full_name(p) or ""
         rows.append({
             "person_id": p.get("id"),
