@@ -1523,6 +1523,14 @@ INTERACTIVE_JS = """
   document.addEventListener("DOMContentLoaded", function() {
     applyDismissed();
     applyDismissedSections();
+    const refreshBtn = document.getElementById("refresh-btn");
+    if (refreshBtn) {
+      refreshBtn.addEventListener("click", function() {
+        refreshBtn.disabled = true;
+        refreshBtn.textContent = "Refreshing…";
+        window.location.reload();
+      });
+    }
     document.querySelectorAll(".section-hide").forEach(btn => {
       btn.addEventListener("click", function() {
         const section = btn.closest("[data-section-key]");
@@ -1651,10 +1659,18 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
             ".filter-btn:hover { background: #f9fafb; }"
             ".filter-btn.active { background: #2563eb; color: #ffffff;"
             " border-color: #2563eb; }"
+            ".refresh-btn { padding: 8px 18px; border: 1px solid #2563eb;"
+            " background: #2563eb; color: #ffffff; font-size: 14px;"
+            " font-weight: 500; border-radius: 6px; cursor: pointer;"
+            " font-family: inherit; margin: 0 0 8px 0; }"
+            ".refresh-btn:hover { background: #1d4ed8; }"
+            ".refresh-btn:disabled { opacity: 0.6; cursor: default; }"
             "</style>"
             '</head><body class="reset-anchor">'
             f'<div style="background:#ffffff; {CONTAINER_STYLE}">'
             f'<h1 style="{H1_STYLE}">Daily Brief — {escape(date_str)}</h1>'
+            '<button type="button" id="refresh-btn" class="refresh-btn">'
+            '↻ Refresh data</button>'
             '<div class="filter-bar">'
             '<button type="button" class="filter-btn"'
             f' data-filter-btn="chad">Chad: {chad_count}'
