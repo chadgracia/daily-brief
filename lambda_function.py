@@ -781,39 +781,41 @@ def _envelope_link(deal, person, company, interactive=False):
         your_price = None
         market_price = None
 
-    lines = [
+    paragraphs = [
         f"Dear {first_name}:",
         "I have a quick question about your indication: "
         f"{TRADES_DEAL_URL.format(deal_id)}",
     ]
     if your_price is not None:
         if market_price is not None:
-            lines.append(
+            paragraphs.append(
                 f"I recall your price was {_fmt_price(your_price)} "
                 f"and I see the market price is {_fmt_price(market_price)}."
             )
         else:
-            lines.append(f"I recall your price was {_fmt_price(your_price)}.")
+            paragraphs.append(f"I recall your price was {_fmt_price(your_price)}.")
 
     if side == "BUY" and _cf_option_id(person, CF_IQF) != OPT_IQF_YES:
-        lines.append("")
-        lines.append(
+        paragraphs.append(
             "I noticed that we don't have an Investor Qualification Form on file. "
             "Can you take a moment to fill this out so that you're all papered up "
             "and ready to close?"
         )
-        lines.append(f"Entity: {IQF_URL_ENTITY}")
-        lines.append(f"Natural person: {IQF_URL_NATURAL}")
+        paragraphs.append(
+            f"Entity: {IQF_URL_ENTITY}\r\nNatural person: {IQF_URL_NATURAL}"
+        )
     elif side == "SELL" and _cf_option_id(person, CF_CEF) != OPT_CEF_YES:
-        lines.append("")
-        lines.append(
+        paragraphs.append(
             "I have some inquiries but would need this form to move forward. "
             "Can you take a moment to fill it out?"
         )
-        lines.append(f"Entity: {CEF_URL_ENTITY}")
-        lines.append(f"Natural person: {CEF_URL_NATURAL}")
+        paragraphs.append(
+            f"Entity: {CEF_URL_ENTITY}\r\nNatural person: {CEF_URL_NATURAL}"
+        )
 
-    body = "\r\n".join(lines)
+    # Blank line between paragraphs; the Entity / Natural-person links stay
+    # together as a single block.
+    body = "\r\n\r\n".join(paragraphs)
     if interactive:
         # Open a compose window in Outlook on the web (Microsoft 365) rather
         # than relying on the browser's default mailto handler.
