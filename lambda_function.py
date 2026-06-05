@@ -43,6 +43,7 @@ CF_DEAL_SIDE = "custom_label_1958"
 CF_GROSS = "custom_label_3064339"
 CF_NET = "custom_label_3064369"
 CF_STRUCTURE = "custom_label_3064360"
+CF_NEXUS = "custom_label_3751449"
 CF_TICKET_MIN = "custom_label_3065488"
 CF_TICKET_MAX = "custom_label_3064645"
 CF_MKT_ASK = "custom_label_3997297"
@@ -65,6 +66,7 @@ OPT_SELL = 5011675
 OPT_BUY = 5077819
 OPT_STRUCT_DIRECT = 6250090
 OPT_STRUCT_FUND = 5077906
+OPT_NEXUS_DIRECT = 6460632
 OPT_IQF_YES = 6496840
 OPT_IQF_PENDING = 6496842
 OPT_IQF_NO = 6496841
@@ -1102,6 +1104,8 @@ def _build_tight(deals, companies, people_by_id):
     for d in deals:
         sid = _stage_id(d)
         if sid not in MARKET_STAGES:
+            continue
+        if _cf_option_id(d, CF_NEXUS) != OPT_NEXUS_DIRECT:
             continue
         side = _deal_side(d)
         cid = _company_id(d)
