@@ -1593,18 +1593,8 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
             '<meta charset="utf-8">'
             '<meta name="viewport" content="width=device-width, initial-scale=1">'
             f'<title>Daily Brief — {escape(date_str)}</title>'
-            "<style>"
-            "body { margin: 0; background: #f5f5f5; }"
-            ".reset-anchor a { text-decoration: none; }"
-            ".filter-bar { display: flex; gap: 8px; margin: 16px 0 24px 0; }"
-            ".filter-btn { padding: 8px 18px; border: 1px solid #d1d5db;"
-            " background: #ffffff; color: #374151; font-size: 14px;"
-            " font-weight: 500; border-radius: 6px; cursor: pointer;"
-            " font-family: inherit; }"
-            ".filter-btn:hover { background: #f9fafb; }"
-            ".filter-btn.active { background: #2563eb; color: #ffffff;"
-            " border-color: #2563eb; }"
-            "</style>"
+            '<link rel="stylesheet"'
+            ' href="https://s3.us-east-1.amazonaws.com/main.css/master.css">'
             '</head><body class="reset-anchor">'
             f'<div style="background:#ffffff; {CONTAINER_STYLE}">'
             f'<h1 style="{H1_STYLE}">Daily Brief — {escape(date_str)}</h1>'
