@@ -20,7 +20,7 @@ PIPELINE_DEAL_URL = "https://app.pipelinecrm.com/deals/{}"
 PIPELINE_PERSON_URL = "https://app.pipelinecrm.com/people/{}"
 TRADES_DEAL_URL = "trades.graciagroup.com/deals/{}"
 
-MASTER_CSS_URL = "<MASTER_CSS_URL>"
+MASTER_CSS_URL = "https://s3.us-east-1.amazonaws.com/main.css/master.css"
 
 IQF_URL_ENTITY = (
     "https://www.rainmakersecurities.com/"
@@ -1684,20 +1684,6 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
             '<meta charset="utf-8">'
             '<meta name="viewport" content="width=device-width, initial-scale=1">'
             f'<title>Daily Brief — {escape(date_str)}</title>'
-            "<style>"
-            "body { margin: 0; background: #f5f5f5; }"
-            ".reset-anchor a { text-decoration: none; }"
-            ".filter-bar { display: flex; gap: 8px; align-items: center;"
-            " margin: 16px 0 24px 0; }"
-            ".filter-btn, .refresh-btn { padding: 8px 18px;"
-            " border: 1px solid #a7f3d0; background: #ecfdf5;"
-            " color: #047857; font-size: 14px; font-weight: 500;"
-            " border-radius: 6px; cursor: pointer; font-family: inherit; }"
-            ".filter-btn:hover, .refresh-btn:hover { background: #d1fae5; }"
-            ".filter-btn.active { background: #6ee7b7; color: #065f46;"
-            " border-color: #34d399; }"
-            ".refresh-btn:disabled { opacity: 0.6; cursor: default; }"
-            "</style>"
             f'<link rel="stylesheet" href="{escape(MASTER_CSS_URL, quote=True)}">'
             '</head><body class="reset-anchor">'
             f'<div style="background:#ffffff; {CONTAINER_STYLE}">'
