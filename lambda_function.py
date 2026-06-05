@@ -20,6 +20,8 @@ PIPELINE_DEAL_URL = "https://app.pipelinecrm.com/deals/{}"
 PIPELINE_PERSON_URL = "https://app.pipelinecrm.com/people/{}"
 TRADES_DEAL_URL = "trades.graciagroup.com/deals/{}"
 
+MASTER_CSS_URL = "<MASTER_CSS_URL>"
+
 IQF_URL_ENTITY = (
     "https://www.rainmakersecurities.com/"
     "investor-qualification-form-for-entity-persons"
@@ -401,14 +403,15 @@ def _split_contacts_by_role(people, deal):
     return unresolved[0], unresolved[1] if len(unresolved) > 1 else None
 
 
-def _single_contact_cell(person, deal, company):
+def _single_contact_cell(person, deal, company, interactive=False):
     if not isinstance(person, dict):
         return ""
     n, e = _person_name_email(person)
     if not n and not e:
         return ""
-    cell = _contact_cell(n, email=e, person_id=person.get("id"))
-    env = _envelope_link(deal, person, company)
+    cell = _contact_cell(n, email=e, person_id=person.get("id"),
+                         interactive=interactive)
+    env = _envelope_link(deal, person, company, interactive=interactive)
     if env:
         cell = f"{cell}{env}"
     return cell
@@ -423,9 +426,9 @@ def _stack2(top, bottom):
     )
 
 
-def _stacked_contact_cell(buyer, seller, deal, company):
-    top = _single_contact_cell(buyer, deal, company) if buyer else ""
-    bottom = _single_contact_cell(seller, deal, company) if seller else ""
+def _stacked_contact_cell(buyer, seller, deal, company, interactive=False):
+    top = _single_contact_cell(buyer, deal, company, interactive=interactive) if buyer else ""
+    bottom = _single_contact_cell(seller, deal, company, interactive=interactive) if seller else ""
     return _stack2(top, bottom)
 
 
@@ -713,21 +716,25 @@ def _deal_title(d):
     return d.get("name") or d.get("title") or f"Deal {d.get('id', '')}"
 
 
-def _deal_link(deal):
+def _deal_link(deal, interactive=False):
     did = deal.get("id")
     if did in (None, ""):
         return ""
     s = str(did)
     href = PIPELINE_DEAL_URL.format(escape(s, quote=True))
+    if interactive:
+        return f'<a href="{href}">{escape(s)}</a>'
     return f'<a href="{href}" style="{LINK_STYLE}">{escape(s)}</a>'
 
 
-def _deal_title_link(deal):
+def _deal_title_link(deal, interactive=False):
     title = _deal_title(deal)
     did = deal.get("id")
     if did in (None, ""):
         return escape(title)
     href = PIPELINE_DEAL_URL.format(escape(str(did), quote=True))
+    if interactive:
+        return f'<a href="{href}">{escape(title)}</a>'
     return f'<a href="{href}" style="{LINK_STYLE_500}">{escape(title)}</a>'
 
 
@@ -742,7 +749,7 @@ def _resolve_person(snapshot, people_by_id):
     return people_by_id.get(pid) or snapshot
 
 
-def _envelope_link(deal, person, company):
+def _envelope_link(deal, person, company, interactive=False):
     if not isinstance(person, dict):
         return ""
     _, email = _person_name_email(person)
@@ -812,6 +819,8 @@ def _envelope_link(deal, person, company):
         f"?subject={quote(subject, safe='')}"
         f"&body={quote(body, safe='')}"
     )
+    if interactive:
+        return f'<a href="{escape(href, quote=True)}" title="Email">✉</a>'
     return (
         f'<a href="{escape(href, quote=True)}"'
         ' style="color:#2563eb; text-decoration:none; margin-left:6px;"'
@@ -819,20 +828,24 @@ def _envelope_link(deal, person, company):
     )
 
 
-def _contact_cell(name, email=None, person_id=None):
+def _contact_cell(name, email=None, person_id=None, interactive=False):
     label = name or email or ""
     if not label:
         return ""
     if person_id in (None, ""):
         return escape(label)
     href = PIPELINE_PERSON_URL.format(escape(str(person_id), quote=True))
+    if interactive:
+        return f'<a href="{href}">{escape(label)}</a>'
     return f'<a href="{href}" style="{LINK_STYLE_500}">{escape(label)}</a>'
 
 
-def _email_link(email):
+def _email_link(email, interactive=False):
     if not email:
         return ""
     href = f"mailto:{quote(email, safe='@')}"
+    if interactive:
+        return f'<a href="{escape(href, quote=True)}">{escape(email)}</a>'
     return (
         f'<a href="{escape(href, quote=True)}" style="{LINK_STYLE}">'
         f"{escape(email)}</a>"
@@ -849,15 +862,19 @@ def _colorize_symbol(sym):
     return escape(sym)
 
 
-def _people_cells(people, deal=None, company=None):
+def _people_cells(people, deal=None, company=None, interactive=False):
     entries = []
     for p in people:
         n, e = _person_name_email(p)
         if not n and not e:
             continue
-        contact_link = _contact_cell(n, email=e, person_id=p.get("id"))
+        contact_link = _contact_cell(n, email=e, person_id=p.get("id"),
+                                     interactive=interactive)
         annotation = _buyer_seller_annotation(deal, p) if deal is not None else ""
-        envelope = _envelope_link(deal, p, company) if deal is not None else ""
+        envelope = (
+            _envelope_link(deal, p, company, interactive=interactive)
+            if deal is not None else ""
+        )
         cell = contact_link
         if annotation:
             cell = f"{cell}{escape(annotation)}"
@@ -888,14 +905,16 @@ def _commission_cell(deal):
     return ""
 
 
-def _header_row(labels, with_checkbox=False):
+def _header_row(labels, with_checkbox=False, interactive=False):
     n = len(labels)
     pct = 100.0 / n if n else 100.0
     cells = []
     if with_checkbox:
-        cells.append(f'<th style="width:32px; {TH_BASE}"></th>')
+        if interactive:
+            cells.append('<th></th>')
+        else:
+            cells.append(f'<th style="width:32px; {TH_BASE}"></th>')
     for lbl in labels:
-        style = f"width:{pct:.4f}%; {TH_BASE}"
         if isinstance(lbl, (list, tuple)):
             inner = "".join(
                 f'<div style="line-height:1.3;">{escape(line)}</div>'
@@ -903,7 +922,11 @@ def _header_row(labels, with_checkbox=False):
             )
         else:
             inner = escape(lbl)
-        cells.append(f'<th style="{style}">{inner}</th>')
+        if interactive:
+            cells.append(f'<th>{inner}</th>')
+        else:
+            style = f"width:{pct:.4f}%; {TH_BASE}"
+            cells.append(f'<th style="{style}">{inner}</th>')
     return "<tr>" + "".join(cells) + "</tr>"
 
 
@@ -920,20 +943,25 @@ def _checkbox_td(section, row_id, interactive, long_dismiss=False):
     key = f"{section}:{row_id}"
     long_attr = ' data-long-dismiss="1"' if long_dismiss else ""
     return (
-        '<td style="width:32px; text-align:center; padding:10px;'
-        ' border-bottom:1px solid #f3f4f6; vertical-align:top;">'
+        '<td>'
         f'<input type="checkbox" class="row-dismiss"'
         f' data-row-key="{escape(key, quote=True)}"{long_attr} />'
         '</td>'
     )
 
 
-def _td(content, extra=""):
+def _td(content, extra="", interactive=False):
+    if interactive:
+        if extra:
+            return f'<td style="{extra.lstrip()}">{content}</td>'
+        return f'<td>{content}</td>'
     style = TD_STYLE + extra
     return f'<td style="{style}">{content}</td>'
 
 
-def _section_heading(text):
+def _section_heading(text, interactive=False):
+    if interactive:
+        return f'<h2>{escape(text)}</h2>'
     return f'<h2 style="{H2_STYLE}">{escape(text)}</h2>'
 
 
@@ -950,6 +978,10 @@ def _section_open(key, text, interactive):
             ' color:#9ca3af; font-size:18px; line-height:1; padding:4px 8px;'
             ' font-family:inherit;">&times;</button>'
         )
+        return (
+            f'<div class="section" data-section-key="{escape(key, quote=True)}">'
+            f'<h2>{hide_btn}{escape(text)}</h2>'
+        )
     return (
         f'<div class="section" data-section-key="{escape(key, quote=True)}">'
         f'<h2 style="{H2_STYLE}">{hide_btn}{escape(text)}</h2>'
@@ -960,11 +992,15 @@ def _section_close():
     return "</div>"
 
 
-def _muted_p(text):
+def _muted_p(text, interactive=False):
+    if interactive:
+        return f'<p>{escape(text)}</p>'
     return f'<p style="{SUB_SUMMARY_STYLE}">{escape(text)}</p>'
 
 
-def _open_table():
+def _open_table(interactive=False):
+    if interactive:
+        return '<table>'
     return f'<table style="{TABLE_STYLE}">'
 
 
@@ -1662,9 +1698,10 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
             " border-color: #34d399; }"
             ".refresh-btn:disabled { opacity: 0.6; cursor: default; }"
             "</style>"
+            f'<link rel="stylesheet" href="{escape(MASTER_CSS_URL, quote=True)}">'
             '</head><body class="reset-anchor">'
             f'<div style="background:#ffffff; {CONTAINER_STYLE}">'
-            f'<h1 style="{H1_STYLE}">Daily Brief — {escape(date_str)}</h1>'
+            f'<h1>Daily Brief — {escape(date_str)}</h1>'
             '<div class="filter-bar">'
             '<button type="button" id="refresh-btn" class="refresh-btn">'
             '↻ Refresh data</button>'
@@ -1686,35 +1723,40 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
 
     # ── Chad — Trading queue ──────────────────────────────────────────────
     out.append('<div data-owner="chad">')
-    out.append(
-        f'<h1 style="{QUEUE_H1_STYLE}">Chad — Trading queue</h1>'
-    )
+    if interactive:
+        out.append('<h1>Chad — Trading queue</h1>')
+    else:
+        out.append(
+            f'<h1 style="{QUEUE_H1_STYLE}">Chad — Trading queue</h1>'
+        )
 
     # ── A. INVOICE ────────────────────────────────────────────────────────
     out.append(_section_open(
         "chad-1-invoice", "1. INVOICE: Get paid and win deal", interactive,
     ))
     if not to_invoice:
-        out.append(_muted_p("(No SPA-signed deals awaiting invoice.)"))
+        out.append(_muted_p("(No SPA-signed deals awaiting invoice.)",
+                            interactive=interactive))
     else:
-        out.append(_open_table())
+        out.append(_open_table(interactive=interactive))
         out.append(_header_row([
             "Deal Title", "Contact", "IQF", "CEF", "Agent Agreement",
-        ], with_checkbox=interactive))
+        ], with_checkbox=interactive, interactive=interactive))
         for r in to_invoice:
             co = companies_by_id.get(_normalize_id(_company_id(r["deal"])))
             contact_html, iqf_html, cef_html = _people_cells(
-                r["people"], deal=r["deal"], company=co
+                r["people"], deal=r["deal"], company=co, interactive=interactive,
             )
             did = r["deal"].get("id")
             out.append(
                 _row_open("A", did, interactive)
                 + _checkbox_td("A", did, interactive)
-                + _td(_deal_title_link(r["deal"]))
-                + _td(contact_html)
-                + _td(iqf_html)
-                + _td(cef_html)
-                + _td(_commission_cell(r["deal"]))
+                + _td(_deal_title_link(r["deal"], interactive=interactive),
+                      interactive=interactive)
+                + _td(contact_html, interactive=interactive)
+                + _td(iqf_html, interactive=interactive)
+                + _td(cef_html, interactive=interactive)
+                + _td(_commission_cell(r["deal"]), interactive=interactive)
                 + "</tr>"
             )
         out.append("</table>")
@@ -1725,30 +1767,33 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
         "chad-2-close", "2. CLOSE: Move toward finish line", interactive,
     ))
     if not to_close:
-        out.append(_muted_p("(Nothing to close.)"))
+        out.append(_muted_p("(Nothing to close.)", interactive=interactive))
     else:
-        out.append(_open_table())
+        out.append(_open_table(interactive=interactive))
         out.append(_header_row([
             "Stage", "Deal Title", ("Buyer", "Seller"),
             "IQF", "CEF", "Agent Agreement", "Latest activity",
-        ], with_checkbox=interactive))
+        ], with_checkbox=interactive, interactive=interactive))
         for r in to_close:
             co = companies_by_id.get(_normalize_id(_company_id(r["deal"])))
             buyer, seller = _split_contacts_by_role(r["people"], r["deal"])
-            contact_html = _stacked_contact_cell(buyer, seller, r["deal"], co)
+            contact_html = _stacked_contact_cell(buyer, seller, r["deal"], co,
+                                                 interactive=interactive)
             iqf_html = _stacked_iqf_cell(buyer, seller, r["deal"])
             cef_html = _stacked_cef_cell(buyer, seller)
             did = r["deal"].get("id")
             out.append(
                 _row_open("B", did, interactive)
                 + _checkbox_td("B", did, interactive)
-                + _td(escape(r["stage"]))
-                + _td(_deal_title_link(r["deal"]))
-                + _td(contact_html)
-                + _td(iqf_html)
-                + _td(cef_html)
-                + _td(_commission_cell(r["deal"]))
-                + _td(_latest_activity_cell(r.get("latest_notes") or []))
+                + _td(escape(r["stage"]), interactive=interactive)
+                + _td(_deal_title_link(r["deal"], interactive=interactive),
+                      interactive=interactive)
+                + _td(contact_html, interactive=interactive)
+                + _td(iqf_html, interactive=interactive)
+                + _td(cef_html, interactive=interactive)
+                + _td(_commission_cell(r["deal"]), interactive=interactive)
+                + _td(_latest_activity_cell(r.get("latest_notes") or []),
+                      interactive=interactive)
                 + "</tr>"
             )
         out.append("</table>")
@@ -1759,23 +1804,25 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
         "chad-3-introduce", "3. INTRODUCE: Crossed trades", interactive,
     ))
     if not crossed:
-        out.append(_muted_p("(None)"))
+        out.append(_muted_p("(None)", interactive=interactive))
     else:
-        out.append(_open_table())
+        out.append(_open_table(interactive=interactive))
         out.append(_header_row([
             "Company", "Structure",
             "Buy", "Buy Deal ID",
             "Sell", "Sell Deal ID",
             ("Buyer", "Seller"),
             "% Diff",
-        ], with_checkbox=interactive))
+        ], with_checkbox=interactive, interactive=interactive))
         for r in crossed:
             b_pc = r["buy_primary"]
             s_pc = r["sell_primary"]
             buy_co = companies_by_id.get(_normalize_id(_company_id(r["buy_deal"])))
             sell_co = companies_by_id.get(_normalize_id(_company_id(r["sell_deal"])))
-            buyer_html = _single_contact_cell(b_pc, r["buy_deal"], buy_co)
-            seller_html = _single_contact_cell(s_pc, r["sell_deal"], sell_co)
+            buyer_html = _single_contact_cell(b_pc, r["buy_deal"], buy_co,
+                                              interactive=interactive)
+            seller_html = _single_contact_cell(s_pc, r["sell_deal"], sell_co,
+                                               interactive=interactive)
             contact_html = _stack2(buyer_html, seller_html)
             buy_id = r["buy_deal"].get("id")
             sell_id = r["sell_deal"].get("id")
@@ -1783,14 +1830,16 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
             out.append(
                 _row_open("C", row_id, interactive)
                 + _checkbox_td("C", row_id, interactive)
-                + _td(escape(r["company"]))
-                + _td(escape(r["structure"]))
-                + _td(escape(_fmt_price(r["buy_price"])))
-                + _td(_deal_link(r["buy_deal"]))
-                + _td(escape(_fmt_price(r["sell_price"])))
-                + _td(_deal_link(r["sell_deal"]))
-                + _td(contact_html)
-                + _td(f"{r['pct']:+.2f}%")
+                + _td(escape(r["company"]), interactive=interactive)
+                + _td(escape(r["structure"]), interactive=interactive)
+                + _td(escape(_fmt_price(r["buy_price"])), interactive=interactive)
+                + _td(_deal_link(r["buy_deal"], interactive=interactive),
+                      interactive=interactive)
+                + _td(escape(_fmt_price(r["sell_price"])), interactive=interactive)
+                + _td(_deal_link(r["sell_deal"], interactive=interactive),
+                      interactive=interactive)
+                + _td(contact_html, interactive=interactive)
+                + _td(f"{r['pct']:+.2f}%", interactive=interactive)
                 + "</tr>"
             )
         out.append("</table>")
@@ -1803,7 +1852,7 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
         interactive,
     ))
     if not tight:
-        out.append(_muted_p("(None)"))
+        out.append(_muted_p("(None)", interactive=interactive))
     else:
         groups = [
             ("BUY", "BUY trades close to ask",
@@ -1818,9 +1867,12 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
             if rendered_any:
                 out.append(SECTION_GAP_HTML)
             rendered_any = True
-            out.append(
-                f'<p style="{SUB_HEADING_STYLE}">{escape(sub_heading)}</p>'
-            )
+            if interactive:
+                out.append(f'<p>{escape(sub_heading)}</p>')
+            else:
+                out.append(
+                    f'<p style="{SUB_HEADING_STYLE}">{escape(sub_heading)}</p>'
+                )
             if side_key == "BUY":
                 labels = [
                     "Deal Title", "Stage", "Structure",
@@ -1833,16 +1885,18 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
                     "Your Offer", "Market Bid", "% Diff",
                     "Contact", "IQF", "CEF",
                 ]
-            out.append(_open_table())
-            out.append(_header_row(labels, with_checkbox=interactive))
+            out.append(_open_table(interactive=interactive))
+            out.append(_header_row(labels, with_checkbox=interactive,
+                                   interactive=interactive))
             for r in group:
                 pc = r["primary"]
                 n, e = _person_name_email(pc)
                 iqf_html = _iqf_cell(pc, r["deal"])
                 cef_html = _colorize_symbol(_person_cef(pc))
                 co = companies_by_id.get(_normalize_id(_company_id(r["deal"])))
-                contact_html = _contact_cell(n, email=e, person_id=pc.get("id"))
-                env = _envelope_link(r["deal"], pc, co)
+                contact_html = _contact_cell(n, email=e, person_id=pc.get("id"),
+                                              interactive=interactive)
+                env = _envelope_link(r["deal"], pc, co, interactive=interactive)
                 if env:
                     contact_html = f"{contact_html}{env}"
                 dist_extra = (
@@ -1853,15 +1907,19 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
                 out.append(
                     _row_open("D", did, interactive)
                     + _checkbox_td("D", did, interactive)
-                    + _td(_deal_title_link(r["deal"]))
-                    + _td(escape(r["stage"]))
-                    + _td(escape(r["structure"]))
-                    + _td(escape(_fmt_price(r["your_price"])))
-                    + _td(escape(_fmt_price(r["marketplace_price"])))
-                    + _td(f"{r['distance'] * 100:+.2f}%", extra=dist_extra)
-                    + _td(contact_html)
-                    + _td(iqf_html)
-                    + _td(cef_html)
+                    + _td(_deal_title_link(r["deal"], interactive=interactive),
+                          interactive=interactive)
+                    + _td(escape(r["stage"]), interactive=interactive)
+                    + _td(escape(r["structure"]), interactive=interactive)
+                    + _td(escape(_fmt_price(r["your_price"])),
+                          interactive=interactive)
+                    + _td(escape(_fmt_price(r["marketplace_price"])),
+                          interactive=interactive)
+                    + _td(f"{r['distance'] * 100:+.2f}%", extra=dist_extra,
+                          interactive=interactive)
+                    + _td(contact_html, interactive=interactive)
+                    + _td(iqf_html, interactive=interactive)
+                    + _td(cef_html, interactive=interactive)
                     + "</tr>"
                 )
             out.append("</table>")
@@ -1871,27 +1929,30 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
     out.append(_section_open(
         "chad-5-spv-managers", "5. SPV MANAGERS TO WARM", interactive,
     ))
-    out.append(_muted_p(f"{len(spv_managers_to_warm)} SPV managers to warm"))
+    out.append(_muted_p(f"{len(spv_managers_to_warm)} SPV managers to warm",
+                        interactive=interactive))
     if not spv_managers_to_warm:
-        out.append(_muted_p("(None)"))
+        out.append(_muted_p("(None)", interactive=interactive))
     else:
-        out.append(_open_table())
+        out.append(_open_table(interactive=interactive))
         out.append(_header_row([
             "Name", "Email", "Top SPV Manager", "# Sells", "# Buys", "CEF",
-        ], with_checkbox=interactive))
+        ], with_checkbox=interactive, interactive=interactive))
         for r in spv_managers_to_warm:
             pid = r["person_id"]
             out.append(
                 _row_open("G", pid, interactive)
                 + _checkbox_td("G", pid, interactive, long_dismiss=True)
                 + _td(_contact_cell(
-                    r["name"], email=r["email"], person_id=pid
-                ))
-                + _td(_email_link(r["email"]))
-                + _td(escape(r["spv_value"]))
-                + _td(f"{r['sell_count']}")
-                + _td(f"{r['buy_count']}")
-                + _td(_colorize_symbol(r["cef"]))
+                    r["name"], email=r["email"], person_id=pid,
+                    interactive=interactive,
+                ), interactive=interactive)
+                + _td(_email_link(r["email"], interactive=interactive),
+                      interactive=interactive)
+                + _td(escape(r["spv_value"]), interactive=interactive)
+                + _td(f"{r['sell_count']}", interactive=interactive)
+                + _td(f"{r['buy_count']}", interactive=interactive)
+                + _td(_colorize_symbol(r["cef"]), interactive=interactive)
                 + "</tr>"
             )
         out.append("</table>")
@@ -1901,14 +1962,15 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
     out.append(_section_open(
         "chad-6-top-buyers", "6. TOP BUYERS TO WARM", interactive,
     ))
-    out.append(_muted_p(f"{len(top_buyers_to_warm)} top buyers to warm"))
+    out.append(_muted_p(f"{len(top_buyers_to_warm)} top buyers to warm",
+                        interactive=interactive))
     if not top_buyers_to_warm:
-        out.append(_muted_p("(None)"))
+        out.append(_muted_p("(None)", interactive=interactive))
     else:
-        out.append(_open_table())
+        out.append(_open_table(interactive=interactive))
         out.append(_header_row(
             ["Name", "Email", "# Buy Interests", "IQF"],
-            with_checkbox=interactive,
+            with_checkbox=interactive, interactive=interactive,
         ))
         for r in top_buyers_to_warm:
             pid = r["person_id"]
@@ -1916,11 +1978,13 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
                 _row_open("H", pid, interactive)
                 + _checkbox_td("H", pid, interactive, long_dismiss=True)
                 + _td(_contact_cell(
-                    r["name"], email=r["email"], person_id=pid
-                ))
-                + _td(_email_link(r["email"]))
-                + _td(f"{r['buy_count']}")
-                + _td(_colorize_symbol(r["iqf"]))
+                    r["name"], email=r["email"], person_id=pid,
+                    interactive=interactive,
+                ), interactive=interactive)
+                + _td(_email_link(r["email"], interactive=interactive),
+                      interactive=interactive)
+                + _td(f"{r['buy_count']}", interactive=interactive)
+                + _td(_colorize_symbol(r["iqf"]), interactive=interactive)
                 + "</tr>"
             )
         out.append("</table>")
@@ -1930,21 +1994,25 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
 
     # ── Kate — Queue ──────────────────────────────────────────────────────
     out.append('<div data-owner="kate">')
-    out.append(
-        f'<h1 style="{QUEUE_H1_STYLE_TOP}">Kate — Queue</h1>'
-    )
+    if interactive:
+        out.append('<h1>Kate — Queue</h1>')
+    else:
+        out.append(
+            f'<h1 style="{QUEUE_H1_STYLE_TOP}">Kate — Queue</h1>'
+        )
 
     # ── E. POST: Trades to post to Notice ─────────────────────────────────
     out.append(_section_open(
         "kate-1-post", "1. POST: Trades to post to Notice", interactive,
     ))
     if not to_post:
-        out.append(_muted_p("(Nothing to post — clean book!)"))
+        out.append(_muted_p("(Nothing to post — clean book!)",
+                            interactive=interactive))
     else:
-        out.append(_open_table())
+        out.append(_open_table(interactive=interactive))
         out.append(_header_row([
             "Action", "Deal Title", "Volume", "Structure", "Shares", "Price",
-        ], with_checkbox=interactive))
+        ], with_checkbox=interactive, interactive=interactive))
         for r in to_post:
             d = r["deal"]
             did = d.get("id")
@@ -1954,12 +2022,17 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
             out.append(
                 _row_open("E", did, interactive)
                 + _checkbox_td("E", did, interactive)
-                + _td(escape(r["action"]))
-                + _td(_deal_title_link(d))
-                + _td(escape(_fmt_price_or_dash(volume)))
-                + _td(escape(_post_structure_label(d)))
-                + _td(escape(_fmt_int_or_dash(shares)))
-                + _td(escape(_fmt_price_or_dash(price)))
+                + _td(escape(r["action"]), interactive=interactive)
+                + _td(_deal_title_link(d, interactive=interactive),
+                      interactive=interactive)
+                + _td(escape(_fmt_price_or_dash(volume)),
+                      interactive=interactive)
+                + _td(escape(_post_structure_label(d)),
+                      interactive=interactive)
+                + _td(escape(_fmt_int_or_dash(shares)),
+                      interactive=interactive)
+                + _td(escape(_fmt_price_or_dash(price)),
+                      interactive=interactive)
                 + "</tr>"
             )
         out.append("</table>")
@@ -1970,39 +2043,52 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
         "kate-2-leads", "2. Leads to Revive", interactive,
     ))
     out.append(_muted_p(
-        f"Priority Leads (active deals, no work email): {len(priority_leads)}"
+        f"Priority Leads (active deals, no work email): {len(priority_leads)}",
+        interactive=interactive,
     ))
     out.append(_muted_p(
-        f"Total Newsletter Recipients: {newsletter_recipient_count}"
+        f"Total Newsletter Recipients: {newsletter_recipient_count}",
+        interactive=interactive,
     ))
     out.append(_muted_p(
-        f"Leads to Revive: {leads_to_revive_count}"
+        f"Leads to Revive: {leads_to_revive_count}",
+        interactive=interactive,
     ))
 
-    priority_heading_style = (
-        "font-size:14px; font-weight:600; color:#374151;"
-        " margin:16px 0 6px 0;"
+    priority_heading_text = (
+        "Priority — active deals with no work email (research these first)"
     )
-    out.append(
-        f'<p style="{priority_heading_style}">'
-        'Priority — active deals with no work email (research these first)'
-        '</p>'
-    )
-    if not priority_leads:
-        out.append(_muted_p("(No priority leads — clean book!)"))
+    if interactive:
+        out.append(f'<p>{escape(priority_heading_text)}</p>')
     else:
-        out.append(_open_table())
+        priority_heading_style = (
+            "font-size:14px; font-weight:600; color:#374151;"
+            " margin:16px 0 6px 0;"
+        )
+        out.append(
+            f'<p style="{priority_heading_style}">'
+            f'{escape(priority_heading_text)}'
+            '</p>'
+        )
+    if not priority_leads:
+        out.append(_muted_p("(No priority leads — clean book!)",
+                            interactive=interactive))
+    else:
+        out.append(_open_table(interactive=interactive))
         out.append(_header_row([
             "Name", "# Active Deals", "Companies", "LinkedIn",
-        ], with_checkbox=interactive))
+        ], with_checkbox=interactive, interactive=interactive))
         for r in priority_leads:
             name_href = PIPELINE_PERSON_URL.format(
                 escape(str(r["person_id"]), quote=True)
             )
-            name_cell = (
-                f'<a href="{name_href}" style="{LINK_STYLE_500}">'
-                f'{escape(r["name"])}</a>'
-            )
+            if interactive:
+                name_cell = f'<a href="{name_href}">{escape(r["name"])}</a>'
+            else:
+                name_cell = (
+                    f'<a href="{name_href}" style="{LINK_STYLE_500}">'
+                    f'{escape(r["name"])}</a>'
+                )
             companies = r["companies"]
             if len(companies) > 3:
                 companies_text = (
@@ -2012,51 +2098,66 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
             else:
                 companies_text = ", ".join(companies)
             if r["linked_in_url"]:
-                li_cell = (
-                    f'<a href="{escape(r["linked_in_url"], quote=True)}"'
-                    f' style="{LINK_STYLE_500}">LinkedIn</a>'
-                )
+                li_href = escape(r["linked_in_url"], quote=True)
+                if interactive:
+                    li_cell = f'<a href="{li_href}">LinkedIn</a>'
+                else:
+                    li_cell = (
+                        f'<a href="{li_href}" style="{LINK_STYLE_500}">LinkedIn</a>'
+                    )
             else:
                 li_cell = ""
             pid = r["person_id"]
             out.append(
                 _row_open("Fpri", pid, interactive)
                 + _checkbox_td("Fpri", pid, interactive)
-                + _td(name_cell)
-                + _td(escape(str(r["active_deal_count"])))
-                + _td(escape(companies_text))
-                + _td(li_cell)
+                + _td(name_cell, interactive=interactive)
+                + _td(escape(str(r["active_deal_count"])),
+                      interactive=interactive)
+                + _td(escape(companies_text), interactive=interactive)
+                + _td(li_cell, interactive=interactive)
                 + "</tr>"
             )
         out.append("</table>")
         out.append(SECTION_GAP_HTML)
 
     if not leads:
-        out.append(_muted_p("(No leads to revive — clean book!)"))
+        out.append(_muted_p("(No leads to revive — clean book!)",
+                            interactive=interactive))
     else:
-        out.append(_open_table())
+        out.append(_open_table(interactive=interactive))
         out.append(_header_row([
             "Reason", "Name", "Pipeline", "LinkedIn", "Company",
-        ], with_checkbox=interactive))
+        ], with_checkbox=interactive, interactive=interactive))
         for r in leads:
             person_href = PIPELINE_PERSON_URL.format(
                 escape(str(r["person_id"]), quote=True)
             )
-            pipeline_cell = (
-                f'<a href="{person_href}" style="{LINK_STYLE_500}">open</a>'
-            )
-            if r["linked_in_url"]:
-                li_cell = (
-                    f'<a href="{escape(r["linked_in_url"], quote=True)}"'
-                    f' style="{LINK_STYLE_500}">LinkedIn</a>'
+            if interactive:
+                pipeline_cell = f'<a href="{person_href}">open</a>'
+            else:
+                pipeline_cell = (
+                    f'<a href="{person_href}" style="{LINK_STYLE_500}">open</a>'
                 )
+            if r["linked_in_url"]:
+                li_href = escape(r["linked_in_url"], quote=True)
+                if interactive:
+                    li_cell = f'<a href="{li_href}">LinkedIn</a>'
+                else:
+                    li_cell = (
+                        f'<a href="{li_href}" style="{LINK_STYLE_500}">LinkedIn</a>'
+                    )
             else:
                 li_cell = ""
             if r["company_website"] and r["company_name"]:
-                co_cell = (
-                    f'<a href="{escape(r["company_website"], quote=True)}"'
-                    f' style="{LINK_STYLE}">{escape(r["company_name"])}</a>'
-                )
+                co_href = escape(r["company_website"], quote=True)
+                if interactive:
+                    co_cell = f'<a href="{co_href}">{escape(r["company_name"])}</a>'
+                else:
+                    co_cell = (
+                        f'<a href="{co_href}" style="{LINK_STYLE}">'
+                        f'{escape(r["company_name"])}</a>'
+                    )
             elif r["company_name"]:
                 co_cell = escape(r["company_name"])
             else:
@@ -2065,11 +2166,11 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
             out.append(
                 _row_open("Fmain", pid, interactive)
                 + _checkbox_td("Fmain", pid, interactive)
-                + _td(escape(r["reason"]))
-                + _td(escape(r["name"]))
-                + _td(pipeline_cell)
-                + _td(li_cell)
-                + _td(co_cell)
+                + _td(escape(r["reason"]), interactive=interactive)
+                + _td(escape(r["name"]), interactive=interactive)
+                + _td(pipeline_cell, interactive=interactive)
+                + _td(li_cell, interactive=interactive)
+                + _td(co_cell, interactive=interactive)
                 + "</tr>"
             )
         out.append("</table>")
@@ -2083,27 +2184,31 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
     ))
     out.append(_muted_p(
         "SPV managers who hold top-10 most-wanted securities but aren't "
-        "receiving the weekly newsletter"
+        "receiving the weekly newsletter",
+        interactive=interactive,
     ))
     if not popular_spv_managers:
         out.append(_muted_p(
-            "(None — all qualifying SPV managers are already subscribed.)"
+            "(None — all qualifying SPV managers are already subscribed.)",
+            interactive=interactive,
         ))
     else:
-        out.append(_open_table())
+        out.append(_open_table(interactive=interactive))
         out.append(_header_row([
             "Name", "Email", "Top SPV Manager", "Holdings in Top 10",
-        ]))
+        ], interactive=interactive))
         for r in popular_spv_managers:
             holdings_html = escape(", ".join(r["holdings"]))
             out.append(
                 "<tr>"
                 + _td(_contact_cell(
-                    r["name"], email=r["email"], person_id=r["person_id"]
-                ))
-                + _td(_email_link(r["email"]))
-                + _td(escape(r["spv_value"]))
-                + _td(holdings_html)
+                    r["name"], email=r["email"], person_id=r["person_id"],
+                    interactive=interactive,
+                ), interactive=interactive)
+                + _td(_email_link(r["email"], interactive=interactive),
+                      interactive=interactive)
+                + _td(escape(r["spv_value"]), interactive=interactive)
+                + _td(holdings_html, interactive=interactive)
                 + "</tr>"
             )
         out.append("</table>")
