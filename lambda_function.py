@@ -814,13 +814,24 @@ def _envelope_link(deal, person, company, interactive=False):
         lines.append(f"Natural person: {CEF_URL_NATURAL}")
 
     body = "\r\n".join(lines)
+    if interactive:
+        # Open a compose window in Outlook on the web (Microsoft 365) rather
+        # than relying on the browser's default mailto handler.
+        href = (
+            "https://outlook.office.com/mail/deeplink/compose"
+            f"?to={quote(email, safe='@')}"
+            f"&subject={quote(subject, safe='')}"
+            f"&body={quote(body, safe='')}"
+        )
+        return (
+            f'&nbsp;<a href="{escape(href, quote=True)}"'
+            ' target="_blank" rel="noopener" title="Email">✉</a>'
+        )
     href = (
         f"mailto:{quote(email, safe='@')}"
         f"?subject={quote(subject, safe='')}"
         f"&body={quote(body, safe='')}"
     )
-    if interactive:
-        return f'<a href="{escape(href, quote=True)}" title="Email">✉</a>'
     return (
         f'<a href="{escape(href, quote=True)}"'
         ' style="color:#2563eb; text-decoration:none; margin-left:6px;"'
