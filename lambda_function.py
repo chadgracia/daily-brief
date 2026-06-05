@@ -1730,6 +1730,7 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
             '<html lang="en"><head>'
             '<meta charset="utf-8">'
             '<meta name="viewport" content="width=device-width, initial-scale=1">'
+            '<base target="_blank">'
             f'<title>Daily Brief — {escape(date_str)}</title>'
             f'<link rel="stylesheet" href="{escape(MASTER_CSS_URL, quote=True)}">'
             '</head><body class="reset-anchor">'
