@@ -58,6 +58,9 @@ CF_PERSON_HOLD_INTERESTS = "custom_label_3740611"
 CF_AGENT_AGREEMENT = "custom_label_3714334"
 CF_TOP_SPV_MANAGER = "custom_label_3948282"
 CF_SEC_PRIORITY = "custom_label_3912746"
+CF_INVESTOR_LEVEL = "custom_label_3923758"
+CF_TRANSACTOR_TYPE = "custom_label_3759163"
+CF_TICKET_SIZE = "custom_label_3052210"
 CF_NOTICE = "custom_label_3815544"
 CF_MAX_SIZE = "custom_label_3064645"
 CF_SHARE_COUNT = "custom_label_3070843"
@@ -1401,25 +1404,52 @@ def _build_spv_managers_to_warm(people):
     return rows
 
 
+# Top-buyers-to-warm ranking signals (higher = better buyer)
+SEC_PRIORITY_RANK = {6919452: 3, 6919453: 2, 6919454: 1, 6926715: 0}  # High/Med/Low/None
+ENTITY_RANK = {
+    6484810: 3, 6484811: 3,            # Natural Person, Family Office
+    6484813: 2,                        # Wealth Advisor
+    6484812: 1, 7037492: 1, 6484815: 1,  # Institution, Hedge Fund, Corporation
+    6484808: 0,                        # VC or PE Fund
+}
+EXCLUDE_TRANSACTOR = {6577160, 6888332, 6716196, 6484809, 6859893}  # intermediaries/holders/syndicator
+INVESTOR_LEVEL_RANK = {6950564: 3, 6950563: 2, 7162165: 1, 6950561: 0}  # QP/Accredited/Substantive/Unknown
+TICKET_ORDER = [6870210, 6631962, 5014552, 5014555, 5014558, 5014561, 5014564, 5014567]  # small -> large
+
+
+def _ticket_rank(p):
+    ids = _cf_option_ids(p, CF_TICKET_SIZE)
+    best = -1
+    for i, opt in enumerate(TICKET_ORDER):
+        if opt in ids:
+            best = i
+    return best
+
+
 def _build_top_buyers_to_warm(people):
     rows = []
     for p in people:
         buy_ids = _cf_option_ids(p, CF_PERSON_BUY_INTERESTS)
         if not buy_ids:
             continue
-        if _cf_option_id(p, CF_SEC_PRIORITY) != OPT_SEC_PRIORITY_HIGH:
-            continue
         if _cf_option_id(p, CF_IQF) == OPT_IQF_YES:
             continue
-        name = _person_full_name(p) or ""
+        ttypes = _cf_option_ids(p, CF_TRANSACTOR_TYPE)
+        if ttypes & EXCLUDE_TRANSACTOR:
+            continue
+        sec_rank = SEC_PRIORITY_RANK.get(_cf_option_id(p, CF_SEC_PRIORITY), 0)
+        entity_rank = max((ENTITY_RANK.get(o, 0) for o in ttypes), default=0)
+        level_rank = INVESTOR_LEVEL_RANK.get(_cf_option_id(p, CF_INVESTOR_LEVEL), 0)
+        ticket_rank = _ticket_rank(p)
         rows.append({
             "person_id": p.get("id"),
-            "name": name,
+            "name": _person_full_name(p) or "",
             "email": _person_email(p),
             "iqf": _person_iqf(p),
             "buy_count": len(buy_ids),
+            "_sort": (-sec_rank, -entity_rank, -level_rank, -ticket_rank, len(buy_ids)),
         })
-    rows.sort(key=lambda r: (-r["buy_count"], r["name"].lower()))
+    rows.sort(key=lambda r: (r["_sort"], r["name"].lower()))
     return rows[:30]
 
 
