@@ -1698,7 +1698,7 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
             f'<link rel="stylesheet" href="{escape(MASTER_CSS_URL, quote=True)}">'
             '</head><body class="reset-anchor">'
             f'<div style="background:#ffffff; {CONTAINER_STYLE}">'
-            f'<h1>Daily Brief — {escape(date_str)}</h1>'
+            f'<h1 class="page-title">Daily Brief — {escape(date_str)}</h1>'
             '<div class="filter-bar">'
             '<button type="button" id="refresh-btn" class="refresh-btn">'
             '↻ Refresh data</button>'
