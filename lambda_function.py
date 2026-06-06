@@ -1416,6 +1416,7 @@ ENTITY_RANK = {
     6484808: 0,                        # VC or PE Fund
 }
 EXCLUDE_TRANSACTOR = {6577160, 6888332, 6716196, 6484809, 6859893}  # intermediaries/holders/syndicator
+INCLUDE_TRANSACTOR = {6484811, 6484810, 7037492, 6484812, 6484813}  # Family Office, Natural Person, Hedge Fund, Institution, Wealth Advisor
 INVESTOR_LEVEL_RANK = {6950564: 3, 6950563: 2, 7162165: 1, 6950561: 0}  # QP/Accredited/Substantive/Unknown
 TICKET_ORDER = [6870210, 6631962, 5014552, 5014555, 5014558, 5014561, 5014564, 5014567, 5014570]  # small -> large
 
@@ -1465,11 +1466,9 @@ def _build_top_buyers_to_warm(people):
         buy_ids = _cf_option_ids(p, CF_PERSON_BUY_INTERESTS)
         if not buy_ids:
             continue
-        if _cf_option_id(p, CF_IQF) == OPT_IQF_YES:
-            continue
         ttype_opt = _cf_option_id(p, CF_TRANSACTOR_TYPE)
         ttypes = _cf_option_ids(p, CF_TRANSACTOR_TYPE)
-        if ttypes & EXCLUDE_TRANSACTOR:
+        if not (ttypes & INCLUDE_TRANSACTOR):
             continue
         sec_rank = SEC_PRIORITY_RANK.get(_cf_option_id(p, CF_SEC_PRIORITY), 0)
         entity_rank = max((ENTITY_RANK.get(o, 0) for o in ttypes), default=0)
