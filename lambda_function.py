@@ -1417,7 +1417,37 @@ ENTITY_RANK = {
 }
 EXCLUDE_TRANSACTOR = {6577160, 6888332, 6716196, 6484809, 6859893}  # intermediaries/holders/syndicator
 INVESTOR_LEVEL_RANK = {6950564: 3, 6950563: 2, 7162165: 1, 6950561: 0}  # QP/Accredited/Substantive/Unknown
-TICKET_ORDER = [6870210, 6631962, 5014552, 5014555, 5014558, 5014561, 5014564, 5014567]  # small -> large
+TICKET_ORDER = [6870210, 6631962, 5014552, 5014555, 5014558, 5014561, 5014564, 5014567, 5014570]  # small -> large
+
+TICKET_LABELS = {
+    6870210: "> 100K",
+    6631962: "$250K",
+    5014552: "- $1M",
+    5014555: "$1M - $5M",
+    5014558: "$5M - $10M",
+    5014561: "$10M - $25M",
+    5014564: "$25M - $50M",
+    5014567: "$50M - $100M",
+    5014570: "$100M +",
+}
+
+TRANSACTOR_TYPE_LABELS = {
+    6484810: "Natural Person",
+    6484811: "Family Office",
+    6484813: "Wealth Advisor",
+    6484812: "Institution",
+    7037492: "Hedge Fund",
+    6484808: "VC or PE Fund",
+    6484815: "Corporation",
+    6484809: "Ex-Employee Holder",
+    6716196: "Employee Holder",
+    6892622: "Employee Holder - VIP",
+    6484814: "SPV Manager",
+    6859893: "Syndicator",
+    6577160: "Intermediary - Co-Broker",
+    6888332: "Intermediary - Foreign Finder",
+    6888333: "Intermediary - Other",
+}
 
 
 def _ticket_rank(p):
@@ -1437,6 +1467,7 @@ def _build_top_buyers_to_warm(people):
             continue
         if _cf_option_id(p, CF_IQF) == OPT_IQF_YES:
             continue
+        ttype_opt = _cf_option_id(p, CF_TRANSACTOR_TYPE)
         ttypes = _cf_option_ids(p, CF_TRANSACTOR_TYPE)
         if ttypes & EXCLUDE_TRANSACTOR:
             continue
@@ -1444,12 +1475,15 @@ def _build_top_buyers_to_warm(people):
         entity_rank = max((ENTITY_RANK.get(o, 0) for o in ttypes), default=0)
         level_rank = INVESTOR_LEVEL_RANK.get(_cf_option_id(p, CF_INVESTOR_LEVEL), 0)
         ticket_rank = _ticket_rank(p)
+        max_ticket_oid = TICKET_ORDER[ticket_rank] if ticket_rank >= 0 else None
         rows.append({
             "person_id": p.get("id"),
             "name": _person_full_name(p) or "",
             "email": _person_email(p),
             "iqf": _person_iqf(p),
             "buy_count": len(buy_ids),
+            "transactor_type": TRANSACTOR_TYPE_LABELS.get(ttype_opt, ""),
+            "max_ticket": TICKET_LABELS.get(max_ticket_oid, "") if max_ticket_oid else "",
             "_sort": (-sec_rank, -entity_rank, -level_rank, -ticket_rank, len(buy_ids)),
         })
     rows.sort(key=lambda r: (r["_sort"], r["name"].lower()))
@@ -1974,7 +2008,7 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
     else:
         out.append(_open_table(interactive=interactive))
         out.append(_header_row(
-            ["Name", "Email", "# Buy Interests", "IQF"],
+            ["Name", "Email", "Type", "Max Ticket", "# Buy Interests", "IQF"],
             with_checkbox=interactive, interactive=interactive,
         ))
         for r in top_buyers_to_warm:
@@ -1988,6 +2022,9 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
                 ), interactive=interactive)
                 + _td(_email_link(r["email"], interactive=interactive),
                       interactive=interactive)
+                + _td(escape(r["transactor_type"]),
+                      interactive=interactive)
+                + _td(escape(r["max_ticket"]), interactive=interactive)
                 + _td(f"{r['buy_count']}", interactive=interactive)
                 + _td(_colorize_symbol(r["iqf"]), interactive=interactive)
                 + "</tr>"
