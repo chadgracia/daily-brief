@@ -955,15 +955,18 @@ def _row_open(section, row_id, interactive):
     return "<tr>"
 
 
-def _checkbox_td(section, row_id, interactive, long_dismiss=False):
+def _checkbox_td(section, row_id, interactive, dismiss_days=None):
     if not interactive or row_id in (None, ""):
         return ""
     key = f"{section}:{row_id}"
-    long_attr = ' data-long-dismiss="1"' if long_dismiss else ""
+    days_attr = (
+        f' data-dismiss-days="{int(dismiss_days)}"'
+        if dismiss_days else ""
+    )
     return (
         '<td>'
         f'<input type="checkbox" class="row-dismiss"'
-        f' data-row-key="{escape(key, quote=True)}"{long_attr} />'
+        f' data-row-key="{escape(key, quote=True)}"{days_attr} />'
         '</td>'
     )
 
@@ -1514,7 +1517,7 @@ INTERACTIVE_JS = """
   const STORAGE_KEY = "dailyBriefDismissed";
   const SECTION_STORAGE_KEY = "dailyBriefSectionsDismissed";
   const LONG_DISMISS_KEY = "dailyBriefLongDismissed";
-  const LONG_DISMISS_MS = 60 * 24 * 60 * 60 * 1000;
+  const DAY_MS = 24 * 60 * 60 * 1000;
   const today = new Date().toISOString().slice(0, 10);
 
   function readAll() {
@@ -1550,9 +1553,9 @@ INTERACTIVE_JS = """
     if (changed) writeLong(obj);
     return obj;
   }
-  function addLongDismissed(key) {
+  function addLongDismissed(key, days) {
     const obj = readLong();
-    obj[key] = Date.now() + LONG_DISMISS_MS;
+    obj[key] = Date.now() + days * DAY_MS;
     writeLong(obj);
   }
   function removeLongDismissed(key) {
@@ -1628,11 +1631,12 @@ INTERACTIVE_JS = """
     document.querySelectorAll("input.row-dismiss").forEach(cb => {
       cb.addEventListener("change", function() {
         const key = this.getAttribute("data-row-key");
-        const isLong = this.getAttribute("data-long-dismiss") === "1";
+        const daysAttr = this.getAttribute("data-dismiss-days");
         const tr = this.closest("tr[data-row-key]");
-        if (isLong) {
+        if (daysAttr !== null) {
           if (this.checked) {
-            addLongDismissed(key);
+            const days = parseInt(daysAttr, 10) || 30;
+            addLongDismissed(key, days);
             if (tr) tr.style.display = "none";
           } else {
             removeLongDismissed(key);
@@ -1940,7 +1944,7 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
                 did = r["deal"].get("id")
                 out.append(
                     _row_open("D", did, interactive)
-                    + _checkbox_td("D", did, interactive)
+                    + _checkbox_td("D", did, interactive, dismiss_days=7)
                     + _td(_deal_title_link(r["deal"], interactive=interactive),
                           interactive=interactive)
                     + _td(escape(r["stage"]), interactive=interactive)
@@ -1976,7 +1980,7 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
             pid = r["person_id"]
             out.append(
                 _row_open("G", pid, interactive)
-                + _checkbox_td("G", pid, interactive, long_dismiss=True)
+                + _checkbox_td("G", pid, interactive, dismiss_days=30)
                 + _td(_contact_cell(
                     r["name"], email=r["email"], person_id=pid,
                     interactive=interactive,
@@ -2010,7 +2014,7 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
             pid = r["person_id"]
             out.append(
                 _row_open("H", pid, interactive)
-                + _checkbox_td("H", pid, interactive, long_dismiss=True)
+                + _checkbox_td("H", pid, interactive, dismiss_days=30)
                 + _td(_contact_cell(
                     r["name"], email=r["email"], person_id=pid,
                     interactive=interactive,
