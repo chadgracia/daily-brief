@@ -1963,9 +1963,41 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
             out.append("</table>")
     out.append(_section_close())
 
-    # ── 5. SPV MANAGERS TO WARM ───────────────────────────────────────────
+    # ── 5. TOP BUYERS TO WARM ─────────────────────────────────────────────
     out.append(_section_open(
-        "chad-5-spv-managers", "5. SPV MANAGERS TO WARM", interactive,
+        "chad-5-top-buyers", "5. TOP BUYERS TO WARM", interactive,
+    ))
+    out.append(_muted_p(f"{len(top_buyers_to_warm)} top buyers to warm",
+                        interactive=interactive))
+    if not top_buyers_to_warm:
+        out.append(_muted_p("(None)", interactive=interactive))
+    else:
+        out.append(_open_table(interactive=interactive))
+        out.append(_header_row(
+            ["Name", "Email", "# Buy Interests", "IQF"],
+            with_checkbox=interactive, interactive=interactive,
+        ))
+        for r in top_buyers_to_warm:
+            pid = r["person_id"]
+            out.append(
+                _row_open("H", pid, interactive)
+                + _checkbox_td("H", pid, interactive, dismiss_days=30)
+                + _td(_contact_cell(
+                    r["name"], email=r["email"], person_id=pid,
+                    interactive=interactive,
+                ), interactive=interactive)
+                + _td(_email_link(r["email"], interactive=interactive),
+                      interactive=interactive)
+                + _td(f"{r['buy_count']}", interactive=interactive)
+                + _td(_colorize_symbol(r["iqf"]), interactive=interactive)
+                + "</tr>"
+            )
+        out.append("</table>")
+    out.append(_section_close())
+
+    # ── 6. SPV MANAGERS TO WARM ───────────────────────────────────────────
+    out.append(_section_open(
+        "chad-6-spv-managers", "6. SPV MANAGERS TO WARM", interactive,
     ))
     out.append(_muted_p(f"{len(spv_managers_to_warm)} SPV managers to warm",
                         interactive=interactive))
@@ -1991,38 +2023,6 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
                 + _td(f"{r['sell_count']}", interactive=interactive)
                 + _td(f"{r['buy_count']}", interactive=interactive)
                 + _td(_colorize_symbol(r["cef"]), interactive=interactive)
-                + "</tr>"
-            )
-        out.append("</table>")
-    out.append(_section_close())
-
-    # ── 6. TOP BUYERS TO WARM ─────────────────────────────────────────────
-    out.append(_section_open(
-        "chad-6-top-buyers", "6. TOP BUYERS TO WARM", interactive,
-    ))
-    out.append(_muted_p(f"{len(top_buyers_to_warm)} top buyers to warm",
-                        interactive=interactive))
-    if not top_buyers_to_warm:
-        out.append(_muted_p("(None)", interactive=interactive))
-    else:
-        out.append(_open_table(interactive=interactive))
-        out.append(_header_row(
-            ["Name", "Email", "# Buy Interests", "IQF"],
-            with_checkbox=interactive, interactive=interactive,
-        ))
-        for r in top_buyers_to_warm:
-            pid = r["person_id"]
-            out.append(
-                _row_open("H", pid, interactive)
-                + _checkbox_td("H", pid, interactive, dismiss_days=30)
-                + _td(_contact_cell(
-                    r["name"], email=r["email"], person_id=pid,
-                    interactive=interactive,
-                ), interactive=interactive)
-                + _td(_email_link(r["email"], interactive=interactive),
-                      interactive=interactive)
-                + _td(f"{r['buy_count']}", interactive=interactive)
-                + _td(_colorize_symbol(r["iqf"]), interactive=interactive)
                 + "</tr>"
             )
         out.append("</table>")
