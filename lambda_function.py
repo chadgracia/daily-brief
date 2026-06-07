@@ -1475,6 +1475,7 @@ def _build_top_buyers_to_warm(people):
         level_rank = INVESTOR_LEVEL_RANK.get(_cf_option_id(p, CF_INVESTOR_LEVEL), 0)
         ticket_rank = _ticket_rank(p)
         max_ticket_oid = TICKET_ORDER[ticket_rank] if ticket_rank >= 0 else None
+        won_total = p.get("won_deals_total") or 0
         rows.append({
             "person_id": p.get("id"),
             "name": _person_full_name(p) or "",
@@ -1483,6 +1484,7 @@ def _build_top_buyers_to_warm(people):
             "buy_count": len(buy_ids),
             "transactor_type": TRANSACTOR_TYPE_LABELS.get(ttype_opt, ""),
             "max_ticket": TICKET_LABELS.get(max_ticket_oid, "") if max_ticket_oid else "",
+            "won_deals_total": won_total,
             "_sort": (-sec_rank, -entity_rank, -level_rank, -ticket_rank, len(buy_ids)),
         })
     rows.sort(key=lambda r: (r["_sort"], r["name"].lower()))
@@ -2023,13 +2025,22 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
         ))
         for r in top_buyers_to_warm:
             pid = r["person_id"]
+            name_cell = _contact_cell(
+                r["name"], email=r["email"], person_id=pid,
+                interactive=interactive,
+            )
+            won_total = r.get("won_deals_total") or 0
+            if won_total > 0:
+                title = f"Won deals: ${int(won_total):,}"
+                name_cell = (
+                    f'{name_cell} '
+                    f'<span title="{escape(title, quote=True)}"'
+                    ' style="color:#16a34a; font-weight:600;">$</span>'
+                )
             out.append(
                 _row_open("H", pid, interactive)
                 + _checkbox_td("H", pid, interactive, dismiss_days=30)
-                + _td(_contact_cell(
-                    r["name"], email=r["email"], person_id=pid,
-                    interactive=interactive,
-                ), interactive=interactive)
+                + _td(name_cell, interactive=interactive)
                 + _td(_email_link(r["email"], interactive=interactive),
                       interactive=interactive)
                 + _td(escape(r["transactor_type"]),
