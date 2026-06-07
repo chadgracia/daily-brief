@@ -1475,8 +1475,9 @@ def _build_top_buyers_to_warm(people):
         level_rank = INVESTOR_LEVEL_RANK.get(_cf_option_id(p, CF_INVESTOR_LEVEL), 0)
         ticket_rank = _ticket_rank(p)
         max_ticket_oid = TICKET_ORDER[ticket_rank] if ticket_rank >= 0 else None
+        won_raw = p.get("won_deals_total")
         try:
-            won_total = float(p.get("won_deals_total") or 0)
+            won_total = float(won_raw or 0)
         except (TypeError, ValueError):
             won_total = 0.0
         rows.append({
@@ -1488,6 +1489,7 @@ def _build_top_buyers_to_warm(people):
             "transactor_type": TRANSACTOR_TYPE_LABELS.get(ttype_opt, ""),
             "max_ticket": TICKET_LABELS.get(max_ticket_oid, "") if max_ticket_oid else "",
             "won_deals_total": won_total,
+            "won_raw_debug": repr(won_raw),
             "_sort": (-sec_rank, -entity_rank, -level_rank, -ticket_rank, len(buy_ids)),
         })
     rows.sort(key=lambda r: (r["_sort"], r["name"].lower()))
@@ -2043,6 +2045,12 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
                     f'<span title="{escape(title, quote=True)}"'
                     ' style="color:#16a34a; font-weight:600;">$</span>'
                 )
+            name_cell = (
+                f'{name_cell} '
+                f'<span style="color:#9ca3af; font-size:11px;">'
+                f'[won={escape(str(r.get("won_raw_debug", "")), quote=False)}]'
+                '</span>'
+            )
             out.append(
                 _row_open("H", pid, interactive)
                 + _checkbox_td("H", pid, interactive, dismiss_days=30)
