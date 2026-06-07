@@ -1475,7 +1475,10 @@ def _build_top_buyers_to_warm(people):
         level_rank = INVESTOR_LEVEL_RANK.get(_cf_option_id(p, CF_INVESTOR_LEVEL), 0)
         ticket_rank = _ticket_rank(p)
         max_ticket_oid = TICKET_ORDER[ticket_rank] if ticket_rank >= 0 else None
-        won_total = p.get("won_deals_total") or 0
+        try:
+            won_total = float(p.get("won_deals_total") or 0)
+        except (TypeError, ValueError):
+            won_total = 0.0
         rows.append({
             "person_id": p.get("id"),
             "name": _person_full_name(p) or "",
@@ -2029,7 +2032,10 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
                 r["name"], email=r["email"], person_id=pid,
                 interactive=interactive,
             )
-            won_total = r.get("won_deals_total") or 0
+            try:
+                won_total = float(r.get("won_deals_total") or 0)
+            except (TypeError, ValueError):
+                won_total = 0.0
             if won_total > 0:
                 title = f"Won deals: ${int(won_total):,}"
                 name_cell = (
