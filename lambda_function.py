@@ -1791,6 +1791,17 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
             f'<div style="{CONTAINER_STYLE}">'
             f'<h1 style="{H1_STYLE}">Daily Brief — {escape(date_str)}</h1>'
         )
+        web_base = os.environ.get("BRIEF_PAGE_URL")
+        web_key = os.environ.get("BRIEF_PAGE_KEY")
+        if web_base and web_key:
+            sep = "&" if "?" in web_base else "?"
+            web_url = f"{web_base}{sep}key={quote(web_key, safe='')}"
+            out.append(
+                '<p style="font-size:14px; margin:0 0 24px 0;">'
+                f'<a href="{escape(web_url, quote=True)}"'
+                f' style="{LINK_STYLE_500}">'
+                'View interactive web version &rarr;</a></p>'
+            )
 
     # ── Chad — Trading queue ──────────────────────────────────────────────
     out.append('<div data-owner="chad">')
