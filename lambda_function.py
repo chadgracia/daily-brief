@@ -653,6 +653,22 @@ def _is_system_note(note):
     return any(cleaned.startswith(prefix) for prefix in SYSTEM_NOTE_PREFIXES)
 
 
+def _fetch_person_won_total(person_id, jwt):
+    """Pipeline's /people.json list endpoint stubs won_deals_total to 0;
+    only /people/<id>.json returns the real computed rollup. Used to
+    enrich the top-30 buyers shown in section 5."""
+    if person_id in (None, "") or not jwt:
+        return None
+    endpoint = f"/people/{person_id}.json"
+    result = call_pipeline_api("GET", endpoint, jwt=jwt, timeout=3)
+    if result.get("status") != 200:
+        return None
+    data = result.get("data")
+    if not isinstance(data, dict):
+        return None
+    return data.get("won_deals_total")
+
+
 def _fetch_latest_notes(deal_id, jwt):
     if deal_id in (None, "") or not jwt:
         return []
@@ -1460,7 +1476,7 @@ def _ticket_rank(p):
     return best
 
 
-def _build_top_buyers_to_warm(people):
+def _build_top_buyers_to_warm(people, jwt=None):
     rows = []
     for p in people:
         buy_ids = _cf_option_ids(p, CF_PERSON_BUY_INTERESTS)
@@ -1475,11 +1491,6 @@ def _build_top_buyers_to_warm(people):
         level_rank = INVESTOR_LEVEL_RANK.get(_cf_option_id(p, CF_INVESTOR_LEVEL), 0)
         ticket_rank = _ticket_rank(p)
         max_ticket_oid = TICKET_ORDER[ticket_rank] if ticket_rank >= 0 else None
-        won_raw = p.get("won_deals_total")
-        try:
-            won_total = float(won_raw or 0)
-        except (TypeError, ValueError):
-            won_total = 0.0
         rows.append({
             "person_id": p.get("id"),
             "name": _person_full_name(p) or "",
@@ -1488,12 +1499,18 @@ def _build_top_buyers_to_warm(people):
             "buy_count": len(buy_ids),
             "transactor_type": TRANSACTOR_TYPE_LABELS.get(ttype_opt, ""),
             "max_ticket": TICKET_LABELS.get(max_ticket_oid, "") if max_ticket_oid else "",
-            "won_deals_total": won_total,
-            "won_raw_debug": repr(won_raw),
+            "won_deals_total": 0.0,
             "_sort": (-sec_rank, -entity_rank, -level_rank, -ticket_rank, len(buy_ids)),
         })
     rows.sort(key=lambda r: (r["_sort"], r["name"].lower()))
-    return rows[:30]
+    rows = rows[:30]
+    for r in rows:
+        live = _fetch_person_won_total(r["person_id"], jwt)
+        try:
+            r["won_deals_total"] = float(live or 0)
+        except (TypeError, ValueError):
+            r["won_deals_total"] = 0.0
+    return rows
 
 
 def _build_popular_spv_managers(people, security_names):
@@ -2045,12 +2062,6 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
                     f'<span title="{escape(title, quote=True)}"'
                     ' style="color:#16a34a; font-weight:600;">$</span>'
                 )
-            name_cell = (
-                f'{name_cell} '
-                f'<span style="color:#9ca3af; font-size:11px;">'
-                f'[won={escape(str(r.get("won_raw_debug", "")), quote=False)}]'
-                '</span>'
-            )
             out.append(
                 _row_open("H", pid, interactive)
                 + _checkbox_td("H", pid, interactive, dismiss_days=30)
@@ -2379,7 +2390,7 @@ def _build_brief_html(interactive):
     leads_to_revive_count = len(leads)
     newsletter_recipient_count = _count_newsletter_recipients(people)
     spv_managers_to_warm = _build_spv_managers_to_warm(people)
-    top_buyers_to_warm = _build_top_buyers_to_warm(people)
+    top_buyers_to_warm = _build_top_buyers_to_warm(people, jwt=jwt)
     popular_spv_managers = _build_popular_spv_managers(people, security_names)
 
     body_html = _render_html(
