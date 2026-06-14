@@ -1685,6 +1685,17 @@ INTERACTIVE_JS = """
         section.style.display = "none";
       });
     });
+    document.querySelectorAll(".daily-action-link").forEach(link => {
+      link.addEventListener("click", function() {
+        const section = link.closest("[data-section-key]");
+        if (!section) return;
+        const key = section.getAttribute("data-section-key");
+        const list = getTodaySections();
+        if (!list.includes(key)) list.push(key);
+        setTodaySections(list);
+        section.style.display = "none";
+      });
+    });
     document.querySelectorAll("input.row-dismiss").forEach(cb => {
       cb.addEventListener("change", function() {
         const key = this.getAttribute("data-row-key");
@@ -1815,6 +1826,12 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
             f'<div style="{CONTAINER_STYLE}">'
             f'<h1 style="{H1_STYLE}">Daily Brief — {escape(date_str)}</h1>'
         )
+        out.append(
+            f'<p style="font-family:{FONT_STACK}; font-size:14px; margin:0 0 24px 0;">'
+            '<a href="https://bddpwqsqvt32ritxpjqlqwhaim0ykbol.lambda-url.us-east-1.on.aws/?key=alkj%2A707q235-qjdf" '
+            'style="color:#2563eb; text-decoration:none; font-weight:500;">'
+            'Open the interactive Daily Brief &rarr;</a></p>'
+        )
         web_base = os.environ.get("BRIEF_PAGE_URL")
         web_key = os.environ.get("BRIEF_PAGE_KEY")
         if web_base and web_key:
@@ -1826,6 +1843,24 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
                 f' style="{LINK_STYLE_500}">'
                 'View interactive web version &rarr;</a></p>'
             )
+
+    # ── Daily actions (website only) ──────────────────────────────────────
+    if interactive:
+        out.append('<div data-owner="chad">')
+        out.append(f'<h1 style="{QUEUE_H1_STYLE_TOP}">Daily actions</h1>')
+        out.append(
+            '<div data-section-key="chad-0-pricing" '
+            'style="border:1px solid #e5e7eb; border-radius:8px; '
+            'padding:16px 18px; margin:0 0 12px 0; background:#ffffff;">'
+            '<a href="https://jw2kk4a73jbft32yf5lr7u22bm0bgkiy.lambda-url.us-east-1.on.aws/" '
+            'target="_blank" rel="noopener" class="daily-action-link" '
+            'style="color:#2563eb; text-decoration:none; font-size:16px; font-weight:600;">'
+            'Update third-party pricing &rarr;</a>'
+            '<div style="font-size:13px; color:#6b7280; margin-top:4px;">'
+            'Opens the Hiive pricing tool. This item returns tomorrow.</div>'
+            '</div>'
+        )
+        out.append('</div>')
 
     # ── Chad — Trading queue ──────────────────────────────────────────────
     out.append('<div data-owner="chad">')
