@@ -19,6 +19,8 @@ TO_ADDRS = ["cgracia@rainmakersecurities.com", "kate@graciagroup.com"]
 PIPELINE_DEAL_URL = "https://app.pipelinecrm.com/deals/{}"
 PIPELINE_PERSON_URL = "https://app.pipelinecrm.com/people/{}"
 TRADES_DEAL_URL = "trades.graciagroup.com/deals/{}"
+NUDGE_URL = "https://ak5zolfpynhrimrsuw5rbjchwu0ktexz.lambda-url.us-east-1.on.aws/"
+NUDGE_KEY = "YUARqVzldaiY4P8EZA855faT"
 
 MASTER_CSS_URL = "https://s3.us-east-1.amazonaws.com/main.css/master.css"
 
@@ -859,6 +861,23 @@ def _envelope_link(deal, person, company, interactive=False):
         f'<a href="{escape(href, quote=True)}"'
         ' style="color:#2563eb; text-decoration:none; margin-left:6px;"'
         ' title="Email">✉</a>'
+    )
+
+
+def _nudge_link(deal_id, interactive=False):
+    if deal_id in (None, ""):
+        return ""
+    href = f"{NUDGE_URL}?deal_id={quote(str(deal_id), safe='')}&key={quote(NUDGE_KEY, safe='')}"
+    if interactive:
+        return (
+            f'&nbsp;<a href="{escape(href, quote=True)}"'
+            ' target="_blank" rel="noopener"'
+            ' title="Nudge client to update or cancel">🔔</a>'
+        )
+    return (
+        f'<a href="{escape(href, quote=True)}"'
+        ' style="color:#2563eb; text-decoration:none; margin-left:6px;"'
+        ' target="_blank" rel="noopener" title="Nudge client to update or cancel">🔔</a>'
     )
 
 
@@ -2040,6 +2059,7 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
                 env = _envelope_link(r["deal"], pc, co, interactive=interactive)
                 if env:
                     contact_html = f"{contact_html}{env}"
+                contact_html = f"{contact_html}{_nudge_link(r['deal'].get('id'), interactive=interactive)}"
                 dist_extra = (
                     f" background-color:{NEG_DISTANCE_BG};"
                     if r["distance"] < 0 else ""
