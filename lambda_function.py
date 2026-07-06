@@ -1537,19 +1537,31 @@ def _build_top_buyers_to_warm(people, jwt=None):
 
 def _build_priority_names(companies, people, security_names):
     """Companies flagged High Priority (Source SPV/Direct Seller), each with the
-    count and names of people in the CRM who currently hold that company."""
+    count and names of people in the CRM who currently hold that company.
+
+    Holders are keyed by the "holds" dropdown entry id (unique per security),
+    which security_names maps to a display name. A flagged company is bridged to
+    that entry id by matching the company name to security_names."""
     flagged = {HP_SPV_SELLER, HP_DIRECT_SELLER}
+    hold_id_by_name = {}
+    for eid, nm in security_names.items():
+        if nm:
+            hold_id_by_name.setdefault(nm.strip().lower(), eid)
     rows = []
     for co in companies:
         if not (_cf_option_ids(co, CF_COMPANY_HIGH_PRIORITY) & flagged):
             continue
         cid = _normalize_id(co.get("id"))
-        name = co.get("name") or security_names.get(cid) or f"#{cid}"
-        holders = [
-            _person_full_name(p) or ""
-            for p in people
-            if cid in _cf_option_ids(p, CF_PERSON_HOLD_INTERESTS)
-        ]
+        name = co.get("name") or f"#{cid}"
+        hold_id = hold_id_by_name.get(name.strip().lower())
+        if hold_id is None:
+            holders = []
+        else:
+            holders = [
+                _person_full_name(p) or ""
+                for p in people
+                if hold_id in _cf_option_ids(p, CF_PERSON_HOLD_INTERESTS)
+            ]
         holders = sorted((h for h in holders if h), key=str.lower)
         rows.append({
             "company_id": cid,
