@@ -57,6 +57,9 @@ CF_EMAIL_STATUS = "custom_label_2447206"
 CF_PERSON_BUY_INTERESTS = "custom_label_3322093"
 CF_PERSON_SELL_INTERESTS = "custom_label_3759156"
 CF_PERSON_HOLD_INTERESTS = "custom_label_3740611"
+CF_COMPANY_HIGH_PRIORITY = "custom_label_4002734"
+HP_SPV_SELLER = 7190470     # High Priority: "Source SPV Seller"
+HP_DIRECT_SELLER = 7190471  # High Priority: "Source Direct Seller"
 CF_AGENT_AGREEMENT = "custom_label_3714334"
 CF_TOP_SPV_MANAGER = "custom_label_3948282"
 CF_SEC_PRIORITY = "custom_label_3912746"
@@ -1532,6 +1535,32 @@ def _build_top_buyers_to_warm(people, jwt=None):
     return rows
 
 
+def _build_priority_names(companies, people, security_names):
+    """Companies flagged High Priority (Source SPV/Direct Seller), each with the
+    count and names of people in the CRM who currently hold that company."""
+    flagged = {HP_SPV_SELLER, HP_DIRECT_SELLER}
+    rows = []
+    for co in companies:
+        if not (_cf_option_ids(co, CF_COMPANY_HIGH_PRIORITY) & flagged):
+            continue
+        cid = _normalize_id(co.get("id"))
+        name = co.get("name") or security_names.get(cid) or f"#{cid}"
+        holders = [
+            _person_full_name(p) or ""
+            for p in people
+            if cid in _cf_option_ids(p, CF_PERSON_HOLD_INTERESTS)
+        ]
+        holders = sorted((h for h in holders if h), key=str.lower)
+        rows.append({
+            "company_id": cid,
+            "name": name,
+            "holder_count": len(holders),
+            "holders": holders,
+        })
+    rows.sort(key=lambda r: (-r["holder_count"], r["name"].lower()))
+    return rows
+
+
 def _build_popular_spv_managers(people, security_names):
     buyer_counts = {}
     for p in people:
@@ -1808,12 +1837,12 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
                  newsletter_recipient_count, leads_to_revive_count, date_str,
                  companies_by_id, priority_leads, to_post,
                  spv_managers_to_warm, top_buyers_to_warm,
-                 popular_spv_managers, interactive=False):
+                 popular_spv_managers, priority_names, interactive=False):
     chad_count = (
         len(to_invoice) + len(to_close) + len(crossed) + len(tight)
         + len(spv_managers_to_warm) + len(top_buyers_to_warm)
     )
-    kate_count = len(to_post) + len(leads) + len(popular_spv_managers)
+    kate_count = len(to_post) + len(leads) + len(priority_names)
     out = []
     if interactive:
         out.append(
@@ -2214,39 +2243,37 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
         out.append("</table>")
     out.append(_section_close())
 
-    # ── 2. POPULAR SPV MANAGERS: Not yet on newsletter ────────────────────
+    # ── 2. Priority Names ─────────────────────────────────────────────────
     out.append(_section_open(
-        "kate-2-popular-spv",
-        "2. POPULAR SPV MANAGERS: Not yet on newsletter",
-        interactive,
+        "kate-2-priority-names", "2. Priority Names", interactive,
     ))
     out.append(_muted_p(
-        "SPV managers who hold top-10 most-wanted securities but aren't "
-        "receiving the weekly newsletter",
+        "Companies flagged High Priority (hot Hiive book). Research each for "
+        "direct/SPV sellers and enter Pitchbook data.",
         interactive=interactive,
     ))
-    if not popular_spv_managers:
+    if not priority_names:
         out.append(_muted_p(
-            "(None — all qualifying SPV managers are already subscribed.)",
+            "(None flagged — nothing to research today.)",
             interactive=interactive,
         ))
     else:
         out.append(_open_table(interactive=interactive))
         out.append(_header_row([
-            "Name", "Email", "Top SPV Manager", "Holdings in Top 10",
+            "Name", "Action", "# Holders", "Holders",
         ], interactive=interactive))
-        for r in popular_spv_managers:
-            holdings_html = escape(", ".join(r["holdings"]))
+        for r in priority_names:
+            hl = r["holders"]
+            if len(hl) > 5:
+                holders_text = ", ".join(hl[:5]) + f" + {len(hl) - 5} more"
+            else:
+                holders_text = ", ".join(hl)
             out.append(
                 "<tr>"
-                + _td(_contact_cell(
-                    r["name"], email=r["email"], person_id=r["person_id"],
-                    interactive=interactive,
-                ), interactive=interactive)
-                + _td(_email_link(r["email"], interactive=interactive),
-                      interactive=interactive)
-                + _td(escape(r["spv_value"]), interactive=interactive)
-                + _td(holdings_html, interactive=interactive)
+                + _td(escape(r["name"]), interactive=interactive)
+                + _td("Enter Pitchbook Data", interactive=interactive)
+                + _td(escape(str(r["holder_count"])), interactive=interactive)
+                + _td(escape(holders_text), interactive=interactive)
                 + "</tr>"
             )
         out.append("</table>")
@@ -2447,12 +2474,14 @@ def _build_brief_html(interactive):
     spv_managers_to_warm = _build_spv_managers_to_warm(people)
     top_buyers_to_warm = _build_top_buyers_to_warm(people, jwt=jwt)
     popular_spv_managers = _build_popular_spv_managers(people, security_names)
+    priority_names = _build_priority_names(companies, people, security_names)
 
     body_html = _render_html(
         crossed, tight, to_close, to_invoice, leads,
         newsletter_recipient_count, leads_to_revive_count, date_str,
         companies_by_id, priority_leads, to_post,
         spv_managers_to_warm, top_buyers_to_warm, popular_spv_managers,
+        priority_names,
         interactive=interactive,
     )
 
