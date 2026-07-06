@@ -2214,9 +2214,47 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
         out.append("</table>")
     out.append(_section_close())
 
-    # ── 2. Leads to Revive ────────────────────────────────────────────────
+    # ── 2. POPULAR SPV MANAGERS: Not yet on newsletter ────────────────────
     out.append(_section_open(
-        "kate-2-leads", "2. Leads to Revive", interactive,
+        "kate-2-popular-spv",
+        "2. POPULAR SPV MANAGERS: Not yet on newsletter",
+        interactive,
+    ))
+    out.append(_muted_p(
+        "SPV managers who hold top-10 most-wanted securities but aren't "
+        "receiving the weekly newsletter",
+        interactive=interactive,
+    ))
+    if not popular_spv_managers:
+        out.append(_muted_p(
+            "(None — all qualifying SPV managers are already subscribed.)",
+            interactive=interactive,
+        ))
+    else:
+        out.append(_open_table(interactive=interactive))
+        out.append(_header_row([
+            "Name", "Email", "Top SPV Manager", "Holdings in Top 10",
+        ], interactive=interactive))
+        for r in popular_spv_managers:
+            holdings_html = escape(", ".join(r["holdings"]))
+            out.append(
+                "<tr>"
+                + _td(_contact_cell(
+                    r["name"], email=r["email"], person_id=r["person_id"],
+                    interactive=interactive,
+                ), interactive=interactive)
+                + _td(_email_link(r["email"], interactive=interactive),
+                      interactive=interactive)
+                + _td(escape(r["spv_value"]), interactive=interactive)
+                + _td(holdings_html, interactive=interactive)
+                + "</tr>"
+            )
+        out.append("</table>")
+    out.append(_section_close())
+
+    # ── 3. Leads to Revive ────────────────────────────────────────────────
+    out.append(_section_open(
+        "kate-3-leads", "3. Leads to Revive", interactive,
     ))
     out.append(_muted_p(
         f"Priority Leads (active deals, no work email): {len(priority_leads)}",
@@ -2347,44 +2385,6 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
                 + _td(pipeline_cell, interactive=interactive)
                 + _td(li_cell, interactive=interactive)
                 + _td(co_cell, interactive=interactive)
-                + "</tr>"
-            )
-        out.append("</table>")
-    out.append(_section_close())
-
-    # ── I. POPULAR SPV MANAGERS: Not yet on newsletter ────────────────────
-    out.append(_section_open(
-        "kate-3-popular-spv",
-        "3. POPULAR SPV MANAGERS: Not yet on newsletter",
-        interactive,
-    ))
-    out.append(_muted_p(
-        "SPV managers who hold top-10 most-wanted securities but aren't "
-        "receiving the weekly newsletter",
-        interactive=interactive,
-    ))
-    if not popular_spv_managers:
-        out.append(_muted_p(
-            "(None — all qualifying SPV managers are already subscribed.)",
-            interactive=interactive,
-        ))
-    else:
-        out.append(_open_table(interactive=interactive))
-        out.append(_header_row([
-            "Name", "Email", "Top SPV Manager", "Holdings in Top 10",
-        ], interactive=interactive))
-        for r in popular_spv_managers:
-            holdings_html = escape(", ".join(r["holdings"]))
-            out.append(
-                "<tr>"
-                + _td(_contact_cell(
-                    r["name"], email=r["email"], person_id=r["person_id"],
-                    interactive=interactive,
-                ), interactive=interactive)
-                + _td(_email_link(r["email"], interactive=interactive),
-                      interactive=interactive)
-                + _td(escape(r["spv_value"]), interactive=interactive)
-                + _td(holdings_html, interactive=interactive)
                 + "</tr>"
             )
         out.append("</table>")
