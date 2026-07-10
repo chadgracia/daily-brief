@@ -2575,7 +2575,6 @@ def _collect_mailer_entries(data, seen, rows, missing):
         seen.add(dedupe_key)
         if not first:
             missing.append(email)
-            continue
         rows.append((first, email))
 
 
@@ -2675,11 +2674,14 @@ def _render_mailer_page():
 
     if missing:
         out.append(
-            '<div style="background:#fef3c7;border:1px solid #fcd34d;'
-            "border-radius:6px;padding:12px 14px;margin-bottom:16px;\">"
+            '<div style="background:#f3f4f6;border:1px solid #e5e7eb;'
+            'border-radius:6px;padding:12px 14px;margin-bottom:16px;'
+            'font-size:13px;color:#4b5563;">'
             "<strong>"
             + str(len(missing))
-            + " excluded &mdash; no first name in the CRM:</strong><br>"
+            + " included with no first name</strong> &mdash; these will read "
+            "&ldquo;Hello &mdash;&rdquo; in the merge. Add a first name in the "
+            "CRM to fix: "
             + escape(", ".join(missing))
             + "</div>"
         )
