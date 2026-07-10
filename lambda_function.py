@@ -1924,6 +1924,20 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
             'Opens the Hiive pricing tool. This item returns tomorrow.</div>'
             '</div>'
         )
+        out.append(
+            '<div data-section-key="chad-0-mailer" '
+            'style="border:1px solid #e5e7eb; border-radius:8px; '
+            'padding:16px 18px; margin:0 0 12px 0; background:#ffffff;">'
+            '<a href="https://bddpwqsqvt32ritxpjqlqwhaim0ykbol.lambda-url.us-east-1.on.aws/'
+            '?key=alkj%2A707q235-qjdf&amp;view=mailer" '
+            'target="_blank" rel="noopener" class="daily-action-link" '
+            'style="color:#2563eb; text-decoration:none; font-size:16px; font-weight:600;">'
+            'Weekly mailer recipients &rarr;</a>'
+            '<div style="font-size:13px; color:#6b7280; margin-top:4px;">'
+            'First name and email from the &ldquo;S: Weekly Mailer Leads&rdquo; '
+            'focused list. Copy into SharePoint, then run the flow.</div>'
+            '</div>'
+        )
         out.append('</div>')
 
     # ── Chad — Trading queue ──────────────────────────────────────────────
