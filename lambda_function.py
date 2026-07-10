@@ -2519,12 +2519,168 @@ def _build_brief_html(interactive):
     return body_html, date_str, counts
 
 
+MAILER_SEARCH_ID = 19530439
+PIPELINE_API_KEY = "ZRMHN4uJotjRDcZa8hKi"
+PIPELINE_APP_KEY = "571978be28bd3b5b515a2cc5db96b674"
+
+
+def _fetch_mailer_rows():
+    """Run the 'S: Weekly Mailer Leads' focused list (saved search 19530439)
+    and return (rows, missing) where rows is [(first_name, email)] deduped on
+    lowercased email, and missing is a list of emails with no first name."""
+    seen = set()
+    rows = []
+    missing = []
+    page = 1
+    pages = 1
+    while page <= pages and page <= 25:
+        url = (
+            "https://api.pipelinecrm.com/api/v3/searches/"
+            + str(MAILER_SEARCH_ID)
+            + "/perform.json?per_page=200&page=" + str(page)
+            + "&api_key=" + PIPELINE_API_KEY
+            + "&app_key=" + PIPELINE_APP_KEY
+        )
+        req = urllib.request.Request(url, headers={"Accept": "application/json"})
+        with urllib.request.urlopen(req, timeout=25) as resp:
+            data = json.loads(resp.read().decode())
+        cols = [c.get("id") for c in (data.get("columns") or [])]
+        if "person_first_name" not in cols or "person_email" not in cols:
+            raise RuntimeError(
+                "Focused list columns changed; got: " + ", ".join(str(c) for c in cols)
+            )
+        i_first = cols.index("person_first_name")
+        i_email = cols.index("person_email")
+        for entry in (data.get("entries") or []):
+            if not isinstance(entry, list) or len(entry) <= max(i_first, i_email):
+                continue
+            first = (entry[i_first] or "").strip()
+            email = (entry[i_email] or "").strip()
+            if not email:
+                continue
+            key = email.lower()
+            if key in seen:
+                continue
+            seen.add(key)
+            if not first:
+                missing.append(email)
+                continue
+            rows.append((first, email))
+        pagination = data.get("pagination") or {}
+        try:
+            pages = int(pagination.get("pages") or 1)
+        except (TypeError, ValueError):
+            pages = 1
+        page += 1
+    return rows, missing
+
+
+MAILER_SCRIPT = """
+<script>
+(function () {
+  var btn = document.getElementById('copy-tsv');
+  if (!btn) return;
+  btn.addEventListener('click', function () {
+    var ta = document.getElementById('tsv');
+    ta.style.display = 'block';
+    ta.select();
+    try { document.execCommand('copy'); btn.textContent = 'Copied'; }
+    catch (e) { btn.textContent = 'Select the box and copy'; }
+    ta.style.display = 'none';
+  });
+})();
+</script>
+"""
+
+
+def _render_mailer_page():
+    try:
+        rows, missing = _fetch_mailer_rows()
+    except Exception as exc:
+        return {
+            "statusCode": 500,
+            "headers": {"Content-Type": "text/plain; charset=utf-8"},
+            "body": "Could not build the mailer list: " + str(exc),
+        }
+
+    tsv = "\n".join(f + "\t" + e for f, e in rows)
+
+    out = []
+    out.append(
+        '<!doctype html><html lang="en"><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width, initial-scale=1">'
+        "<title>Weekly Mailer Recipients</title></head>"
+        '<body style="font-family:-apple-system,BlinkMacSystemFont,'
+        "'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#1f2937;"
+        'font-size:14px;max-width:820px;margin:0 auto;padding:24px;">'
+    )
+    out.append(
+        '<h1 style="font-size:20px;margin:0 0 4px 0;">Weekly Mailer Recipients</h1>'
+    )
+    out.append(
+        '<p style="color:#6b7280;margin:0 0 16px 0;">Source: focused list '
+        '&ldquo;S: Weekly Mailer Leads&rdquo; &middot; '
+        + str(len(rows))
+        + " recipients</p>"
+    )
+    out.append(
+        '<button type="button" id="copy-tsv" style="padding:8px 18px;'
+        "border:1px solid #d1d5db;background:#ffffff;color:#374151;"
+        "font-size:14px;font-weight:500;border-radius:6px;cursor:pointer;"
+        'font-family:inherit;margin-bottom:16px;">Copy as tab-separated</button>'
+    )
+    out.append(
+        '<textarea id="tsv" style="display:none;position:absolute;left:-9999px;">'
+        + escape(tsv)
+        + "</textarea>"
+    )
+
+    if missing:
+        out.append(
+            '<div style="background:#fef3c7;border:1px solid #fcd34d;'
+            "border-radius:6px;padding:12px 14px;margin-bottom:16px;\">"
+            "<strong>"
+            + str(len(missing))
+            + " excluded &mdash; no first name in the CRM:</strong><br>"
+            + escape(", ".join(missing))
+            + "</div>"
+        )
+
+    out.append(
+        '<table style="border-collapse:collapse;width:100%;font-size:14px;">'
+        '<tr><th style="border:1px solid #e5e7eb;padding:6px 10px;'
+        'text-align:left;background:#f9fafb;">First Name</th>'
+        '<th style="border:1px solid #e5e7eb;padding:6px 10px;'
+        'text-align:left;background:#f9fafb;">Email</th></tr>'
+    )
+    for first, email in rows:
+        out.append(
+            '<tr><td style="border:1px solid #e5e7eb;padding:6px 10px;">'
+            + escape(first)
+            + '</td><td style="border:1px solid #e5e7eb;padding:6px 10px;">'
+            + escape(email)
+            + "</td></tr>"
+        )
+    out.append("</table>")
+    out.append(MAILER_SCRIPT)
+    out.append("</body></html>")
+
+    return {
+        "statusCode": 200,
+        "headers": {"Content-Type": "text/html; charset=utf-8"},
+        "body": "".join(out),
+    }
+
+
 def handle_http_request(event):
     params = event.get("queryStringParameters") or {}
     key = params.get("key") if isinstance(params, dict) else None
     expected = os.environ.get("BRIEF_PAGE_KEY")
     if not expected or key != expected:
         return {"statusCode": 403, "body": "Forbidden"}
+
+    if params.get("view") == "mailer":
+        return _render_mailer_page()
 
     body_html, _date_str, _counts = _build_brief_html(interactive=True)
     return {
