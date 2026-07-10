@@ -1,3 +1,4 @@
+import concurrent.futures
 import json
 import os
 import re
@@ -2522,56 +2523,79 @@ def _build_brief_html(interactive):
 MAILER_SEARCH_ID = 19530439
 PIPELINE_API_KEY = "ZRMHN4uJotjRDcZa8hKi"
 PIPELINE_APP_KEY = "571978be28bd3b5b515a2cc5db96b674"
+MAILER_MAX_PAGES = 25
+
+
+def _fetch_mailer_page(page):
+    url = (
+        "https://api.pipelinecrm.com/api/v3/searches/"
+        + str(MAILER_SEARCH_ID)
+        + "/perform.json?per_page=200&page=" + str(page)
+        + "&api_key=" + PIPELINE_API_KEY
+        + "&app_key=" + PIPELINE_APP_KEY
+    )
+    req = urllib.request.Request(url, headers={"Accept": "application/json"})
+    with urllib.request.urlopen(req, timeout=20) as resp:
+        return json.loads(resp.read().decode())
+
+
+def _collect_mailer_entries(data, seen, rows, missing):
+    cols = [c.get("id") for c in (data.get("columns") or [])]
+    if "person_first_name" not in cols or "person_email" not in cols:
+        raise RuntimeError(
+            "Focused list columns changed; got: "
+            + ", ".join(str(c) for c in cols)
+        )
+    i_first = cols.index("person_first_name")
+    i_email = cols.index("person_email")
+    for entry in (data.get("entries") or []):
+        if not isinstance(entry, list) or len(entry) <= max(i_first, i_email):
+            continue
+        first = (entry[i_first] or "").strip()
+        email = (entry[i_email] or "").strip()
+        if not email:
+            continue
+        dedupe_key = email.lower()
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        if not first:
+            missing.append(email)
+            continue
+        rows.append((first, email))
 
 
 def _fetch_mailer_rows():
-    """Run the 'S: Weekly Mailer Leads' focused list (saved search 19530439)
-    and return (rows, missing) where rows is [(first_name, email)] deduped on
-    lowercased email, and missing is a list of emails with no first name."""
+    """Run the 'S: Weekly Mailer Leads' focused list (saved search 19530439).
+    Page 1 is fetched first to learn the page count; pages 2..N are then
+    fetched concurrently. Returns (rows, missing) where rows is
+    [(first_name, email)] deduped on lowercased email."""
     seen = set()
     rows = []
     missing = []
-    page = 1
-    pages = 1
-    while page <= pages and page <= 25:
-        url = (
-            "https://api.pipelinecrm.com/api/v3/searches/"
-            + str(MAILER_SEARCH_ID)
-            + "/perform.json?per_page=200&page=" + str(page)
-            + "&api_key=" + PIPELINE_API_KEY
-            + "&app_key=" + PIPELINE_APP_KEY
-        )
-        req = urllib.request.Request(url, headers={"Accept": "application/json"})
-        with urllib.request.urlopen(req, timeout=25) as resp:
-            data = json.loads(resp.read().decode())
-        cols = [c.get("id") for c in (data.get("columns") or [])]
-        if "person_first_name" not in cols or "person_email" not in cols:
-            raise RuntimeError(
-                "Focused list columns changed; got: " + ", ".join(str(c) for c in cols)
-            )
-        i_first = cols.index("person_first_name")
-        i_email = cols.index("person_email")
-        for entry in (data.get("entries") or []):
-            if not isinstance(entry, list) or len(entry) <= max(i_first, i_email):
-                continue
-            first = (entry[i_first] or "").strip()
-            email = (entry[i_email] or "").strip()
-            if not email:
-                continue
-            key = email.lower()
-            if key in seen:
-                continue
-            seen.add(key)
-            if not first:
-                missing.append(email)
-                continue
-            rows.append((first, email))
-        pagination = data.get("pagination") or {}
-        try:
-            pages = int(pagination.get("pages") or 1)
-        except (TypeError, ValueError):
-            pages = 1
-        page += 1
+
+    first_page = _fetch_mailer_page(1)
+    _collect_mailer_entries(first_page, seen, rows, missing)
+
+    pagination = first_page.get("pagination") or {}
+    try:
+        pages = int(pagination.get("pages") or 1)
+    except (TypeError, ValueError):
+        pages = 1
+    pages = min(pages, MAILER_MAX_PAGES)
+
+    if pages > 1:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
+            futures = {
+                pool.submit(_fetch_mailer_page, p): p
+                for p in range(2, pages + 1)
+            }
+            results = []
+            for future in concurrent.futures.as_completed(futures):
+                results.append((futures[future], future.result()))
+        for _page, data in sorted(results, key=lambda pair: pair[0]):
+            _collect_mailer_entries(data, seen, rows, missing)
+
     return rows, missing
 
 
