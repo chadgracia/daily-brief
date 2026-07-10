@@ -1108,14 +1108,15 @@ def _build_crossed(deals, people_by_id):
     for co in by_co.values():
         best = None
         for g, buy in co["buys"]:
-            buy_struct = _cf_option_id(buy, CF_STRUCTURE)
-            if buy_struct not in STRUCTURE_LABELS:
+            buy_structs = _cf_option_ids(buy, CF_STRUCTURE) & set(STRUCTURE_LABELS)
+            if not buy_structs:
                 continue
             for n, sell in co["sells"]:
                 if g < n or n == 0:
                     continue
-                sell_struct = _cf_option_id(sell, CF_STRUCTURE)
-                if sell_struct != buy_struct:
+                sell_structs = _cf_option_ids(sell, CF_STRUCTURE) & set(STRUCTURE_LABELS)
+                shared = buy_structs & sell_structs
+                if not shared:
                     continue
                 if not _ticket_compat(buy, sell):
                     continue
@@ -1123,7 +1124,9 @@ def _build_crossed(deals, people_by_id):
                 if best is None or pct > best["pct"]:
                     best = {
                         "company": co["name"],
-                        "structure": STRUCTURE_LABELS[buy_struct],
+                        "structure": ", ".join(
+                            sorted(STRUCTURE_LABELS[s] for s in shared)
+                        ),
                         "buy_price": g,
                         "buy_deal": buy,
                         "buy_primary": _resolve_person(
