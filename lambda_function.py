@@ -171,6 +171,7 @@ STAGE_LABELS = {
 
 TIGHT_PCT = 0.10
 TICKET_TOLERANCE = 0.10
+BIG_BID_MIN = 1000000
 
 TO_CLOSE_ALL_STAGES = {STAGE_MATCHED, STAGE_LOI_SIGNED, STAGE_TRANSFER_NOTICE}
 TO_CLOSE_AGED_STAGE = None
@@ -1171,21 +1172,25 @@ def _build_tight(deals, companies, people_by_id):
         if side == "BUY":
             ask = _cf_number(co, CF_MKT_ASK)
             gross = _cf_number(d, CF_GROSS)
-            if not ask or gross is None:
+            max_size = _cf_number(d, CF_TICKET_MAX)
+            big_bid = max_size is not None and max_size >= BIG_BID_MIN
+            dist = (ask - gross) / ask if (ask and gross is not None) else None
+            near = dist is not None and abs(dist) <= TIGHT_PCT
+            if not near and not big_bid:
                 continue
-            dist = (ask - gross) / ask
-            if abs(dist) <= TIGHT_PCT:
-                rows.append({
-                    "company": co_name,
-                    "side": "BUY",
-                    "stage": stage_label,
-                    "structure": structure,
-                    "your_price": gross,
-                    "marketplace_price": ask,
-                    "distance": dist,
-                    "deal": d,
-                    "primary": _resolve_person(_primary_contact(d), people_by_id),
-                })
+            rows.append({
+                "company": co_name,
+                "side": "BUY",
+                "stage": stage_label,
+                "structure": structure,
+                "your_price": gross,
+                "marketplace_price": ask,
+                "distance": dist,
+                "big_bid": big_bid and not near,
+                "_max_size": max_size,
+                "deal": d,
+                "primary": _resolve_person(_primary_contact(d), people_by_id),
+            })
         elif side == "SELL":
             bid = _cf_number(co, CF_MKT_BID)
             net = _cf_number(d, CF_NET)
@@ -1204,7 +1209,12 @@ def _build_tight(deals, companies, people_by_id):
                     "deal": d,
                     "primary": _resolve_person(_primary_contact(d), people_by_id),
                 })
-    rows.sort(key=lambda r: (0 if r["side"] == "SELL" else 1, r["distance"]))
+    rows.sort(key=lambda r: (
+        0 if r["side"] == "SELL" else 1,
+        r["distance"] is None,
+        r["distance"] if r["distance"] is not None else 0.0,
+        -(r.get("_max_size") or 0.0),
+    ))
     return rows
 
 
@@ -2131,8 +2141,14 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
                 contact_html = f"{contact_html}{_nudge_link(r['deal'].get('id'), interactive=interactive)}"
                 dist_extra = (
                     f" background-color:{NEG_DISTANCE_BG};"
-                    if r["distance"] < 0 else ""
+                    if r["distance"] is not None and r["distance"] < 0 else ""
                 )
+                dist_cell = (
+                    "&mdash;" if r["distance"] is None
+                    else f"{r['distance'] * 100:+.2f}%"
+                )
+                if r.get("big_bid"):
+                    dist_cell = f"{dist_cell} ($1M+)"
                 did = r["deal"].get("id")
                 out.append(
                     _row_open("D", did, interactive)
@@ -2145,7 +2161,7 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
                           interactive=interactive)
                     + _td(escape(_fmt_price(r["marketplace_price"])),
                           interactive=interactive)
-                    + _td(f"{r['distance'] * 100:+.2f}%", extra=dist_extra,
+                    + _td(dist_cell, extra=dist_extra,
                           interactive=interactive)
                     + _td(contact_html, interactive=interactive)
                     + _td(iqf_html, interactive=interactive)
