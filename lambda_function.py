@@ -90,10 +90,15 @@ AGENT_YES_OPTS = {OPT_AGENT_YES_BUYSIDE, OPT_AGENT_YES_SELLSIDE}
 
 OPT_SPV_BUILD_CONNECTION = 7026574   # Whitelisted: Build Connection
 OPT_SPV_MONTHLY_UPDATES = 7026575    # Whitelisted: Monthly Updates
+OPT_SPV_SCREEN = 7026573             # Screen
+OPT_SPV_SCREENING = 7026576          # Screening
 SPV_WHITELISTED_OPTS = {OPT_SPV_BUILD_CONNECTION, OPT_SPV_MONTHLY_UPDATES}
+SPV_SCREEN_OPTS = {OPT_SPV_SCREEN, OPT_SPV_SCREENING}
 SPV_OPT_LABELS = {
     OPT_SPV_BUILD_CONNECTION: "Whitelisted: Build Connection",
     OPT_SPV_MONTHLY_UPDATES: "Whitelisted: Monthly Updates",
+    OPT_SPV_SCREEN: "Screen",
+    OPT_SPV_SCREENING: "Screening",
 }
 
 OPT_SEC_PRIORITY_HIGH = 6919452      # High - Decision-Maker with Cash
@@ -167,8 +172,8 @@ STAGE_LABELS = {
 TIGHT_PCT = 0.10
 TICKET_TOLERANCE = 0.10
 
-TO_CLOSE_ALL_STAGES = {STAGE_MATCHED, STAGE_LOI_SIGNED}
-TO_CLOSE_AGED_STAGE = STAGE_TRANSFER_NOTICE
+TO_CLOSE_ALL_STAGES = {STAGE_MATCHED, STAGE_LOI_SIGNED, STAGE_TRANSFER_NOTICE}
+TO_CLOSE_AGED_STAGE = None
 TO_CLOSE_AGE_DAYS = 30
 
 NEG_DISTANCE_BG = "#d4edda"
@@ -1224,6 +1229,7 @@ def _build_to_close(deals, now, people_by_id, jwt=None):
             "days": days,
             "deal": d,
             "_size": size,
+            "_sid": sid,
         })
     rows.sort(key=lambda r: (r["_size"] is None, -(r["_size"] or 0.0)))
     # Fetch the most recent note for each displayed deal. Sequential with a
@@ -1429,7 +1435,10 @@ def _build_spv_managers_to_warm(people):
     rows = []
     for p in people:
         opt = _cf_option_id(p, CF_TOP_SPV_MANAGER)
-        if opt != OPT_SPV_BUILD_CONNECTION:
+        if opt not in SPV_WHITELISTED_OPTS and not (
+            opt in SPV_SCREEN_OPTS
+            and _cf_option_id(p, CF_SEC_PRIORITY) == OPT_SEC_PRIORITY_HIGH
+        ):
             continue
         name = _person_full_name(p) or ""
         rows.append({
@@ -2003,7 +2012,8 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
             did = r["deal"].get("id")
             out.append(
                 _row_open("B", did, interactive)
-                + _checkbox_td("B", did, interactive)
+                + _checkbox_td("B", did, interactive,
+                               dismiss_days=7 if r.get("_sid") == STAGE_TRANSFER_NOTICE else None)
                 + _td(escape(r["stage"]), interactive=interactive)
                 + _td(_deal_title_link(r["deal"], interactive=interactive),
                       interactive=interactive)
