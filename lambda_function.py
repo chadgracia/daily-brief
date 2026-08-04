@@ -611,6 +611,121 @@ def _build_crm_updates(interactive):
     return pending, awaiting
 
 
+CRM_LR_VAL_FIELD = "custom_label_3790429"
+CRM_LR_PPS_FIELD = "custom_label_3064363"
+CRM_LR_DATE_FIELD = "custom_label_3826032"
+CRM_LR_SERIES_FIELD = "custom_label_3914626"
+CRM_CATALYST_FIELD = "custom_label_3999603"
+CRM_ORG_TYPE_FIELD = "custom_label_625142"
+CRM_ORG_TYPE_TRADED_ISSUER = 5103523
+
+
+def _handle_crm_post(body):
+    """Write one queued valuation update to Pipeline. POST only."""
+    def _fail(msg, code=400):
+        return {"statusCode": code,
+                "headers": {"Content-Type": "application/json"},
+                "body": json.dumps({"ok": False, "error": msg})}
+
+    key = body.get("key")
+    if not key:
+        return _fail("missing key")
+
+    items = _load_pending_updates()
+    item = items.get(key)
+    if not item:
+        return _fail("item not found in queue")
+    if (item.get("status") or "pending").lower() != "pending":
+        return _fail("item already posted")
+
+    co_id = item.get("co_id")
+    if not co_id:
+        return _fail("item has no company id")
+
+    try:
+        jwt = get_jwt()
+    except Exception as e:
+        return _fail(f"could not load JWT: {e}", 500)
+
+    # Re-read the live record so we never write from a stale snapshot.
+    cur = call_pipeline_api("GET", f"/companies/{co_id}.json", jwt=jwt)
+    if cur.get("status") != 200 or not isinstance(cur.get("data"), dict):
+        return _fail(f"could not read company {co_id}: {cur.get('status')}", 500)
+    record = cur["data"]
+    cur_cf = record.get("custom_fields") or {}
+
+    fresh = dict(item)
+    fresh["cur_lr_val"] = cur_cf.get(CRM_LR_VAL_FIELD)
+    fresh["cur_lr_pps"] = cur_cf.get(CRM_LR_PPS_FIELD)
+    calc = _compute_update(fresh)
+
+    typed_pps = _pu_float(body.get("pps"))
+    pps_to_write = typed_pps if typed_pps else calc["new_pps"]
+    pps_is_estimate = (typed_pps is None and calc["pps_source"] == "derived")
+
+    series_in = (body.get("series") or "").strip()
+
+    fields = {}
+    if calc["new_val_bn"]:
+        fields[CRM_LR_VAL_FIELD] = round(calc["new_val_bn"], 4)
+    if pps_to_write:
+        fields[CRM_LR_PPS_FIELD] = round(pps_to_write, 4)
+    if item.get("date"):
+        fields[CRM_LR_DATE_FIELD] = item["date"]
+    if series_in:
+        fields[CRM_LR_SERIES_FIELD] = series_in
+
+    catalyst = (item.get("catalyst") or "").strip()
+    if catalyst and pps_is_estimate:
+        catalyst = f"{catalyst} - PPS Estimated"
+    if catalyst:
+        fields[CRM_CATALYST_FIELD] = catalyst
+
+    org = cur_cf.get(CRM_ORG_TYPE_FIELD)
+    org_list = list(org) if isinstance(org, list) else ([org] if org else [])
+    org_ids = []
+    for o in org_list:
+        try:
+            org_ids.append(int(o))
+        except (TypeError, ValueError):
+            pass
+    if CRM_ORG_TYPE_TRADED_ISSUER not in org_ids:
+        org_ids.append(CRM_ORG_TYPE_TRADED_ISSUER)
+        fields[CRM_ORG_TYPE_FIELD] = org_ids
+
+    if not fields:
+        return _fail("nothing to write")
+
+    res = call_pipeline_api("PUT", f"/companies/{co_id}.json",
+                            {"company": {"custom_fields": fields}}, jwt=jwt)
+    if res.get("status") != 200:
+        return _fail(f"Pipeline write failed: {res.get('status')} {res.get('data')}", 500)
+
+    item["status"] = "written"
+    item["written_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    item["written_val_bn"] = fields.get(CRM_LR_VAL_FIELD)
+    item["written_pps"] = fields.get(CRM_LR_PPS_FIELD)
+    item["pps_estimated"] = bool(pps_is_estimate)
+    if pps_to_write and not pps_is_estimate:
+        item["pps_confirmed"] = True
+    items[key] = item
+    try:
+        boto3.client("s3").put_object(
+            Bucket=S3_BUCKET, Key="pending-updates.json",
+            Body=json.dumps({"items": items}, ensure_ascii=False).encode("utf-8"),
+            ContentType="application/json",
+        )
+    except Exception as e:
+        return {"statusCode": 200,
+                "headers": {"Content-Type": "application/json"},
+                "body": json.dumps({"ok": True,
+                                    "warning": f"CRM written but queue not updated: {e}"})}
+
+    return {"statusCode": 200,
+            "headers": {"Content-Type": "application/json"},
+            "body": json.dumps({"ok": True})}
+
+
 def _load_pending_updates():
     """Read the valuation-scanner update queue. Never raises."""
     try:
