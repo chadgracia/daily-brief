@@ -1825,6 +1825,41 @@ INTERACTIVE_JS = """
         window.location.reload();
       });
     }
+    document.querySelectorAll(".crm-post").forEach(btn => {
+      btn.addEventListener("click", function() {
+        const key = btn.getAttribute("data-key");
+        const row = document.querySelector('[data-crm-row="' + CSS.escape(key) + '"]');
+        const ppsEl = row ? row.querySelector(".crm-pps") : null;
+        const serEl = row ? row.querySelector(".crm-series") : null;
+        btn.disabled = true;
+        btn.textContent = "Posting…";
+        fetch(window.location.pathname + window.location.search, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            action: "crm_post",
+            key: key,
+            pps: ppsEl ? ppsEl.value : "",
+            series: serEl ? serEl.value : ""
+          })
+        }).then(r => r.json()).then(d => {
+          if (d && d.ok) {
+            btn.textContent = "✓ Posted";
+            btn.style.background = "#d1fae5";
+            btn.style.borderColor = "#6ee7b7";
+            if (row) { row.style.opacity = "0.55"; }
+          } else {
+            btn.disabled = false;
+            btn.textContent = "Retry";
+            alert("Post failed: " + ((d && d.error) || "unknown error"));
+          }
+        }).catch(e => {
+          btn.disabled = false;
+          btn.textContent = "Retry";
+          alert("Post failed: " + e);
+        });
+      });
+    });
     document.querySelectorAll(".section-hide").forEach(btn => {
       btn.addEventListener("click", function() {
         const section = btn.closest("[data-section-key]");
@@ -2054,30 +2089,69 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
             out.append(_open_table(interactive=interactive))
             out.append(_header_row(
                 ["Company", "Headline", "Date", "New LR Val", "New LR PPS",
-                 "Current Val", "Current PPS"],
+                 "Series", "Current Val", "Current PPS", ""],
                 with_checkbox=False, interactive=interactive))
             for r in pu_pending:
                 c = r["_calc"]
                 val_s = f"${c['new_val_bn']:.2f}B" if c["new_val_bn"] else "&mdash;"
-                if c["new_pps"]:
-                    tag = " (est.)" if c["pps_source"] == "derived" else ""
-                    pps_s = f"${c['new_pps']:.2f}{tag}"
-                else:
-                    pps_s = "&mdash; needs lookup"
                 head = escape(r.get("headline") or "")
                 url = escape(r.get("url") or "", quote=True)
                 head_html = f'<a href="{url}">{head}</a>' if url else head
+                co_id = r.get("co_id")
+                co_name = escape(r.get("company") or "")
+                if co_id:
+                    co_html = (f'<a href="https://app.pipelinedeals.com/companies/'
+                               f'{escape(str(co_id), quote=True)}">{co_name}</a>')
+                else:
+                    co_html = co_name
+                rkey = escape(r.get("_key") or "", quote=True)
+                if interactive:
+                    pps_val = f"{c['new_pps']:.2f}" if c["new_pps"] else ""
+                    pps_note = ""
+                    if c["pps_source"] == "derived":
+                        pps_note = ('<div style="font-size:11px; color:#9ca3af;">'
+                                    'estimated</div>')
+                    pps_cell = (
+                        f'<input type="text" class="crm-pps" data-key="{rkey}"'
+                        f' value="{pps_val}" placeholder="look up"'
+                        ' style="width:82px; padding:3px 5px; font-family:inherit;'
+                        ' font-size:13px;">' + pps_note
+                    )
+                    series_cell = (
+                        f'<input type="text" class="crm-series" data-key="{rkey}"'
+                        f' value="{escape(r.get("round_series") or "", quote=True)}"'
+                        ' placeholder="e.g. Series D"'
+                        ' style="width:92px; padding:3px 5px; font-family:inherit;'
+                        ' font-size:13px;">'
+                    )
+                    post_cell = (
+                        f'<button type="button" class="crm-post" data-key="{rkey}"'
+                        ' style="padding:5px 14px; border-radius:999px; cursor:pointer;'
+                        ' border:1px solid #b8c2cc; background:#CCDBEA;'
+                        ' font-family:inherit; font-size:13px; font-weight:500;">'
+                        'Post</button>'
+                    )
+                else:
+                    if c["new_pps"]:
+                        tag = " (est.)" if c["pps_source"] == "derived" else ""
+                        pps_cell = f"${c['new_pps']:.2f}{tag}"
+                    else:
+                        pps_cell = "&mdash; needs lookup"
+                    series_cell = escape(r.get("round_series") or "") or "&mdash;"
+                    post_cell = ""
                 out.append(
-                    "<tr>"
-                    + _td(escape(r.get("company") or ""), interactive=interactive)
+                    f'<tr data-crm-row="{rkey}">'
+                    + _td(co_html, interactive=interactive)
                     + _td(head_html, interactive=interactive)
                     + _td(escape(r.get("date") or ""), interactive=interactive)
                     + _td(val_s, interactive=interactive)
-                    + _td(pps_s, interactive=interactive)
+                    + _td(pps_cell, interactive=interactive)
+                    + _td(series_cell, interactive=interactive)
                     + _td(f"${c['cur_val']:.2f}B" if c["cur_val"] else "&mdash;",
                           interactive=interactive)
                     + _td(f"${c['cur_pps']:.2f}" if c["cur_pps"] else "&mdash;",
                           interactive=interactive)
+                    + _td(post_cell, interactive=interactive)
                     + "</tr>"
                 )
             out.append("</table>")
@@ -2884,6 +2958,18 @@ def handle_http_request(event):
     expected = os.environ.get("BRIEF_PAGE_KEY")
     if not expected or key != expected:
         return {"statusCode": 403, "body": "Forbidden"}
+
+    method = ((event.get("requestContext") or {}).get("http") or {}).get("method", "GET")
+    if method == "POST":
+        try:
+            body = json.loads(event.get("body") or "{}")
+        except Exception:
+            body = {}
+        if body.get("action") == "crm_post":
+            return _handle_crm_post(body)
+        return {"statusCode": 400,
+                "headers": {"Content-Type": "application/json"},
+                "body": json.dumps({"ok": False, "error": "unknown action"})}
 
     # TEMP SEED ROUTE — remove once the update queue has real scanner data.
     if params.get("seed") == "xsight":
