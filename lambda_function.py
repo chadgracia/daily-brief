@@ -594,6 +594,74 @@ def _deal_people(deal, people_by_id):
     return out
 
 
+def _build_crm_updates(interactive):
+    items = _load_pending_updates()
+    pending, awaiting = [], []
+    for key, it in items.items():
+        st = (it.get("status") or "pending").lower()
+        rec = dict(it)
+        rec["_key"] = key
+        rec["_calc"] = _compute_update(it)
+        if st == "pending":
+            pending.append(rec)
+        elif st == "written" and not it.get("pps_confirmed"):
+            awaiting.append(rec)
+    pending.sort(key=lambda r: r.get("date") or "", reverse=True)
+    awaiting.sort(key=lambda r: r.get("date") or "", reverse=True)
+    return pending, awaiting
+
+
+def _load_pending_updates():
+    """Read the valuation-scanner update queue. Never raises."""
+    try:
+        s3 = boto3.client("s3")
+        obj = s3.get_object(Bucket=S3_BUCKET, Key="pending-updates.json")
+        data = json.loads(obj["Body"].read())
+        return data.get("items") or {}
+    except Exception:
+        return {}
+
+
+def _pu_float(v):
+    try:
+        if v in (None, ""):
+            return None
+        return float(str(v).replace("$", "").replace(",", "").strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def _compute_update(item):
+    """Work out what would be written for one queue item."""
+    val_usd = _pu_float(item.get("valuation_usd"))
+    new_val_bn = val_usd / 1e9 if val_usd else None
+
+    reported_pps = _pu_float(item.get("pps_usd"))
+    cur_val = _pu_float(item.get("cur_lr_val"))
+    cur_pps = _pu_float(item.get("cur_lr_pps"))
+    raise_usd = _pu_float(item.get("raise_amount_usd"))
+
+    new_pps = None
+    pps_source = "none"
+    if reported_pps:
+        new_pps = reported_pps
+        pps_source = "reported"
+    elif val_usd and cur_val and cur_pps and cur_val > 0:
+        basis_usd = val_usd
+        if raise_usd and raise_usd < val_usd:
+            basis_usd = val_usd - raise_usd
+        new_pps = cur_pps * (basis_usd / 1e9) / cur_val
+        pps_source = "derived"
+
+    return {
+        "new_val_bn": new_val_bn,
+        "new_pps": new_pps,
+        "pps_source": pps_source,
+        "cur_val": cur_val,
+        "cur_pps": cur_pps,
+    }
+
+
 def _fetch_json(s3, key):
     obj = s3.get_object(Bucket=S3_BUCKET, Key=key)
     return json.loads(obj["Body"].read())
@@ -1967,6 +2035,78 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
         out.append(
             f'<h1 style="{QUEUE_H1_STYLE}">Chad — Trading queue</h1>'
         )
+
+    # ── A0. UPDATE CRM ────────────────────────────────────────────────────
+    pu_pending, pu_awaiting = _build_crm_updates(interactive)
+    out.append(_section_open(
+        "chad-0-crm-updates", "UPDATE CRM: New valuations from the news",
+        interactive,
+    ))
+    if not pu_pending and not pu_awaiting:
+        out.append(_muted_p("(No pending valuation updates.)",
+                            interactive=interactive))
+    else:
+        if pu_pending:
+            if interactive:
+                out.append("<p>Ready to write</p>")
+            else:
+                out.append(f'<p style="{SUB_HEADING_STYLE}">Ready to write</p>')
+            out.append(_open_table(interactive=interactive))
+            out.append(_header_row(
+                ["Company", "Headline", "Date", "New LR Val", "New LR PPS",
+                 "Current Val", "Current PPS"],
+                with_checkbox=False, interactive=interactive))
+            for r in pu_pending:
+                c = r["_calc"]
+                val_s = f"${c['new_val_bn']:.2f}B" if c["new_val_bn"] else "&mdash;"
+                if c["new_pps"]:
+                    tag = " (est.)" if c["pps_source"] == "derived" else ""
+                    pps_s = f"${c['new_pps']:.2f}{tag}"
+                else:
+                    pps_s = "&mdash; needs lookup"
+                head = escape(r.get("headline") or "")
+                url = escape(r.get("url") or "", quote=True)
+                head_html = f'<a href="{url}">{head}</a>' if url else head
+                out.append(
+                    "<tr>"
+                    + _td(escape(r.get("company") or ""), interactive=interactive)
+                    + _td(head_html, interactive=interactive)
+                    + _td(escape(r.get("date") or ""), interactive=interactive)
+                    + _td(val_s, interactive=interactive)
+                    + _td(pps_s, interactive=interactive)
+                    + _td(f"${c['cur_val']:.2f}B" if c["cur_val"] else "&mdash;",
+                          interactive=interactive)
+                    + _td(f"${c['cur_pps']:.2f}" if c["cur_pps"] else "&mdash;",
+                          interactive=interactive)
+                    + "</tr>"
+                )
+            out.append("</table>")
+        if pu_awaiting:
+            out.append(SECTION_GAP_HTML)
+            if interactive:
+                out.append("<p>Awaiting PPS confirmation</p>")
+            else:
+                out.append(f'<p style="{SUB_HEADING_STYLE}">Awaiting PPS confirmation</p>')
+            out.append(_open_table(interactive=interactive))
+            out.append(_header_row(
+                ["Company", "Written PPS", "Source", "Headline"],
+                with_checkbox=False, interactive=interactive))
+            for r in pu_awaiting:
+                c = r["_calc"]
+                url = escape(r.get("url") or "", quote=True)
+                head = escape(r.get("headline") or "")
+                out.append(
+                    "<tr>"
+                    + _td(escape(r.get("company") or ""), interactive=interactive)
+                    + _td(f"${c['new_pps']:.2f}" if c["new_pps"] else "&mdash;",
+                          interactive=interactive)
+                    + _td(escape(c["pps_source"]), interactive=interactive)
+                    + _td(f'<a href="{url}">{head}</a>' if url else head,
+                          interactive=interactive)
+                    + "</tr>"
+                )
+            out.append("</table>")
+    out.append(SECTION_GAP_HTML)
 
     # ── A. INVOICE ────────────────────────────────────────────────────────
     out.append(_section_open(
