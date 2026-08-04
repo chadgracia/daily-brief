@@ -2106,6 +2106,7 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
                     + "</tr>"
                 )
             out.append("</table>")
+    out.append(_section_close())
     out.append(SECTION_GAP_HTML)
 
     # ── A. INVOICE ────────────────────────────────────────────────────────
