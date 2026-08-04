@@ -605,6 +605,7 @@ def _build_crm_updates(interactive):
         if st == "pending":
             pending.append(rec)
         elif st == "written" and not it.get("pps_confirmed"):
+            rec["_needs_lookup"] = not it.get("written_pps")
             awaiting.append(rec)
     pending.sort(key=lambda r: r.get("date") or "", reverse=True)
     awaiting.sort(key=lambda r: r.get("date") or "", reverse=True)
@@ -2284,12 +2285,18 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
                 c = r["_calc"]
                 url = escape(r.get("url") or "", quote=True)
                 head = escape(r.get("headline") or "")
+                written_pps = _pu_float(r.get("written_pps"))
+                if r.get("_needs_lookup"):
+                    pps_txt = "&mdash;"
+                    why = "not published - look up $LR"
+                else:
+                    pps_txt = f"${written_pps:.2f}" if written_pps else "&mdash;"
+                    why = "estimated - confirm"
                 out.append(
                     "<tr>"
                     + _td(escape(r.get("company") or ""), interactive=interactive)
-                    + _td(f"${c['new_pps']:.2f}" if c["new_pps"] else "&mdash;",
-                          interactive=interactive)
-                    + _td(escape(c["pps_source"]), interactive=interactive)
+                    + _td(pps_txt, interactive=interactive)
+                    + _td(why, interactive=interactive)
                     + _td(f'<a href="{url}">{head}</a>' if url else head,
                           interactive=interactive)
                     + "</tr>"
