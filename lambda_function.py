@@ -2279,10 +2279,9 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
                 out.append(f'<p style="{SUB_HEADING_STYLE}">Awaiting PPS confirmation</p>')
             out.append(_open_table(interactive=interactive))
             out.append(_header_row(
-                ["Company", "Written PPS", "Source", "Headline"],
+                ["Company", "Written PPS", "Status", "Headline"],
                 with_checkbox=False, interactive=interactive))
             for r in pu_awaiting:
-                c = r["_calc"]
                 url = escape(r.get("url") or "", quote=True)
                 head = escape(r.get("headline") or "")
                 written_pps = _pu_float(r.get("written_pps"))
