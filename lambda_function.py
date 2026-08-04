@@ -2885,6 +2885,44 @@ def handle_http_request(event):
     if not expected or key != expected:
         return {"statusCode": 403, "body": "Forbidden"}
 
+    # TEMP SEED ROUTE — remove once the update queue has real scanner data.
+    if params.get("seed") == "xsight":
+        _seed_key = ("https://www.prnewswire.com/news-releases/xsight-labs-raises-more-than-300-million-at-2-8-billion-valuation-to-power-next-generation-ai-and-cloud-networks-302838293.html"
+                     "|138329336")
+        _seed_items = _load_pending_updates()
+        _seed_items[_seed_key] = {
+            "company": "Xsight",
+            "co_id": 138329336,
+            "headline": "Xsight Labs Raises More than $300 Million at $2.8 Billion Valuation to Power Next-Generation AI and Cloud Networks",
+            "url": "https://www.prnewswire.com/news-releases/xsight-labs-raises-more-than-300-million-at-2-8-billion-valuation-to-power-next-generation-ai-and-cloud-networks-302838293.html",
+            "date": "2026-07-30",
+            "catalyst": "Closed $300.0M round Jul '26 - details pending",
+            "round_series": None,
+            "valuation_usd": 2800000000,
+            "valuation_basis": "post",
+            "raise_amount_usd": 300000000,
+            "pps_usd": None,
+            "cur_lr_val": None,
+            "cur_lr_pps": None,
+            "cur_lr_date": None,
+            "cur_lr_series": None,
+            "found_at": "2026-08-03",
+            "status": "pending",
+        }
+        try:
+            boto3.client("s3").put_object(
+                Bucket=S3_BUCKET, Key="pending-updates.json",
+                Body=json.dumps({"items": _seed_items}, ensure_ascii=False).encode("utf-8"),
+                ContentType="application/json",
+            )
+            return {"statusCode": 200,
+                    "headers": {"Content-Type": "text/plain"},
+                    "body": f"Seeded. Queue now has {len(_seed_items)} item(s)."}
+        except Exception as e:
+            return {"statusCode": 500,
+                    "headers": {"Content-Type": "text/plain"},
+                    "body": f"Seed failed: {e}"}
+
     if params.get("view") == "mailer":
         return _render_mailer_page()
 
