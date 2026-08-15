@@ -653,7 +653,8 @@ def _handle_crm_post(body):
     item = items.get(key)
     if not item:
         return _fail("item not found in queue")
-    if (item.get("status") or "pending").lower() != "pending":
+    _st = (item.get("status") or "pending").lower()
+    if _st != "pending" and not (_st == "written" and not item.get("pps_confirmed")):
         return _fail("item already posted")
 
     co_id = item.get("co_id")
@@ -2107,37 +2108,6 @@ INTERACTIVE_JS = """
         alert("Failed: " + e);
       });
     }
-    document.querySelectorAll(".crm-confirm").forEach(btn => {
-      btn.addEventListener("click", function() {
-        const key = btn.getAttribute("data-key");
-        const row = document.querySelector('[data-crm-row="' + CSS.escape(key) + '"]');
-        const ppsEl = row ? row.querySelector(".crm-pps") : null;
-        const pps = ppsEl ? ppsEl.value.trim() : "";
-        if (!pps) { alert("Enter the confirmed PPS first."); return; }
-        btn.disabled = true;
-        btn.textContent = "Writing…";
-        fetch(window.location.pathname + window.location.search, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ action: "crm_confirm_pps", key: key, pps: pps })
-        }).then(r => r.json()).then(d => {
-          if (d && d.ok) {
-            btn.textContent = "✓ Confirmed";
-            btn.style.background = "#d1fae5";
-            btn.style.borderColor = "#6ee7b7";
-            if (row) { row.style.opacity = "0.55"; }
-          } else {
-            btn.disabled = false;
-            btn.textContent = "Retry";
-            alert("Confirm failed: " + ((d && d.error) || "unknown error"));
-          }
-        }).catch(e => {
-          btn.disabled = false;
-          btn.textContent = "Retry";
-          alert("Confirm failed: " + e);
-        });
-      });
-    });
     document.querySelectorAll(".crm-snooze").forEach(btn => {
       btn.addEventListener("click", function() {
         crmRowAction(btn, "crm_snooze", null);
@@ -2487,11 +2457,11 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
                         f'<div style="font-size:11px; color:#9ca3af;">{note}</div>'
                     )
                     post_cell = (
-                        f'<button type="button" class="crm-confirm" data-key="{rkey}"'
+                        f'<button type="button" class="crm-post" data-key="{rkey}"'
                         ' style="padding:5px 14px; border-radius:999px; cursor:pointer;'
                         ' border:1px solid #b8c2cc; background:#CCDBEA;'
                         ' font-family:inherit; font-size:13px; font-weight:500;">'
-                        'Confirm PPS</button>'
+                        'Post</button>'
                         f'<div style="margin-top:6px;">'
                         f'<button type="button" class="crm-snooze" data-key="{rkey}"'
                         ' style="padding:3px 8px; border-radius:999px; cursor:pointer;'
