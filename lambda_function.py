@@ -4,7 +4,7 @@ import os
 import re
 import urllib.error
 import urllib.request
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from html import escape
 from urllib.parse import quote
 
@@ -596,6 +596,7 @@ def _deal_people(deal, people_by_id):
 
 def _build_crm_updates(interactive):
     items = _load_pending_updates()
+    today_s = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     pending, awaiting = [], []
     for key, it in items.items():
         st = (it.get("status") or "pending").lower()
@@ -603,11 +604,24 @@ def _build_crm_updates(interactive):
         rec["_key"] = key
         rec["_calc"] = _compute_update(it)
         if st == "pending":
+            snooze = it.get("snoozed_until") or ""
+            if snooze and snooze > today_s:
+                continue
             pending.append(rec)
         elif st == "written" and not it.get("pps_confirmed"):
             rec["_needs_lookup"] = not it.get("written_pps")
             awaiting.append(rec)
     pending.sort(key=lambda r: r.get("date") or "", reverse=True)
+    seen_cos = set()
+    deduped = []
+    for r in pending:
+        cid = r.get("co_id")
+        if cid and cid in seen_cos:
+            continue
+        if cid:
+            seen_cos.add(cid)
+        deduped.append(r)
+    pending = deduped
     awaiting.sort(key=lambda r: r.get("date") or "", reverse=True)
     return pending, awaiting
 
@@ -704,6 +718,11 @@ def _handle_crm_post(body):
 
     item["status"] = "written"
     item["written_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    for k2, it2 in items.items():
+        if k2 == key:
+            continue
+        if it2.get("co_id") == co_id and (it2.get("status") or "pending").lower() == "pending":
+            it2["status"] = "superseded"
     item["written_val_bn"] = fields.get(CRM_LR_VAL_FIELD)
     item["written_pps"] = fields.get(CRM_LR_PPS_FIELD)
     item["pps_estimated"] = bool(pps_is_estimate)
@@ -724,6 +743,52 @@ def _handle_crm_post(body):
 
     return {"statusCode": 200,
             "headers": {"Content-Type": "application/json"},
+            "body": json.dumps({"ok": True})}
+
+
+def _save_pending_updates(items):
+    boto3.client("s3").put_object(
+        Bucket=S3_BUCKET, Key="pending-updates.json",
+        Body=json.dumps({"items": items}, ensure_ascii=False).encode("utf-8"),
+        ContentType="application/json",
+    )
+
+
+def _handle_crm_snooze(body):
+    key = body.get("key")
+    items = _load_pending_updates()
+    item = items.get(key)
+    if not item:
+        return {"statusCode": 400, "headers": {"Content-Type": "application/json"},
+                "body": json.dumps({"ok": False, "error": "item not found"})}
+    until = (datetime.now(timezone.utc) + timedelta(days=7)).strftime("%Y-%m-%d")
+    item["snoozed_until"] = until
+    items[key] = item
+    try:
+        _save_pending_updates(items)
+    except Exception as e:
+        return {"statusCode": 500, "headers": {"Content-Type": "application/json"},
+                "body": json.dumps({"ok": False, "error": f"save failed: {e}"})}
+    return {"statusCode": 200, "headers": {"Content-Type": "application/json"},
+            "body": json.dumps({"ok": True, "snoozed_until": until})}
+
+
+def _handle_crm_delete(body):
+    key = body.get("key")
+    items = _load_pending_updates()
+    item = items.get(key)
+    if not item:
+        return {"statusCode": 400, "headers": {"Content-Type": "application/json"},
+                "body": json.dumps({"ok": False, "error": "item not found"})}
+    item["status"] = "dismissed"
+    item["dismissed_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    items[key] = item
+    try:
+        _save_pending_updates(items)
+    except Exception as e:
+        return {"statusCode": 500, "headers": {"Content-Type": "application/json"},
+                "body": json.dumps({"ok": False, "error": f"save failed: {e}"})}
+    return {"statusCode": 200, "headers": {"Content-Type": "application/json"},
             "body": json.dumps({"ok": True})}
 
 
@@ -1976,6 +2041,37 @@ INTERACTIVE_JS = """
         });
       });
     });
+    function crmRowAction(btn, action, confirmMsg) {
+      const key = btn.getAttribute("data-key");
+      if (confirmMsg && !confirm(confirmMsg)) { return; }
+      const row = document.querySelector('[data-crm-row="' + CSS.escape(key) + '"]');
+      btn.disabled = true;
+      fetch(window.location.pathname + window.location.search, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: action, key: key })
+      }).then(r => r.json()).then(d => {
+        if (d && d.ok) {
+          if (row) { row.style.display = "none"; }
+        } else {
+          btn.disabled = false;
+          alert("Failed: " + ((d && d.error) || "unknown error"));
+        }
+      }).catch(e => {
+        btn.disabled = false;
+        alert("Failed: " + e);
+      });
+    }
+    document.querySelectorAll(".crm-snooze").forEach(btn => {
+      btn.addEventListener("click", function() {
+        crmRowAction(btn, "crm_snooze", null);
+      });
+    });
+    document.querySelectorAll(".crm-delete").forEach(btn => {
+      btn.addEventListener("click", function() {
+        crmRowAction(btn, "crm_delete", "Delete this valuation update permanently?");
+      });
+    });
     document.querySelectorAll(".section-hide").forEach(btn => {
       btn.addEventListener("click", function() {
         const section = btn.closest("[data-section-key]");
@@ -2205,11 +2301,18 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
             out.append(_open_table(interactive=interactive))
             out.append(_header_row(
                 ["Company", "Headline", "Date", "New LR Val", "New LR PPS",
-                 "Series", "Current Val", "Current PPS", ""],
+                 "Series", ""],
                 with_checkbox=False, interactive=interactive))
             for r in pu_pending:
                 c = r["_calc"]
                 val_s = f"${c['new_val_bn']:.2f}B" if c["new_val_bn"] else "&mdash;"
+                if c["cur_val"]:
+                    val_s += ('<div style="font-size:11px; color:#9ca3af;">'
+                              f"now ${c['cur_val']:.2f}B</div>")
+                cur_pps_note = ""
+                if c["cur_pps"]:
+                    cur_pps_note = ('<div style="font-size:11px; color:#9ca3af;">'
+                                    f"now ${c['cur_pps']:.2f}</div>")
                 head = escape(r.get("headline") or "")
                 url = escape(r.get("url") or "", quote=True)
                 head_html = f'<a href="{url}">{head}</a>' if url else head
@@ -2231,7 +2334,7 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
                         f'<input type="text" class="crm-pps" data-key="{rkey}"'
                         f' value="{pps_val}" placeholder="look up"'
                         ' style="width:82px; padding:3px 5px; font-family:inherit;'
-                        ' font-size:13px;">' + pps_note
+                        ' font-size:13px;">' + pps_note + cur_pps_note
                     )
                     series_cell = (
                         f'<input type="text" class="crm-series" data-key="{rkey}"'
@@ -2246,6 +2349,17 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
                         ' border:1px solid #b8c2cc; background:#CCDBEA;'
                         ' font-family:inherit; font-size:13px; font-weight:500;">'
                         'Post</button>'
+                        f'<div style="margin-top:6px;">'
+                        f'<button type="button" class="crm-snooze" data-key="{rkey}"'
+                        ' style="padding:3px 8px; border-radius:999px; cursor:pointer;'
+                        ' border:1px solid #d1d5db; background:#f3f4f6;'
+                        ' font-family:inherit; font-size:11px; margin-right:4px;">'
+                        'Snooze 1w</button>'
+                        f'<button type="button" class="crm-delete" data-key="{rkey}"'
+                        ' style="padding:3px 8px; border-radius:999px; cursor:pointer;'
+                        ' border:1px solid #d1d5db; background:#f3f4f6;'
+                        ' font-family:inherit; font-size:11px; color:#b91c1c;">'
+                        'Delete</button></div>'
                     )
                 else:
                     if c["new_pps"]:
@@ -2253,6 +2367,7 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
                         pps_cell = f"${c['new_pps']:.2f}{tag}"
                     else:
                         pps_cell = "&mdash; needs lookup"
+                    pps_cell += cur_pps_note
                     series_cell = escape(r.get("round_series") or "") or "&mdash;"
                     post_cell = ""
                 out.append(
@@ -2263,10 +2378,6 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
                     + _td(val_s, interactive=interactive)
                     + _td(pps_cell, interactive=interactive)
                     + _td(series_cell, interactive=interactive)
-                    + _td(f"${c['cur_val']:.2f}B" if c["cur_val"] else "&mdash;",
-                          interactive=interactive)
-                    + _td(f"${c['cur_pps']:.2f}" if c["cur_pps"] else "&mdash;",
-                          interactive=interactive)
                     + _td(post_cell, interactive=interactive)
                     + "</tr>"
                 )
@@ -3088,6 +3199,10 @@ def handle_http_request(event):
             body = {}
         if body.get("action") == "crm_post":
             return _handle_crm_post(body)
+        if body.get("action") == "crm_snooze":
+            return _handle_crm_snooze(body)
+        if body.get("action") == "crm_delete":
+            return _handle_crm_delete(body)
         return {"statusCode": 400,
                 "headers": {"Content-Type": "application/json"},
                 "body": json.dumps({"ok": False, "error": "unknown action"})}
