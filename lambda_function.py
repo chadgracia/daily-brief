@@ -609,6 +609,9 @@ def _build_crm_updates(interactive):
                 continue
             pending.append(rec)
         elif st == "written" and not it.get("pps_confirmed"):
+            snooze = it.get("snoozed_until") or ""
+            if snooze and snooze > today_s:
+                continue
             rec["_needs_lookup"] = not it.get("written_pps")
             awaiting.append(rec)
     pending.sort(key=lambda r: r.get("date") or "", reverse=True)
@@ -788,6 +791,48 @@ def _handle_crm_delete(body):
     except Exception as e:
         return {"statusCode": 500, "headers": {"Content-Type": "application/json"},
                 "body": json.dumps({"ok": False, "error": f"save failed: {e}"})}
+    return {"statusCode": 200, "headers": {"Content-Type": "application/json"},
+            "body": json.dumps({"ok": True})}
+
+
+def _handle_crm_confirm(body):
+    """Write only the confirmed PPS for an already-posted item. POST only."""
+    def _fail(msg, code=400):
+        return {"statusCode": code, "headers": {"Content-Type": "application/json"},
+                "body": json.dumps({"ok": False, "error": msg})}
+    key = body.get("key")
+    if not key:
+        return _fail("missing key")
+    pps = _pu_float(body.get("pps"))
+    if not pps:
+        return _fail("enter a PPS value first")
+    items = _load_pending_updates()
+    item = items.get(key)
+    if not item:
+        return _fail("item not found in queue")
+    co_id = item.get("co_id")
+    if not co_id:
+        return _fail("item has no company id")
+    try:
+        jwt = get_jwt()
+    except Exception as e:
+        return _fail(f"could not load JWT: {e}", 500)
+    res = call_pipeline_api("PUT", f"/companies/{co_id}.json",
+                            {"company": {"custom_fields":
+                             {CRM_LR_PPS_FIELD: round(pps, 4)}}}, jwt=jwt)
+    if res.get("status") != 200:
+        return _fail(f"Pipeline write failed: {res.get('status')} {res.get('data')}", 500)
+    item["written_pps"] = round(pps, 4)
+    item["pps_confirmed"] = True
+    item["pps_estimated"] = False
+    item["pps_confirmed_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    items[key] = item
+    try:
+        _save_pending_updates(items)
+    except Exception as e:
+        return {"statusCode": 200, "headers": {"Content-Type": "application/json"},
+                "body": json.dumps({"ok": True,
+                                    "warning": f"PPS written but queue not updated: {e}"})}
     return {"statusCode": 200, "headers": {"Content-Type": "application/json"},
             "body": json.dumps({"ok": True})}
 
@@ -2062,6 +2107,37 @@ INTERACTIVE_JS = """
         alert("Failed: " + e);
       });
     }
+    document.querySelectorAll(".crm-confirm").forEach(btn => {
+      btn.addEventListener("click", function() {
+        const key = btn.getAttribute("data-key");
+        const row = document.querySelector('[data-crm-row="' + CSS.escape(key) + '"]');
+        const ppsEl = row ? row.querySelector(".crm-pps") : null;
+        const pps = ppsEl ? ppsEl.value.trim() : "";
+        if (!pps) { alert("Enter the confirmed PPS first."); return; }
+        btn.disabled = true;
+        btn.textContent = "Writing…";
+        fetch(window.location.pathname + window.location.search, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "crm_confirm_pps", key: key, pps: pps })
+        }).then(r => r.json()).then(d => {
+          if (d && d.ok) {
+            btn.textContent = "✓ Confirmed";
+            btn.style.background = "#d1fae5";
+            btn.style.borderColor = "#6ee7b7";
+            if (row) { row.style.opacity = "0.55"; }
+          } else {
+            btn.disabled = false;
+            btn.textContent = "Retry";
+            alert("Confirm failed: " + ((d && d.error) || "unknown error"));
+          }
+        }).catch(e => {
+          btn.disabled = false;
+          btn.textContent = "Retry";
+          alert("Confirm failed: " + e);
+        });
+      });
+    });
     document.querySelectorAll(".crm-snooze").forEach(btn => {
       btn.addEventListener("click", function() {
         crmRowAction(btn, "crm_snooze", null);
@@ -2293,16 +2369,12 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
         out.append(_muted_p("(No pending valuation updates.)",
                             interactive=interactive))
     else:
+        out.append(_open_table(interactive=interactive))
+        out.append(_header_row(
+            ["Company", "Headline", "Date", "New LR Val", "New LR PPS",
+             "Series", ""],
+            with_checkbox=False, interactive=interactive))
         if pu_pending:
-            if interactive:
-                out.append("<p>Ready to write</p>")
-            else:
-                out.append(f'<p style="{SUB_HEADING_STYLE}">Ready to write</p>')
-            out.append(_open_table(interactive=interactive))
-            out.append(_header_row(
-                ["Company", "Headline", "Date", "New LR Val", "New LR PPS",
-                 "Series", ""],
-                with_checkbox=False, interactive=interactive))
             for r in pu_pending:
                 c = r["_calc"]
                 val_s = f"${c['new_val_bn']:.2f}B" if c["new_val_bn"] else "&mdash;"
@@ -2381,37 +2453,76 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
                     + _td(post_cell, interactive=interactive)
                     + "</tr>"
                 )
-            out.append("</table>")
         if pu_awaiting:
-            out.append(SECTION_GAP_HTML)
-            if interactive:
-                out.append("<p>Awaiting PPS confirmation</p>")
-            else:
-                out.append(f'<p style="{SUB_HEADING_STYLE}">Awaiting PPS confirmation</p>')
-            out.append(_open_table(interactive=interactive))
-            out.append(_header_row(
-                ["Company", "Written PPS", "Status", "Headline"],
-                with_checkbox=False, interactive=interactive))
             for r in pu_awaiting:
                 url = escape(r.get("url") or "", quote=True)
                 head = escape(r.get("headline") or "")
-                written_pps = _pu_float(r.get("written_pps"))
-                if r.get("_needs_lookup"):
-                    pps_txt = "&mdash;"
-                    why = "not published - look up $LR"
+                head_html = f'<a href="{url}">{head}</a>' if url else head
+                co_id = r.get("co_id")
+                co_name = escape(r.get("company") or "")
+                if co_id:
+                    co_html = (f'<a href="https://app.pipelinedeals.com/companies/'
+                               f'{escape(str(co_id), quote=True)}">{co_name}</a>')
                 else:
-                    pps_txt = f"${written_pps:.2f}" if written_pps else "&mdash;"
-                    why = "estimated - confirm"
+                    co_html = co_name
+                rkey = escape(r.get("_key") or "", quote=True)
+                written_pps = _pu_float(r.get("written_pps"))
+                written_val = _pu_float(r.get("written_val_bn"))
+                val_s = f"${written_val:.2f}B" if written_val else "&mdash;"
+                val_s += ('<div style="font-size:11px; color:#9ca3af;">'
+                          'written to CRM</div>')
+                date_cell = escape(r.get("date") or "")
+                if r.get("written_at"):
+                    date_cell += ('<div style="font-size:11px; color:#9ca3af;">'
+                                  f'posted {escape(str(r.get("written_at")))}</div>')
+                note = ("not published - look up" if r.get("_needs_lookup")
+                        else "estimated - confirm")
+                if interactive:
+                    pps_val = f"{written_pps:.2f}" if written_pps else ""
+                    pps_cell = (
+                        f'<input type="text" class="crm-pps" data-key="{rkey}"'
+                        f' value="{pps_val}" placeholder="look up"'
+                        ' style="width:82px; padding:3px 5px; font-family:inherit;'
+                        ' font-size:13px;">'
+                        f'<div style="font-size:11px; color:#9ca3af;">{note}</div>'
+                    )
+                    post_cell = (
+                        f'<button type="button" class="crm-confirm" data-key="{rkey}"'
+                        ' style="padding:5px 14px; border-radius:999px; cursor:pointer;'
+                        ' border:1px solid #b8c2cc; background:#CCDBEA;'
+                        ' font-family:inherit; font-size:13px; font-weight:500;">'
+                        'Confirm PPS</button>'
+                        f'<div style="margin-top:6px;">'
+                        f'<button type="button" class="crm-snooze" data-key="{rkey}"'
+                        ' style="padding:3px 8px; border-radius:999px; cursor:pointer;'
+                        ' border:1px solid #d1d5db; background:#f3f4f6;'
+                        ' font-family:inherit; font-size:11px; margin-right:4px;">'
+                        'Snooze 1w</button>'
+                        f'<button type="button" class="crm-delete" data-key="{rkey}"'
+                        ' style="padding:3px 8px; border-radius:999px; cursor:pointer;'
+                        ' border:1px solid #d1d5db; background:#f3f4f6;'
+                        ' font-family:inherit; font-size:11px; color:#b91c1c;">'
+                        'Delete</button></div>'
+                    )
+                else:
+                    pps_cell = (f"${written_pps:.2f} (est.)" if written_pps
+                                else "&mdash; needs lookup")
+                    pps_cell += ('<div style="font-size:11px; color:#9ca3af;">'
+                                 f'{note}</div>')
+                    post_cell = ""
+                series_cell = escape(r.get("round_series") or "") or "&mdash;"
                 out.append(
-                    "<tr>"
-                    + _td(escape(r.get("company") or ""), interactive=interactive)
-                    + _td(pps_txt, interactive=interactive)
-                    + _td(why, interactive=interactive)
-                    + _td(f'<a href="{url}">{head}</a>' if url else head,
-                          interactive=interactive)
+                    f'<tr data-crm-row="{rkey}">'
+                    + _td(co_html, interactive=interactive)
+                    + _td(head_html, interactive=interactive)
+                    + _td(date_cell, interactive=interactive)
+                    + _td(val_s, interactive=interactive)
+                    + _td(pps_cell, interactive=interactive)
+                    + _td(series_cell, interactive=interactive)
+                    + _td(post_cell, interactive=interactive)
                     + "</tr>"
                 )
-            out.append("</table>")
+        out.append("</table>")
     out.append(_section_close())
 
     # ── A. INVOICE ────────────────────────────────────────────────────────
@@ -3203,6 +3314,8 @@ def handle_http_request(event):
             return _handle_crm_snooze(body)
         if body.get("action") == "crm_delete":
             return _handle_crm_delete(body)
+        if body.get("action") == "crm_confirm_pps":
+            return _handle_crm_confirm(body)
         return {"statusCode": 400,
                 "headers": {"Content-Type": "application/json"},
                 "body": json.dumps({"ok": False, "error": "unknown action"})}
