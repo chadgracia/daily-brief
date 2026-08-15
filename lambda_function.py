@@ -1299,14 +1299,25 @@ def _checkbox_td(section, row_id, interactive, dismiss_days=None):
     if not interactive or row_id in (None, ""):
         return ""
     key = f"{section}:{row_id}"
-    days_attr = (
-        f' data-dismiss-days="{int(dismiss_days)}"'
-        if dismiss_days else ""
-    )
+    if dismiss_days:
+        return (
+            '<td>'
+            f'<input type="checkbox" class="row-dismiss"'
+            f' data-row-key="{escape(key, quote=True)}"'
+            f' data-dismiss-days="{int(dismiss_days)}" />'
+            '</td>'
+        )
     return (
         '<td>'
-        f'<input type="checkbox" class="row-dismiss"'
-        f' data-row-key="{escape(key, quote=True)}"{days_attr} />'
+        f'<select class="row-snooze" data-row-key="{escape(key, quote=True)}"'
+        ' style="font-family:inherit; font-size:11px; color:#6b7280;'
+        ' border:1px solid #d1d5db; border-radius:6px; padding:2px;'
+        ' background:#fff;">'
+        '<option value="" selected>&ndash;</option>'
+        '<option value="1">1d</option>'
+        '<option value="3">3d</option>'
+        '<option value="7">1w</option>'
+        '</select>'
         '</td>'
     )
 
@@ -2138,6 +2149,21 @@ INTERACTIVE_JS = """
         if (!list.includes(key)) list.push(key);
         setTodaySections(list);
         section.style.display = "none";
+      });
+    });
+    document.querySelectorAll("select.row-snooze").forEach(sel => {
+      sel.addEventListener("change", function() {
+        const key = this.getAttribute("data-row-key");
+        const tr = this.closest("tr[data-row-key]");
+        const v = this.value;
+        if (!v) {
+          removeLongDismissed(key);
+          if (tr) tr.style.display = "";
+          return;
+        }
+        const days = parseInt(v, 10) || 1;
+        addLongDismissed(key, days);
+        if (tr) tr.style.display = "none";
       });
     });
     document.querySelectorAll("input.row-dismiss").forEach(cb => {
