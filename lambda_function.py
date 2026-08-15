@@ -1317,6 +1317,7 @@ def _checkbox_td(section, row_id, interactive, dismiss_days=None):
         '<option value="1">1d</option>'
         '<option value="3">3d</option>'
         '<option value="7">1w</option>'
+        '<option value="30">30d</option>'
         '</select>'
         '</td>'
     )
@@ -2705,7 +2706,7 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
                 did = r["deal"].get("id")
                 out.append(
                     _row_open("D", did, interactive)
-                    + _checkbox_td("D", did, interactive, dismiss_days=7)
+                    + _checkbox_td("D", did, interactive)
                     + _td(_deal_title_link(r["deal"], interactive=interactive),
                           interactive=interactive)
                     + _td(escape(r["stage"]), interactive=interactive)
