@@ -1464,7 +1464,7 @@ def _build_tight(deals, companies, people_by_id):
     rows = []
     for d in deals:
         sid = _stage_id(d)
-        if sid not in MARKET_STAGES:
+        if sid not in MARKET_STAGES or sid == STAGE_MATCHED:
             continue
         if _cf_option_id(d, CF_NEXUS) != OPT_NEXUS_DIRECT:
             continue
