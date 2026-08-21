@@ -3120,10 +3120,10 @@ PIPELINE_APP_KEY = "571978be28bd3b5b515a2cc5db96b674"
 MAILER_MAX_PAGES = 25
 
 
-def _fetch_mailer_page(page):
+def _fetch_mailer_page(page, search_id=MAILER_SEARCH_ID):
     url = (
         "https://api.pipelinecrm.com/api/v3/searches/"
-        + str(MAILER_SEARCH_ID)
+        + str(search_id)
         + "/perform.json?per_page=200&page=" + str(page)
         + "&api_key=" + PIPELINE_API_KEY
         + "&app_key=" + PIPELINE_APP_KEY
@@ -3158,7 +3158,7 @@ def _collect_mailer_entries(data, seen, rows, missing):
         rows.append((first, email))
 
 
-def _fetch_mailer_rows():
+def _fetch_mailer_rows(search_id=MAILER_SEARCH_ID):
     """Run the 'S: Weekly Mailer Leads' focused list (saved search 19530439).
     Page 1 is fetched first to learn the page count; pages 2..N are then
     fetched concurrently. Returns (rows, missing) where rows is
@@ -3167,7 +3167,7 @@ def _fetch_mailer_rows():
     rows = []
     missing = []
 
-    first_page = _fetch_mailer_page(1)
+    first_page = _fetch_mailer_page(1, search_id)
     _collect_mailer_entries(first_page, seen, rows, missing)
 
     pagination = first_page.get("pagination") or {}
@@ -3180,7 +3180,7 @@ def _fetch_mailer_rows():
     if pages > 1:
         with concurrent.futures.ThreadPoolExecutor(max_workers=6) as pool:
             futures = {
-                pool.submit(_fetch_mailer_page, p): p
+                pool.submit(_fetch_mailer_page, p, search_id): p
                 for p in range(2, pages + 1)
             }
             results = []
@@ -3210,9 +3210,9 @@ MAILER_SCRIPT = """
 """
 
 
-def _render_mailer_page():
+def _render_mailer_page(search_id=MAILER_SEARCH_ID):
     try:
-        rows, missing = _fetch_mailer_rows()
+        rows, missing = _fetch_mailer_rows(search_id)
     except Exception as exc:
         return {
             "statusCode": 500,
@@ -3356,6 +3356,9 @@ def handle_http_request(event):
                     "body": f"Seed failed: {e}"}
 
     if params.get("view") == "mailer":
+        sid = str(params.get("search") or "").strip()
+        if sid.isdigit():
+            return _render_mailer_page(int(sid))
         return _render_mailer_page()
 
     body_html, _date_str, _counts = _build_brief_html(interactive=True)
