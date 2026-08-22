@@ -123,7 +123,6 @@ NEWSLETTER_OPTS = {OPT_NEWSLETTER_SUBSCRIBED_WEEKLY, 6613673, 6582981}
 
 EMAIL_STATUS_REASONS = {
     3940558: "Bouncing",
-    4943722: "Blocked",
     3940678: "Needed",
 }
 
@@ -834,6 +833,41 @@ def _handle_row_done(body):
             "body": json.dumps({"ok": True})}
 
 
+def _handle_lead_email(body):
+    """Kate found a new work email: move old email -> email2, set new email,
+    mark Email Status In Progress, log completion."""
+    def _fail(msg, code=400):
+        return {"statusCode": code, "headers": {"Content-Type": "application/json"},
+                "body": json.dumps({"ok": False, "error": msg})}
+    pid = str(body.get("person_id") or "").strip()
+    new_email = (body.get("email") or "").strip()
+    if not pid.isdigit():
+        return _fail("missing person_id")
+    if "@" not in new_email or "." not in new_email.split("@")[-1]:
+        return _fail("enter a valid email address")
+    try:
+        jwt = get_jwt()
+    except Exception as e:
+        return _fail(f"token error: {e}", 500)
+    cur = call_pipeline_api("GET", f"/people/{pid}.json", jwt=jwt)
+    if cur.get("status") != 200:
+        return _fail(f"Pipeline read failed: {cur.get('status')}", 502)
+    old_email = (cur["data"].get("email") or "").strip()
+    person = {"email": new_email,
+              "custom_fields": {CF_EMAIL_STATUS: 4923706}}
+    if old_email and old_email.lower() != new_email.lower():
+        person["email2"] = old_email
+    res = call_pipeline_api("PUT", f"/people/{pid}.json", {"person": person}, jwt=jwt)
+    if res.get("status") != 200:
+        return _fail(f"Pipeline write failed: {res.get('status')} {res.get('data')}", 502)
+    try:
+        _log_completion("kate", "email_updated", f"person:{pid}")
+    except Exception:
+        pass
+    return {"statusCode": 200, "headers": {"Content-Type": "application/json"},
+            "body": json.dumps({"ok": True})}
+
+
 def _handle_crm_delete(body):
     key = body.get("key")
     items = _load_pending_updates()
@@ -1354,6 +1388,24 @@ def _row_open(section, row_id, interactive):
         key = f"{section}:{row_id}"
         return f'<tr data-row-key="{escape(key, quote=True)}">'
     return "<tr>"
+
+
+def _email_update_td(section, pid, interactive):
+    if not interactive or pid in (None, ""):
+        return ""
+    key = f"{section}:{pid}"
+    return (
+        '<td style="white-space:nowrap;">'
+        f'<input type="email" class="lead-email" data-row-key="{escape(key, quote=True)}"'
+        f' data-person-id="{escape(str(pid), quote=True)}" placeholder="new work email"'
+        ' style="font-family:inherit; font-size:12px; width:190px; padding:3px 6px;'
+        ' border:1px solid #d1d5db; border-radius:6px;" />'
+        f' <button type="button" class="lead-email-update" data-row-key="{escape(key, quote=True)}"'
+        ' style="padding:3px 10px; border-radius:999px; cursor:pointer;'
+        ' border:1px solid #b8c2cc; background:#CCDBEA; font-family:inherit;'
+        ' font-size:12px; font-weight:500;">Update</button>'
+        '</td>'
+    )
 
 
 def _checkbox_td(section, row_id, interactive, dismiss_days=None):
@@ -2237,6 +2289,33 @@ INTERACTIVE_JS = """
         body: JSON.stringify({ action: "row_done", key: key, owner: owner, done: done })
       }).catch(() => {});
     }
+    document.querySelectorAll("button.lead-email-update").forEach(btn => {
+      btn.addEventListener("click", function() {
+        const key = btn.getAttribute("data-row-key");
+        const tr = btn.closest("tr[data-row-key]");
+        const input = tr ? tr.querySelector("input.lead-email") : null;
+        const email = input ? input.value.trim() : "";
+        const pid = input ? input.getAttribute("data-person-id") : "";
+        if (!email) { alert("Enter the new work email first."); return; }
+        btn.disabled = true;
+        fetch(window.location.pathname + window.location.search, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ action: "lead_email", person_id: pid, email: email })
+        }).then(r => r.json()).then(d => {
+          if (d && d.ok) {
+            const list = getToday();
+            if (!list.includes(key)) list.push(key);
+            setToday(list);
+            if (tr) tr.style.display = "none";
+            updateCounter();
+          } else {
+            btn.disabled = false;
+            alert("Failed: " + ((d && d.error) || "unknown error"));
+          }
+        }).catch(e => { btn.disabled = false; alert("Failed: " + e); });
+      });
+    });
     document.querySelectorAll("input.row-dismiss").forEach(cb => {
       cb.addEventListener("change", function() {
         const key = this.getAttribute("data-row-key");
@@ -3033,7 +3112,7 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
             pid = r["person_id"]
             out.append(
                 _row_open("Fpri", pid, interactive)
-                + _checkbox_td("Fpri", pid, interactive)
+                + _email_update_td("Fpri", pid, interactive)
                 + _td(name_cell, interactive=interactive)
                 + _td(escape(str(r["active_deal_count"])),
                       interactive=interactive)
@@ -3088,7 +3167,7 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
             pid = r["person_id"]
             out.append(
                 _row_open("Fmain", pid, interactive)
-                + _checkbox_td("Fmain", pid, interactive)
+                + _email_update_td("Fmain", pid, interactive)
                 + _td(escape(r["reason"]), interactive=interactive)
                 + _td(escape(r["name"]), interactive=interactive)
                 + _td(pipeline_cell, interactive=interactive)
@@ -3682,6 +3761,8 @@ def handle_http_request(event):
             return _handle_crm_confirm(body)
         if body.get("action") == "row_done":
             return _handle_row_done(body)
+        if body.get("action") == "lead_email":
+            return _handle_lead_email(body)
         if body.get("action") == "mailer_select":
             ids = {str(x) for x in (body.get("deal_ids") or []) if str(x).isdigit()}
             _save_mailer_selection(ids)
