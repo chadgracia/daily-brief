@@ -3443,7 +3443,15 @@ def _save_mailer_selection(deal_ids):
     )
 
 
-def _mailer_table(title, rows, person_id):
+def _mailer_buyer_counts(people):
+    counts = {}
+    for p in people:
+        for cid in _cf_option_ids(p, CF_PERSON_BUY_INTERESTS):
+            counts[cid] = counts.get(cid, 0) + 1
+    return counts
+
+
+def _mailer_table(title, rows, person_id, buyer_counts=None):
     th = (
         'style="text-align:left;padding:8px 10px;border-bottom:2px solid #1f2937;'
         'font-size:12px;letter-spacing:.04em;text-transform:uppercase;color:#374151;"'
@@ -3460,6 +3468,10 @@ def _mailer_table(title, rows, person_id):
     for d in rows:
         href = _mailer_click_url(person_id, d.get("id"))
         name = escape(_company_name(d) or _deal_title(d))
+        if buyer_counts is not None:
+            n = buyer_counts.get(_normalize_id(_company_id(d)), 0)
+            if n:
+                name += " (" + str(n) + " buyer" + ("" if n == 1 else "s") + ")"
         out.append(
             "<tr>"
             "<td " + td + '><a href="' + href + '" style="color:#1d4ed8;font-weight:600;text-decoration:none;">' + name + "</a></td>"
@@ -3472,7 +3484,7 @@ def _mailer_table(title, rows, person_id):
     return "".join(out)
 
 
-def _render_mailer_email(first_name, person_id, sells, buys):
+def _render_mailer_email(first_name, person_id, sells, buys, buyer_counts=None):
     greet = "Hello " + escape(first_name) + "," if first_name else "Hello,"
     return (
         '<div style="font-family:-apple-system,BlinkMacSystemFont,\'Segoe UI\',Roboto,'
@@ -3481,7 +3493,7 @@ def _render_mailer_email(first_name, person_id, sells, buys):
         '<p style="font-size:15px;margin:0 0 4px 0;">Live orders this week. '
         "Click any company to register your interest and see full details.</p>"
         + _mailer_table("Sell orders — shares available", sells, person_id)
-        + _mailer_table("Buy orders — buyers seeking shares", buys, person_id)
+        + _mailer_table("Buy orders — buyers seeking shares", buys, person_id, buyer_counts)
         + '<p style="font-size:13px;color:#6b7280;margin:28px 0 0 0;">Chad Gracia &middot; '
         "Gracia Group &middot; Rainmaker Securities</p>"
         "</div>"
@@ -3499,7 +3511,7 @@ def _handle_mailer_click(params):
     pid = int(pid_raw)
     did = int(did_raw)
     redirect = {"statusCode": 302,
-                "headers": {"Location": "https://" + TRADES_DEAL_URL.format(did)},
+                "headers": {"Location": "https://trades.graciagroup.com/deal/" + str(did)},
                 "body": ""}
     try:
         s3 = boto3.client("s3", region_name=S3_REGION)
@@ -3558,6 +3570,11 @@ MAILER_COMPOSER_SCRIPT = """
 (function () {
   var btn = document.getElementById('save-sel');
   if (!btn) return;
+  var clr = document.getElementById('clear-sel');
+  if (clr) clr.addEventListener('click', function () {
+    document.querySelectorAll('input[name=deal]').forEach(function (c) { c.checked = false; });
+    btn.click();
+  });
   btn.addEventListener('click', function () {
     var ids = [];
     document.querySelectorAll('input[name=deal]:checked').forEach(function (c) { ids.push(c.value); });
@@ -3582,7 +3599,8 @@ def _render_mailer_composer(pid):
     selected = _load_mailer_selection(s3)
     sells = [d for d in sells_all if str(d.get("id")) in selected]
     buys = [d for d in buys_all if str(d.get("id")) in selected]
-    email_html = _render_mailer_email("Chad", pid, sells, buys)
+    people = (_fetch_json(s3, "people.json") or {}).get("people", []) or []
+    email_html = _render_mailer_email("Chad", pid, sells, buys, _mailer_buyer_counts(people))
 
     html = (
         '<!doctype html><html lang="en"><head><meta charset="utf-8">'
@@ -3602,6 +3620,9 @@ def _render_mailer_composer(pid):
         '<button type="button" id="save-sel" style="margin:12px 0 24px 0;padding:8px 18px;'
         "border:1px solid #d1d5db;background:#ffffff;color:#374151;font-size:14px;font-weight:500;"
         'border-radius:6px;cursor:pointer;font-family:inherit;">Save selection &amp; update preview</button>'
+        '<button type="button" id="clear-sel" style="margin:12px 0 24px 10px;padding:8px 18px;'
+        "border:1px solid #d1d5db;background:#ffffff;color:#374151;font-size:14px;font-weight:500;"
+        'border-radius:6px;cursor:pointer;font-family:inherit;">Clear all</button>'
         '<p style="color:#6b7280;font-size:13px;margin:0 0 8px 0;">Preview as recipient &middot; '
         + str(len(sells)) + " sell / " + str(len(buys)) + " buy selected</p>"
         '<div style="background:#ffffff;border:1px solid #e5e7eb;border-radius:6px;">'
