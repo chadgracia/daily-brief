@@ -3488,6 +3488,52 @@ def _render_mailer_email(first_name, person_id, sells, buys):
     )
 
 
+def _handle_mailer_click(params):
+    pid_raw = str(params.get("pid") or "").strip()
+    did_raw = str(params.get("did") or "").strip()
+    token = str(params.get("t") or "").strip()
+    if not (pid_raw.isdigit() and did_raw.isdigit()):
+        return {"statusCode": 400, "body": "Bad link"}
+    if not hmac.compare_digest(token, _mailer_token(pid_raw, did_raw)):
+        return {"statusCode": 403, "body": "Invalid link"}
+    pid = int(pid_raw)
+    did = int(did_raw)
+    redirect = {"statusCode": 302,
+                "headers": {"Location": "https://" + TRADES_DEAL_URL.format(did)},
+                "body": ""}
+    try:
+        s3 = boto3.client("s3", region_name=S3_REGION)
+        deals = (_fetch_json(s3, "deals.json") or {}).get("deals", []) or []
+        deal = next((d for d in deals if _normalize_id(d.get("id")) == did), None)
+        if not deal:
+            return redirect
+        side = _deal_side(deal)
+        cid = _normalize_id(_company_id(deal))
+        if side not in ("SELL", "BUY") or cid is None:
+            return redirect
+        field = CF_PERSON_BUY_INTERESTS if side == "SELL" else CF_PERSON_SELL_INTERESTS
+        interest_word = "Buy" if side == "SELL" else "Sell"
+        jwt = get_jwt()
+        cur = call_pipeline_api("GET", f"/people/{pid}.json", jwt=jwt)
+        existing = set()
+        if cur.get("status") == 200 and isinstance(cur.get("data"), dict):
+            existing = _cf_option_ids(cur["data"], field)
+        new_ids = sorted(existing | {cid})
+        call_pipeline_api("PUT", f"/people/{pid}.json",
+                          {"person": {"custom_fields": {field: new_ids}}}, jwt=jwt)
+        note = ("Clicked " + (_company_name(deal) or _deal_title(deal)) + " "
+                + side.lower() + " order — " + interest_word
+                + " Interest added via weekly newsletter "
+                + datetime.now(timezone.utc).strftime("%Y-%m-%d"))
+        call_pipeline_api("POST", "/notes.json",
+                          {"note": {"content": note, "note_category_id": 69759,
+                                    "person_id": pid, "company_id": cid, "deal_id": did}},
+                          jwt=jwt)
+    except Exception as e:
+        print(f"mailer click write failed pid={pid} did={did}: {e}")
+    return redirect
+
+
 def _mailer_composer_column(title, rows, selected):
     out = ['<div style="flex:1;min-width:280px;">'
            '<h3 style="font-size:14px;margin:0 0 8px 0;">' + escape(title) + "</h3>"]
@@ -3572,6 +3618,8 @@ def _render_mailer_composer(pid):
 
 def handle_http_request(event):
     params = event.get("queryStringParameters") or {}
+    if isinstance(params, dict) and params.get("view") == "click":
+        return _handle_mailer_click(params)
     key = params.get("key") if isinstance(params, dict) else None
     expected = os.environ.get("BRIEF_PAGE_KEY")
     if not expected or key != expected:
