@@ -3523,24 +3523,44 @@ def _handle_mailer_click(params):
         cid = _normalize_id(_company_id(deal))
         if side not in ("SELL", "BUY") or cid is None:
             return redirect
-        field = CF_PERSON_BUY_INTERESTS if side == "SELL" else CF_PERSON_SELL_INTERESTS
-        interest_word = "Buy" if side == "SELL" else "Sell"
+        co_name = _company_name(deal) or _deal_title(deal)
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         jwt = get_jwt()
         cur = call_pipeline_api("GET", f"/people/{pid}.json", jwt=jwt)
-        existing = set()
-        if cur.get("status") == 200 and isinstance(cur.get("data"), dict):
-            existing = _cf_option_ids(cur["data"], field)
-        new_ids = sorted(existing | {cid})
-        call_pipeline_api("PUT", f"/people/{pid}.json",
-                          {"person": {"custom_fields": {field: new_ids}}}, jwt=jwt)
-        note = ("Clicked " + (_company_name(deal) or _deal_title(deal)) + " "
-                + side.lower() + " order — " + interest_word
-                + " Interest added via weekly newsletter "
-                + datetime.now(timezone.utc).strftime("%Y-%m-%d"))
+        person = cur["data"] if cur.get("status") == 200 and isinstance(cur.get("data"), dict) else {}
+        who = (_person_full_name(person) or "Person " + str(pid))
+        who_email = _person_email(person) or ""
+        interest_status = "note only"
+        if side == "SELL":
+            agent_obj = s3.get_object(Bucket="pipeline-token", Key="agent-data.json")
+            sec_ids = json.loads(agent_obj["Body"].read()).get("security_ids", {}) or {}
+            entry = (sec_ids.get(co_name) or {}).get("b")
+            if entry:
+                existing = _cf_option_ids(person, CF_PERSON_BUY_INTERESTS)
+                new_ids = sorted(existing | {int(entry)})
+                res = call_pipeline_api("PUT", f"/people/{pid}.json",
+                                        {"person": {"custom_fields": {CF_PERSON_BUY_INTERESTS: new_ids}}},
+                                        jwt=jwt)
+                interest_status = ("Buy Interest added" if res.get("status") == 200
+                                   else f"Buy Interest write FAILED ({res.get('status')})")
+            else:
+                interest_status = "Buy Interest NOT added — no security entry for '" + co_name + "' in agent-data.json"
+        note = ("Clicked " + co_name + " " + side.lower() + " order via weekly newsletter "
+                + today + " — " + interest_status)
         call_pipeline_api("POST", "/notes.json",
                           {"note": {"content": note, "note_category_id": 69759,
                                     "person_id": pid, "company_id": cid, "deal_id": did}},
                           jwt=jwt)
+        alert = (who + " (" + who_email + ") clicked " + co_name + " " + side.lower()
+                 + " order in the weekly mailer.\n\n" + interest_status + "\n\n"
+                 + "Person: https://app.pipelinecrm.com/people/" + str(pid) + "\n"
+                 + "Deal: https://app.pipelinecrm.com/deals/" + str(did) + "\n")
+        boto3.client("ses", region_name=SES_REGION).send_email(
+            Source=FROM_ADDR,
+            Destination={"ToAddresses": TO_ADDRS},
+            Message={"Subject": {"Data": "Mailer click: " + who + " — " + co_name + " (" + side.lower() + ")", "Charset": "UTF-8"},
+                     "Body": {"Text": {"Data": alert, "Charset": "UTF-8"}}},
+        )
     except Exception as e:
         print(f"mailer click write failed pid={pid} did={did}: {e}")
     return redirect
