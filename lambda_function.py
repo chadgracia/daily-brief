@@ -2261,11 +2261,13 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
                  companies_by_id, priority_leads, to_post,
                  spv_managers_to_warm, top_buyers_to_warm,
                  popular_spv_managers, priority_names, interactive=False):
+    pu_pending, pu_awaiting = _build_crm_updates(interactive)
     chad_count = (
         len(to_invoice) + len(to_close) + len(crossed) + len(tight)
         + len(spv_managers_to_warm) + len(top_buyers_to_warm)
     )
-    kate_count = len(to_post) + len(leads) + len(priority_names)
+    kate_count = (len(to_post) + len(leads) + len(priority_names)
+                  + len(pu_pending) + len(pu_awaiting))
     out = []
     if interactive:
         out.append(
@@ -2355,172 +2357,6 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
         out.append(
             f'<h1 style="{QUEUE_H1_STYLE}">Chad — Trading queue</h1>'
         )
-
-    # ── A0. UPDATE CRM ────────────────────────────────────────────────────
-    pu_pending, pu_awaiting = _build_crm_updates(interactive)
-    out.append(_section_open(
-        "chad-0-crm-updates", "UPDATE CRM: New valuations from the news",
-        interactive,
-    ))
-    if not pu_pending and not pu_awaiting:
-        out.append(_muted_p("(No pending valuation updates.)",
-                            interactive=interactive))
-    else:
-        out.append(_open_table(interactive=interactive))
-        out.append(_header_row(
-            ["Company", "Headline", "Date", "New LR Val", "New LR PPS",
-             "Series", ""],
-            with_checkbox=False, interactive=interactive))
-        if pu_pending:
-            for r in pu_pending:
-                c = r["_calc"]
-                val_s = f"${c['new_val_bn']:.2f}B" if c["new_val_bn"] else "&mdash;"
-                if c["cur_val"]:
-                    val_s += ('<div style="font-size:11px; color:#9ca3af;">'
-                              f"now ${c['cur_val']:.2f}B</div>")
-                cur_pps_note = ""
-                if c["cur_pps"]:
-                    cur_pps_note = ('<div style="font-size:11px; color:#9ca3af;">'
-                                    f"now ${c['cur_pps']:.2f}</div>")
-                head = escape(r.get("headline") or "")
-                url = escape(r.get("url") or "", quote=True)
-                head_html = f'<a href="{url}">{head}</a>' if url else head
-                co_id = r.get("co_id")
-                co_name = escape(r.get("company") or "")
-                if co_id:
-                    co_html = (f'<a href="https://app.pipelinedeals.com/companies/'
-                               f'{escape(str(co_id), quote=True)}">{co_name}</a>')
-                else:
-                    co_html = co_name
-                rkey = escape(r.get("_key") or "", quote=True)
-                if interactive:
-                    pps_val = f"{c['new_pps']:.2f}" if c["new_pps"] else ""
-                    pps_note = ""
-                    if c["pps_source"] == "derived":
-                        pps_note = ('<div style="font-size:11px; color:#9ca3af;">'
-                                    'estimated</div>')
-                    pps_cell = (
-                        f'<input type="text" class="crm-pps" data-key="{rkey}"'
-                        f' value="{pps_val}" placeholder="look up"'
-                        ' style="width:82px; padding:3px 5px; font-family:inherit;'
-                        ' font-size:13px;">' + pps_note + cur_pps_note
-                    )
-                    series_cell = (
-                        f'<input type="text" class="crm-series" data-key="{rkey}"'
-                        f' value="{escape(r.get("round_series") or "", quote=True)}"'
-                        ' placeholder="e.g. Series D"'
-                        ' style="width:92px; padding:3px 5px; font-family:inherit;'
-                        ' font-size:13px;">'
-                    )
-                    post_cell = (
-                        f'<button type="button" class="crm-post" data-key="{rkey}"'
-                        ' style="padding:5px 14px; border-radius:999px; cursor:pointer;'
-                        ' border:1px solid #b8c2cc; background:#CCDBEA;'
-                        ' font-family:inherit; font-size:13px; font-weight:500;">'
-                        'Post</button>'
-                        f'<div style="margin-top:6px;">'
-                        f'<button type="button" class="crm-snooze" data-key="{rkey}"'
-                        ' style="padding:3px 8px; border-radius:999px; cursor:pointer;'
-                        ' border:1px solid #d1d5db; background:#f3f4f6;'
-                        ' font-family:inherit; font-size:11px; margin-right:4px;">'
-                        'Snooze 1w</button>'
-                        f'<button type="button" class="crm-delete" data-key="{rkey}"'
-                        ' style="padding:3px 8px; border-radius:999px; cursor:pointer;'
-                        ' border:1px solid #d1d5db; background:#f3f4f6;'
-                        ' font-family:inherit; font-size:11px; color:#b91c1c;">'
-                        'Delete</button></div>'
-                    )
-                else:
-                    if c["new_pps"]:
-                        tag = " (est.)" if c["pps_source"] == "derived" else ""
-                        pps_cell = f"${c['new_pps']:.2f}{tag}"
-                    else:
-                        pps_cell = "&mdash; needs lookup"
-                    pps_cell += cur_pps_note
-                    series_cell = escape(r.get("round_series") or "") or "&mdash;"
-                    post_cell = ""
-                out.append(
-                    f'<tr data-crm-row="{rkey}">'
-                    + _td(co_html, interactive=interactive)
-                    + _td(head_html, interactive=interactive)
-                    + _td(escape(r.get("date") or ""), interactive=interactive)
-                    + _td(val_s, interactive=interactive)
-                    + _td(pps_cell, interactive=interactive)
-                    + _td(series_cell, interactive=interactive)
-                    + _td(post_cell, interactive=interactive)
-                    + "</tr>"
-                )
-        if pu_awaiting:
-            for r in pu_awaiting:
-                url = escape(r.get("url") or "", quote=True)
-                head = escape(r.get("headline") or "")
-                head_html = f'<a href="{url}">{head}</a>' if url else head
-                co_id = r.get("co_id")
-                co_name = escape(r.get("company") or "")
-                if co_id:
-                    co_html = (f'<a href="https://app.pipelinedeals.com/companies/'
-                               f'{escape(str(co_id), quote=True)}">{co_name}</a>')
-                else:
-                    co_html = co_name
-                rkey = escape(r.get("_key") or "", quote=True)
-                written_pps = _pu_float(r.get("written_pps"))
-                written_val = _pu_float(r.get("written_val_bn"))
-                val_s = f"${written_val:.2f}B" if written_val else "&mdash;"
-                val_s += ('<div style="font-size:11px; color:#9ca3af;">'
-                          'written to CRM</div>')
-                date_cell = escape(r.get("date") or "")
-                if r.get("written_at"):
-                    date_cell += ('<div style="font-size:11px; color:#9ca3af;">'
-                                  f'posted {escape(str(r.get("written_at")))}</div>')
-                note = ("not published - look up" if r.get("_needs_lookup")
-                        else "estimated - confirm")
-                if interactive:
-                    pps_val = f"{written_pps:.2f}" if written_pps else ""
-                    pps_cell = (
-                        f'<input type="text" class="crm-pps" data-key="{rkey}"'
-                        f' value="{pps_val}" placeholder="look up"'
-                        ' style="width:82px; padding:3px 5px; font-family:inherit;'
-                        ' font-size:13px;">'
-                        f'<div style="font-size:11px; color:#9ca3af;">{note}</div>'
-                    )
-                    post_cell = (
-                        f'<button type="button" class="crm-post" data-key="{rkey}"'
-                        ' style="padding:5px 14px; border-radius:999px; cursor:pointer;'
-                        ' border:1px solid #b8c2cc; background:#CCDBEA;'
-                        ' font-family:inherit; font-size:13px; font-weight:500;">'
-                        'Post</button>'
-                        f'<div style="margin-top:6px;">'
-                        f'<button type="button" class="crm-snooze" data-key="{rkey}"'
-                        ' style="padding:3px 8px; border-radius:999px; cursor:pointer;'
-                        ' border:1px solid #d1d5db; background:#f3f4f6;'
-                        ' font-family:inherit; font-size:11px; margin-right:4px;">'
-                        'Snooze 1w</button>'
-                        f'<button type="button" class="crm-delete" data-key="{rkey}"'
-                        ' style="padding:3px 8px; border-radius:999px; cursor:pointer;'
-                        ' border:1px solid #d1d5db; background:#f3f4f6;'
-                        ' font-family:inherit; font-size:11px; color:#b91c1c;">'
-                        'Delete</button></div>'
-                    )
-                else:
-                    pps_cell = (f"${written_pps:.2f} (est.)" if written_pps
-                                else "&mdash; needs lookup")
-                    pps_cell += ('<div style="font-size:11px; color:#9ca3af;">'
-                                 f'{note}</div>')
-                    post_cell = ""
-                series_cell = escape(r.get("round_series") or "") or "&mdash;"
-                out.append(
-                    f'<tr data-crm-row="{rkey}">'
-                    + _td(co_html, interactive=interactive)
-                    + _td(head_html, interactive=interactive)
-                    + _td(date_cell, interactive=interactive)
-                    + _td(val_s, interactive=interactive)
-                    + _td(pps_cell, interactive=interactive)
-                    + _td(series_cell, interactive=interactive)
-                    + _td(post_cell, interactive=interactive)
-                    + "</tr>"
-                )
-        out.append("</table>")
-    out.append(_section_close())
 
     # ── A. INVOICE ────────────────────────────────────────────────────────
     out.append(_section_open(
@@ -2815,6 +2651,171 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
         out.append(
             f'<h1 style="{QUEUE_H1_STYLE_TOP}">Kate — Queue</h1>'
         )
+
+    # ── 0. UPDATE CRM ────────────────────────────────────────────────────
+    out.append(_section_open(
+        "kate-0-crm-updates", "0. UPDATE CRM: New valuations from the news",
+        interactive,
+    ))
+    if not pu_pending and not pu_awaiting:
+        out.append(_muted_p("(No pending valuation updates.)",
+                            interactive=interactive))
+    else:
+        out.append(_open_table(interactive=interactive))
+        out.append(_header_row(
+            ["Company", "Headline", "Date", "New LR Val", "New LR PPS",
+             "Series", ""],
+            with_checkbox=False, interactive=interactive))
+        if pu_pending:
+            for r in pu_pending:
+                c = r["_calc"]
+                val_s = f"${c['new_val_bn']:.2f}B" if c["new_val_bn"] else "&mdash;"
+                if c["cur_val"]:
+                    val_s += ('<div style="font-size:11px; color:#9ca3af;">'
+                              f"now ${c['cur_val']:.2f}B</div>")
+                cur_pps_note = ""
+                if c["cur_pps"]:
+                    cur_pps_note = ('<div style="font-size:11px; color:#9ca3af;">'
+                                    f"now ${c['cur_pps']:.2f}</div>")
+                head = escape(r.get("headline") or "")
+                url = escape(r.get("url") or "", quote=True)
+                head_html = f'<a href="{url}">{head}</a>' if url else head
+                co_id = r.get("co_id")
+                co_name = escape(r.get("company") or "")
+                if co_id:
+                    co_html = (f'<a href="https://app.pipelinedeals.com/companies/'
+                               f'{escape(str(co_id), quote=True)}">{co_name}</a>')
+                else:
+                    co_html = co_name
+                rkey = escape(r.get("_key") or "", quote=True)
+                if interactive:
+                    pps_val = f"{c['new_pps']:.2f}" if c["new_pps"] else ""
+                    pps_note = ""
+                    if c["pps_source"] == "derived":
+                        pps_note = ('<div style="font-size:11px; color:#9ca3af;">'
+                                    'estimated</div>')
+                    pps_cell = (
+                        f'<input type="text" class="crm-pps" data-key="{rkey}"'
+                        f' value="{pps_val}" placeholder="look up"'
+                        ' style="width:82px; padding:3px 5px; font-family:inherit;'
+                        ' font-size:13px;">' + pps_note + cur_pps_note
+                    )
+                    series_cell = (
+                        f'<input type="text" class="crm-series" data-key="{rkey}"'
+                        f' value="{escape(r.get("round_series") or "", quote=True)}"'
+                        ' placeholder="e.g. Series D"'
+                        ' style="width:92px; padding:3px 5px; font-family:inherit;'
+                        ' font-size:13px;">'
+                    )
+                    post_cell = (
+                        f'<button type="button" class="crm-post" data-key="{rkey}"'
+                        ' style="padding:5px 14px; border-radius:999px; cursor:pointer;'
+                        ' border:1px solid #b8c2cc; background:#CCDBEA;'
+                        ' font-family:inherit; font-size:13px; font-weight:500;">'
+                        'Post</button>'
+                        f'<div style="margin-top:6px;">'
+                        f'<button type="button" class="crm-snooze" data-key="{rkey}"'
+                        ' style="padding:3px 8px; border-radius:999px; cursor:pointer;'
+                        ' border:1px solid #d1d5db; background:#f3f4f6;'
+                        ' font-family:inherit; font-size:11px; margin-right:4px;">'
+                        'Snooze 1w</button>'
+                        f'<button type="button" class="crm-delete" data-key="{rkey}"'
+                        ' style="padding:3px 8px; border-radius:999px; cursor:pointer;'
+                        ' border:1px solid #d1d5db; background:#f3f4f6;'
+                        ' font-family:inherit; font-size:11px; color:#b91c1c;">'
+                        'Delete</button></div>'
+                    )
+                else:
+                    if c["new_pps"]:
+                        tag = " (est.)" if c["pps_source"] == "derived" else ""
+                        pps_cell = f"${c['new_pps']:.2f}{tag}"
+                    else:
+                        pps_cell = "&mdash; needs lookup"
+                    pps_cell += cur_pps_note
+                    series_cell = escape(r.get("round_series") or "") or "&mdash;"
+                    post_cell = ""
+                out.append(
+                    f'<tr data-crm-row="{rkey}">'
+                    + _td(co_html, interactive=interactive)
+                    + _td(head_html, interactive=interactive)
+                    + _td(escape(r.get("date") or ""), interactive=interactive)
+                    + _td(val_s, interactive=interactive)
+                    + _td(pps_cell, interactive=interactive)
+                    + _td(series_cell, interactive=interactive)
+                    + _td(post_cell, interactive=interactive)
+                    + "</tr>"
+                )
+        if pu_awaiting:
+            for r in pu_awaiting:
+                url = escape(r.get("url") or "", quote=True)
+                head = escape(r.get("headline") or "")
+                head_html = f'<a href="{url}">{head}</a>' if url else head
+                co_id = r.get("co_id")
+                co_name = escape(r.get("company") or "")
+                if co_id:
+                    co_html = (f'<a href="https://app.pipelinedeals.com/companies/'
+                               f'{escape(str(co_id), quote=True)}">{co_name}</a>')
+                else:
+                    co_html = co_name
+                rkey = escape(r.get("_key") or "", quote=True)
+                written_pps = _pu_float(r.get("written_pps"))
+                written_val = _pu_float(r.get("written_val_bn"))
+                val_s = f"${written_val:.2f}B" if written_val else "&mdash;"
+                val_s += ('<div style="font-size:11px; color:#9ca3af;">'
+                          'written to CRM</div>')
+                date_cell = escape(r.get("date") or "")
+                if r.get("written_at"):
+                    date_cell += ('<div style="font-size:11px; color:#9ca3af;">'
+                                  f'posted {escape(str(r.get("written_at")))}</div>')
+                note = ("not published - look up" if r.get("_needs_lookup")
+                        else "estimated - confirm")
+                if interactive:
+                    pps_val = f"{written_pps:.2f}" if written_pps else ""
+                    pps_cell = (
+                        f'<input type="text" class="crm-pps" data-key="{rkey}"'
+                        f' value="{pps_val}" placeholder="look up"'
+                        ' style="width:82px; padding:3px 5px; font-family:inherit;'
+                        ' font-size:13px;">'
+                        f'<div style="font-size:11px; color:#9ca3af;">{note}</div>'
+                    )
+                    post_cell = (
+                        f'<button type="button" class="crm-post" data-key="{rkey}"'
+                        ' style="padding:5px 14px; border-radius:999px; cursor:pointer;'
+                        ' border:1px solid #b8c2cc; background:#CCDBEA;'
+                        ' font-family:inherit; font-size:13px; font-weight:500;">'
+                        'Post</button>'
+                        f'<div style="margin-top:6px;">'
+                        f'<button type="button" class="crm-snooze" data-key="{rkey}"'
+                        ' style="padding:3px 8px; border-radius:999px; cursor:pointer;'
+                        ' border:1px solid #d1d5db; background:#f3f4f6;'
+                        ' font-family:inherit; font-size:11px; margin-right:4px;">'
+                        'Snooze 1w</button>'
+                        f'<button type="button" class="crm-delete" data-key="{rkey}"'
+                        ' style="padding:3px 8px; border-radius:999px; cursor:pointer;'
+                        ' border:1px solid #d1d5db; background:#f3f4f6;'
+                        ' font-family:inherit; font-size:11px; color:#b91c1c;">'
+                        'Delete</button></div>'
+                    )
+                else:
+                    pps_cell = (f"${written_pps:.2f} (est.)" if written_pps
+                                else "&mdash; needs lookup")
+                    pps_cell += ('<div style="font-size:11px; color:#9ca3af;">'
+                                 f'{note}</div>')
+                    post_cell = ""
+                series_cell = escape(r.get("round_series") or "") or "&mdash;"
+                out.append(
+                    f'<tr data-crm-row="{rkey}">'
+                    + _td(co_html, interactive=interactive)
+                    + _td(head_html, interactive=interactive)
+                    + _td(date_cell, interactive=interactive)
+                    + _td(val_s, interactive=interactive)
+                    + _td(pps_cell, interactive=interactive)
+                    + _td(series_cell, interactive=interactive)
+                    + _td(post_cell, interactive=interactive)
+                    + "</tr>"
+                )
+        out.append("</table>")
+    out.append(_section_close())
 
     # ── E. POST: Trades to post to Notice ─────────────────────────────────
     out.append(_section_open(
