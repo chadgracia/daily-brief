@@ -3710,17 +3710,17 @@ def _render_mailer_composer(pid):
         '<h1 style="font-size:20px;margin:0 0 4px 0;">Weekly mailer</h1>'
         '<p style="color:#6b7280;font-size:13px;margin:0 0 16px 0;">Tick the orders to include, '
         "save, and the preview below updates. Nothing is sent from this page yet.</p>"
+        '<button type="button" id="save-sel" style="margin:0 0 12px 0;padding:8px 18px;'
+        "border:1px solid #d1d5db;background:#ffffff;color:#374151;font-size:14px;font-weight:500;"
+        'border-radius:6px;cursor:pointer;font-family:inherit;">Save selection &amp; update preview</button>'
+        '<button type="button" id="clear-sel" style="margin:0 0 12px 10px;padding:8px 18px;'
+        "border:1px solid #d1d5db;background:#ffffff;color:#374151;font-size:14px;font-weight:500;"
+        'border-radius:6px;cursor:pointer;font-family:inherit;">Clear all</button>'
         '<div style="display:flex;gap:24px;flex-wrap:wrap;background:#ffffff;border:1px solid #e5e7eb;'
-        'border-radius:6px;padding:16px;">'
+        'border-radius:6px;padding:16px;margin-bottom:24px;">'
         + _mailer_composer_column("Sell orders (" + str(len(sells_all)) + ")", sells_all, selected)
         + _mailer_composer_column("Buy orders (" + str(len(buys_all)) + ")", buys_all, selected)
         + "</div>"
-        '<button type="button" id="save-sel" style="margin:12px 0 24px 0;padding:8px 18px;'
-        "border:1px solid #d1d5db;background:#ffffff;color:#374151;font-size:14px;font-weight:500;"
-        'border-radius:6px;cursor:pointer;font-family:inherit;">Save selection &amp; update preview</button>'
-        '<button type="button" id="clear-sel" style="margin:12px 0 24px 10px;padding:8px 18px;'
-        "border:1px solid #d1d5db;background:#ffffff;color:#374151;font-size:14px;font-weight:500;"
-        'border-radius:6px;cursor:pointer;font-family:inherit;">Clear all</button>'
         '<p style="color:#6b7280;font-size:13px;margin:0 0 8px 0;">Preview as recipient &middot; '
         + str(len(sells)) + " sell / " + str(len(buys)) + " buy selected</p>"
         '<div style="background:#ffffff;border:1px solid #e5e7eb;border-radius:6px;">'
