@@ -734,6 +734,10 @@ def _handle_crm_post(body):
         item["pps_confirmed"] = True
     items[key] = item
     try:
+        _log_completion("kate", "valuation_posted", key)
+    except Exception:
+        pass
+    try:
         boto3.client("s3").put_object(
             Bucket=S3_BUCKET, Key="pending-updates.json",
             Body=json.dumps({"items": items}, ensure_ascii=False).encode("utf-8"),
@@ -777,6 +781,57 @@ def _handle_crm_snooze(body):
             "body": json.dumps({"ok": True, "snoozed_until": until})}
 
 
+COMPLETIONS_KEY = "daily-brief-completions.json"
+
+
+def _load_completions():
+    """Read the completions log {date: {owner: [events]}}. Never raises."""
+    try:
+        obj = boto3.client("s3").get_object(Bucket=S3_BUCKET, Key=COMPLETIONS_KEY)
+        data = json.loads(obj["Body"].read().decode("utf-8"))
+        return data if isinstance(data, dict) else {}
+    except Exception:
+        return {}
+
+
+def _log_completion(owner, kind, key, done=True):
+    """Append (or on done=False remove) a completion event for today."""
+    owner = (owner or "chad").lower()
+    if owner not in ("chad", "kate"):
+        owner = "chad"
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    data = _load_completions()
+    day = data.setdefault(today, {})
+    events = day.setdefault(owner, [])
+    events = [e for e in events if not (e.get("kind") == kind and e.get("key") == key)]
+    if done:
+        events.append({"kind": kind, "key": key,
+                       "at": datetime.now(timezone.utc).strftime("%H:%M")})
+    day[owner] = events
+    # keep 60 days
+    for d in sorted(data.keys())[:-60]:
+        data.pop(d, None)
+    boto3.client("s3").put_object(
+        Bucket=S3_BUCKET, Key=COMPLETIONS_KEY,
+        Body=json.dumps(data, ensure_ascii=False).encode("utf-8"),
+        ContentType="application/json",
+    )
+
+
+def _handle_row_done(body):
+    key = body.get("key") or ""
+    if not key:
+        return {"statusCode": 400, "headers": {"Content-Type": "application/json"},
+                "body": json.dumps({"ok": False, "error": "missing key"})}
+    try:
+        _log_completion(body.get("owner"), "row", key, done=bool(body.get("done", True)))
+    except Exception as e:
+        return {"statusCode": 500, "headers": {"Content-Type": "application/json"},
+                "body": json.dumps({"ok": False, "error": f"log failed: {e}"})}
+    return {"statusCode": 200, "headers": {"Content-Type": "application/json"},
+            "body": json.dumps({"ok": True})}
+
+
 def _handle_crm_delete(body):
     key = body.get("key")
     items = _load_pending_updates()
@@ -787,6 +842,10 @@ def _handle_crm_delete(body):
     item["status"] = "dismissed"
     item["dismissed_at"] = datetime.now(timezone.utc).strftime("%Y-%m-%d")
     items[key] = item
+    try:
+        _log_completion("kate", "valuation_deleted", key)
+    except Exception:
+        pass
     try:
         _save_pending_updates(items)
     except Exception as e:
@@ -2167,11 +2226,21 @@ INTERACTIVE_JS = """
         if (tr) tr.style.display = "none";
       });
     });
+    function reportDone(el, key, done) {
+      const ownerEl = el.closest("[data-owner]");
+      const owner = ownerEl ? ownerEl.getAttribute("data-owner") : "chad";
+      fetch(window.location.pathname + window.location.search, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "row_done", key: key, owner: owner, done: done })
+      }).catch(() => {});
+    }
     document.querySelectorAll("input.row-dismiss").forEach(cb => {
       cb.addEventListener("change", function() {
         const key = this.getAttribute("data-row-key");
         const daysAttr = this.getAttribute("data-dismiss-days");
         const tr = this.closest("tr[data-row-key]");
+        reportDone(this, key, this.checked);
         if (daysAttr !== null) {
           if (this.checked) {
             const days = parseInt(daysAttr, 10) || 30;
@@ -3314,6 +3383,8 @@ def handle_http_request(event):
             return _handle_crm_delete(body)
         if body.get("action") == "crm_confirm_pps":
             return _handle_crm_confirm(body)
+        if body.get("action") == "row_done":
+            return _handle_row_done(body)
         return {"statusCode": 400,
                 "headers": {"Content-Type": "application/json"},
                 "body": json.dumps({"ok": False, "error": "unknown action"})}
