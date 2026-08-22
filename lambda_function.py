@@ -1,4 +1,6 @@
 import concurrent.futures
+import hashlib
+import hmac
 import json
 import os
 import re
@@ -3362,6 +3364,212 @@ def _render_mailer_page(search_id=MAILER_SEARCH_ID):
     }
 
 
+MAILER_BASE_URL = "https://bddpwqsqvt32ritxpjqlqwhaim0ykbol.lambda-url.us-east-1.on.aws/"
+MAILER_PREVIEW_PID = 1259927678
+MAILER_SELECTION_KEY = "mailer-selection.json"
+
+
+def _mailer_token(person_id, deal_id):
+    secret = os.environ.get("MAILER_CLICK_SECRET", "")
+    msg = str(person_id) + ":" + str(deal_id)
+    return hmac.new(secret.encode(), msg.encode(), hashlib.sha256).hexdigest()[:24]
+
+
+def _mailer_click_url(person_id, deal_id):
+    return (
+        MAILER_BASE_URL
+        + "?view=click&pid=" + str(person_id)
+        + "&did=" + str(deal_id)
+        + "&t=" + _mailer_token(person_id, deal_id)
+    )
+
+
+def _mailer_fmt_money(v):
+    if v is None:
+        return ""
+    v = float(v)
+    if v >= 1_000_000:
+        return "$" + ("%.1f" % (v / 1_000_000)).rstrip("0").rstrip(".") + "M"
+    if v >= 1_000:
+        return "$" + ("%.0f" % (v / 1_000)) + "K"
+    return "$" + ("%.0f" % v)
+
+
+def _mailer_size(deal):
+    lo = _cf_number(deal, CF_TICKET_MIN)
+    hi = _cf_number(deal, CF_TICKET_MAX)
+    if lo and hi:
+        return _mailer_fmt_money(lo) + " – " + _mailer_fmt_money(hi)
+    if hi:
+        return "up to " + _mailer_fmt_money(hi)
+    if lo:
+        return "from " + _mailer_fmt_money(lo)
+    return "—"
+
+
+def _mailer_eligible(deals):
+    sells, buys = [], []
+    for d in deals:
+        if _stage_id(d) not in (STAGE_FIRM, STAGE_INQUIRY):
+            continue
+        side = _deal_side(d)
+        if side == "SELL":
+            sells.append(d)
+        elif side == "BUY":
+            buys.append(d)
+
+    def _key(d):
+        return _cf_number(d, CF_TICKET_MAX) or 0
+
+    sells.sort(key=_key, reverse=True)
+    buys.sort(key=_key, reverse=True)
+    return sells, buys
+
+
+def _load_mailer_selection(s3):
+    try:
+        doc = _fetch_json(s3, MAILER_SELECTION_KEY)
+        return {str(x) for x in (doc.get("deal_ids") or [])}
+    except Exception:
+        return set()
+
+
+def _save_mailer_selection(deal_ids):
+    boto3.client("s3", region_name=S3_REGION).put_object(
+        Bucket=S3_BUCKET, Key=MAILER_SELECTION_KEY,
+        Body=json.dumps({"deal_ids": sorted(deal_ids),
+                         "saved_at": datetime.now(timezone.utc).isoformat()}).encode("utf-8"),
+        ContentType="application/json",
+    )
+
+
+def _mailer_table(title, rows, person_id):
+    th = (
+        'style="text-align:left;padding:8px 10px;border-bottom:2px solid #1f2937;'
+        'font-size:12px;letter-spacing:.04em;text-transform:uppercase;color:#374151;"'
+    )
+    td = 'style="padding:9px 10px;border-bottom:1px solid #e5e7eb;font-size:14px;color:#1f2937;"'
+    out = [
+        '<h2 style="font-size:16px;margin:28px 0 8px 0;color:#111827;">' + escape(title) + "</h2>",
+        '<table style="border-collapse:collapse;width:100%;">',
+        "<tr><th " + th + ">Company</th><th " + th + ">Structure</th>"
+        "<th " + th + ">Size</th><th " + th + ">Price / share</th></tr>",
+    ]
+    if not rows:
+        out.append("<tr><td " + td + ' colspan="4">None this week</td></tr>')
+    for d in rows:
+        href = _mailer_click_url(person_id, d.get("id"))
+        name = escape(_company_name(d) or _deal_title(d))
+        out.append(
+            "<tr>"
+            "<td " + td + '><a href="' + href + '" style="color:#1d4ed8;font-weight:600;text-decoration:none;">' + name + "</a></td>"
+            "<td " + td + ">" + escape(_deal_structure_label(d) or "—") + "</td>"
+            "<td " + td + ">" + escape(_mailer_size(d)) + "</td>"
+            "<td " + td + ">" + escape(_fmt_price(_cf_number(d, CF_GROSS)) or "—") + "</td>"
+            "</tr>"
+        )
+    out.append("</table>")
+    return "".join(out)
+
+
+def _render_mailer_email(first_name, person_id, sells, buys):
+    greet = "Hello " + escape(first_name) + "," if first_name else "Hello,"
+    return (
+        '<div style="font-family:-apple-system,BlinkMacSystemFont,\'Segoe UI\',Roboto,'
+        'Helvetica,Arial,sans-serif;max-width:680px;margin:0 auto;padding:24px;color:#1f2937;">'
+        '<p style="font-size:15px;margin:0 0 6px 0;">' + greet + "</p>"
+        '<p style="font-size:15px;margin:0 0 4px 0;">Live orders this week. '
+        "Click any company to register your interest and see full details.</p>"
+        + _mailer_table("Sell orders — shares available", sells, person_id)
+        + _mailer_table("Buy orders — buyers seeking shares", buys, person_id)
+        + '<p style="font-size:13px;color:#6b7280;margin:28px 0 0 0;">Chad Gracia &middot; '
+        "Gracia Group &middot; Rainmaker Securities</p>"
+        "</div>"
+    )
+
+
+def _mailer_composer_column(title, rows, selected):
+    out = ['<div style="flex:1;min-width:280px;">'
+           '<h3 style="font-size:14px;margin:0 0 8px 0;">' + escape(title) + "</h3>"]
+    for d in rows:
+        did = str(d.get("id"))
+        checked = " checked" if did in selected else ""
+        out.append(
+            '<label style="display:block;padding:4px 0;font-size:13px;">'
+            '<input type="checkbox" name="deal" value="' + did + '"' + checked + "> "
+            + escape(_company_name(d) or _deal_title(d)) + " &middot; "
+            + escape(_deal_structure_label(d) or "—") + " &middot; "
+            + escape(_mailer_size(d)) + " &middot; "
+            + escape(_fmt_price(_cf_number(d, CF_GROSS)) or "—")
+            + "</label>"
+        )
+    out.append("</div>")
+    return "".join(out)
+
+
+MAILER_COMPOSER_SCRIPT = """
+<script>
+(function () {
+  var btn = document.getElementById('save-sel');
+  if (!btn) return;
+  btn.addEventListener('click', function () {
+    var ids = [];
+    document.querySelectorAll('input[name=deal]:checked').forEach(function (c) { ids.push(c.value); });
+    btn.textContent = 'Saving...';
+    fetch(window.location.href, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({action: 'mailer_select', deal_ids: ids})
+    }).then(function (r) { return r.json(); })
+      .then(function () { window.location.reload(); })
+      .catch(function () { btn.textContent = 'Save failed'; });
+  });
+})();
+</script>
+"""
+
+
+def _render_mailer_composer(pid):
+    s3 = boto3.client("s3", region_name=S3_REGION)
+    deals = (_fetch_json(s3, "deals.json") or {}).get("deals", []) or []
+    sells_all, buys_all = _mailer_eligible(deals)
+    selected = _load_mailer_selection(s3)
+    sells = [d for d in sells_all if str(d.get("id")) in selected]
+    buys = [d for d in buys_all if str(d.get("id")) in selected]
+    email_html = _render_mailer_email("Chad", pid, sells, buys)
+
+    html = (
+        '<!doctype html><html lang="en"><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width, initial-scale=1">'
+        "<title>Weekly mailer</title></head>"
+        '<body style="margin:0;background:#f3f4f6;font-family:-apple-system,BlinkMacSystemFont,'
+        "'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#1f2937;\">"
+        '<div style="max-width:960px;margin:0 auto;padding:24px;">'
+        '<h1 style="font-size:20px;margin:0 0 4px 0;">Weekly mailer</h1>'
+        '<p style="color:#6b7280;font-size:13px;margin:0 0 16px 0;">Tick the orders to include, '
+        "save, and the preview below updates. Nothing is sent from this page yet.</p>"
+        '<div style="display:flex;gap:24px;flex-wrap:wrap;background:#ffffff;border:1px solid #e5e7eb;'
+        'border-radius:6px;padding:16px;">'
+        + _mailer_composer_column("Sell orders (" + str(len(sells_all)) + ")", sells_all, selected)
+        + _mailer_composer_column("Buy orders (" + str(len(buys_all)) + ")", buys_all, selected)
+        + "</div>"
+        '<button type="button" id="save-sel" style="margin:12px 0 24px 0;padding:8px 18px;'
+        "border:1px solid #d1d5db;background:#ffffff;color:#374151;font-size:14px;font-weight:500;"
+        'border-radius:6px;cursor:pointer;font-family:inherit;">Save selection &amp; update preview</button>'
+        '<p style="color:#6b7280;font-size:13px;margin:0 0 8px 0;">Preview as recipient &middot; '
+        + str(len(sells)) + " sell / " + str(len(buys)) + " buy selected</p>"
+        '<div style="background:#ffffff;border:1px solid #e5e7eb;border-radius:6px;">'
+        + email_html + "</div></div>"
+        + MAILER_COMPOSER_SCRIPT
+        + "</body></html>"
+    )
+    return {
+        "statusCode": 200,
+        "headers": {"Content-Type": "text/html; charset=utf-8"},
+        "body": html,
+    }
+
+
 def handle_http_request(event):
     params = event.get("queryStringParameters") or {}
     key = params.get("key") if isinstance(params, dict) else None
@@ -3385,6 +3593,12 @@ def handle_http_request(event):
             return _handle_crm_confirm(body)
         if body.get("action") == "row_done":
             return _handle_row_done(body)
+        if body.get("action") == "mailer_select":
+            ids = {str(x) for x in (body.get("deal_ids") or []) if str(x).isdigit()}
+            _save_mailer_selection(ids)
+            return {"statusCode": 200,
+                    "headers": {"Content-Type": "application/json"},
+                    "body": json.dumps({"ok": True, "count": len(ids)})}
         return {"statusCode": 400,
                 "headers": {"Content-Type": "application/json"},
                 "body": json.dumps({"ok": False, "error": "unknown action"})}
@@ -3426,6 +3640,11 @@ def handle_http_request(event):
             return {"statusCode": 500,
                     "headers": {"Content-Type": "text/plain"},
                     "body": f"Seed failed: {e}"}
+
+    if params.get("view") == "mailer" and not params.get("list"):
+        pid_raw = str(params.get("pid") or "").strip()
+        pid = int(pid_raw) if pid_raw.isdigit() else MAILER_PREVIEW_PID
+        return _render_mailer_composer(pid)
 
     if params.get("view") == "mailer":
         sid = str(params.get("search") or "").strip()
