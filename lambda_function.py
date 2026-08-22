@@ -2562,8 +2562,7 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
             did = r["deal"].get("id")
             out.append(
                 _row_open("B", did, interactive)
-                + _checkbox_td("B", did, interactive,
-                               dismiss_days=7 if r.get("_sid") == STAGE_TRANSFER_NOTICE else None)
+                + _checkbox_td("B", did, interactive)
                 + _td(escape(r["stage"]), interactive=interactive)
                 + _td(_deal_title_link(r["deal"], interactive=interactive),
                       interactive=interactive)
