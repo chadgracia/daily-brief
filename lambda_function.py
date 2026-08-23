@@ -3504,7 +3504,7 @@ def _mailer_size(deal):
     return "—"
 
 
-def _mailer_eligible(deals):
+def _mailer_eligible(deals, buyer_counts=None):
     sells, buys = [], []
     for d in deals:
         if _stage_id(d) not in (STAGE_FIRM, STAGE_INQUIRY):
@@ -3519,7 +3519,11 @@ def _mailer_eligible(deals):
         return _cf_number(d, CF_TICKET_MAX) or 0
 
     sells.sort(key=_key, reverse=True)
-    buys.sort(key=_key, reverse=True)
+    if buyer_counts:
+        buys.sort(key=lambda d: ((buyer_counts or {}).get(
+            (_company_name(d) or _deal_title(d)).strip().lower(), 0), _key(d)), reverse=True)
+    else:
+        buys.sort(key=_key, reverse=True)
     return sells, buys
 
 
@@ -3619,25 +3623,30 @@ def _render_mailer_email(first_name, person_id, sells, buys, buyer_counts=None):
     return (
         '<div style="font-family:-apple-system,BlinkMacSystemFont,\'Segoe UI\',Roboto,'
         'Helvetica,Arial,sans-serif;max-width:680px;margin:0 auto;padding:24px;color:#1f2937;">'
+        '<table role="presentation" width="100%" style="border-collapse:collapse;margin:0 0 20px 0;"><tr>'
+        '<td valign="top" style="padding-right:18px;">'
         '<p style="font-size:15px;margin:0 0 16px 0;">' + greet + "</p>"
         '<p style="font-size:15px;margin:0 0 16px 0;">See this week&rsquo;s trades for '
         "accredited investors below. If you are looking for something that isn&rsquo;t listed, "
         "just let me know.</p>"
+        '<p style="font-size:15px;margin:0;">Live orders this week. '
+        "Click any company to see full details.</p>"
+        "</td>"
+        '<td valign="top" width="280">'
         '<div style="border:1px solid #cdc9c0;border-left:4px solid #3d5a73;background:#f7f6f3;'
-        'border-radius:6px;padding:14px 18px;margin:0 0 20px 0;">'
+        'border-radius:6px;padding:14px 18px;">'
         '<p style="font-size:11px;letter-spacing:.08em;text-transform:uppercase;'
         'color:#3d5a73;font-weight:700;margin:0 0 6px 0;">New &mdash; Daily Highlight</p>'
-        '<p style="font-size:14px;margin:0 0 10px 0;">One trade that stands out, in your inbox '
+        '<p style="font-size:13px;margin:0 0 10px 0;">One trade that stands out, in your inbox '
         "each day: a recent news item, a distressed seller, limited supply &mdash; or a deal that "
         "for various reasons is not published in our main books. Be among the first to see these "
         "opportunities. Stop any time.</p>"
         '<a href="https://bddpwqsqvt32ritxpjqlqwhaim0ykbol.lambda-url.us-east-1.on.aws/'
         '?view=daily&amp;pid=' + str(person_id) + "&amp;t=" + _mailer_token(person_id, "daily")
-        + '" style="display:inline-block;background:#3d5a73;color:#ffffff;font-size:14px;'
-        'font-weight:600;padding:8px 18px;border-radius:6px;text-decoration:none;">'
-        "Get the Daily Highlight</a></div>"
-        '<p style="font-size:15px;margin:0 0 4px 0;">Live orders this week. '
-        "Click any company to see full details.</p>"
+        + '" style="display:inline-block;background:#3d5a73;color:#ffffff;font-size:13px;'
+        'font-weight:600;padding:8px 14px;border-radius:6px;text-decoration:none;">'
+        "Get the Daily Highlight</a></div></td>"
+        "</tr></table>"
         + _mailer_table("Sell orders — shares available", sells, person_id)
         + _mailer_buy_table("Buy orders — buyers seeking shares", buys, person_id, buyer_counts)
         + '<p style="font-size:13px;color:#6b7280;margin:28px 0 0 0;">Chad Gracia &middot; '
@@ -3790,16 +3799,29 @@ def _handle_mailer_click(params):
     return redirect
 
 
+CF_DEAL_AGENT_AGREEMENT = "custom_label_3714334"
+AGENT_AGREEMENT_SELLSIDE = 6354277
+
+
 def _mailer_composer_column(title, rows, selected):
     out = ['<div style="flex:1;min-width:280px;">'
            '<h3 style="font-size:14px;margin:0 0 8px 0;">' + escape(title) + "</h3>"]
     for d in rows:
         did = str(d.get("id"))
         checked = " checked" if did in selected else ""
+        co = _company_name(d) or _deal_title(d)
+        dt = _deal_title(d)
+        extra = (' <span style="color:#9ca3af;">(' + escape(dt) + ")</span>"
+                 if dt and dt != co else "")
+        ssa = ('<span title="Sell-side agreement in place" '
+               'style="color:#1f7a4d;font-weight:700;"> &#9679;</span>'
+               if _cf_option_id(d, CF_DEAL_AGENT_AGREEMENT) == AGENT_AGREEMENT_SELLSIDE else "")
         out.append(
             '<label style="display:block;padding:4px 0;font-size:13px;">'
             '<input type="checkbox" name="deal" value="' + did + '"' + checked + "> "
-            + escape(_company_name(d) or _deal_title(d)) + " &middot; "
+            + '<a href="https://app.pipelinecrm.com/deals/' + did
+            + '" target="_blank" style="color:#1f2937;text-decoration:none;border-bottom:1px dotted #9ca3af;">'
+            + escape(co) + "</a>" + extra + ssa + " &middot; "
             + escape(_deal_structure_label(d) or "—") + " &middot; "
             + escape(_mailer_size(d)) + " &middot; "
             + escape(_fmt_price(_cf_number(d, CF_GROSS)) or "—")
@@ -3852,11 +3874,12 @@ def _handle_mailer_test(body):
     pid = 1259927678
     s3 = boto3.client("s3", region_name=S3_REGION)
     deals = (_fetch_json(s3, "deals.json") or {}).get("deals", []) or []
-    sells_all, buys_all = _mailer_eligible(deals)
+    counts = _mailer_buyer_counts(s3)
+    sells_all, buys_all = _mailer_eligible(deals, counts)
     selected = _load_mailer_selection(s3)
     sells = [d for d in sells_all if str(d.get("id")) in selected]
     buys = [d for d in buys_all if str(d.get("id")) in selected]
-    email_html = _render_mailer_email("Chad", pid, sells, buys, _mailer_buyer_counts(s3))
+    email_html = _render_mailer_email("Chad", pid, sells, buys, counts)
     boto3.client("ses", region_name=SES_REGION).send_email(
         Source=FROM_ADDR,
         Destination={"ToAddresses": ["cgracia@rainmakersecurities.com"]},
@@ -3872,11 +3895,12 @@ def _handle_mailer_test(body):
 def _render_mailer_composer(pid):
     s3 = boto3.client("s3", region_name=S3_REGION)
     deals = (_fetch_json(s3, "deals.json") or {}).get("deals", []) or []
-    sells_all, buys_all = _mailer_eligible(deals)
+    counts = _mailer_buyer_counts(s3)
+    sells_all, buys_all = _mailer_eligible(deals, counts)
     selected = _load_mailer_selection(s3)
     sells = [d for d in sells_all if str(d.get("id")) in selected]
     buys = [d for d in buys_all if str(d.get("id")) in selected]
-    email_html = _render_mailer_email("Chad", pid, sells, buys, _mailer_buyer_counts(s3))
+    email_html = _render_mailer_email("Chad", pid, sells, buys, counts)
 
     html = (
         '<!doctype html><html lang="en"><head><meta charset="utf-8">'
