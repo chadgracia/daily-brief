@@ -3540,31 +3540,32 @@ def _save_mailer_selection(deal_ids):
     )
 
 
-def _mailer_logo_map(s3):
+_LOGO_CACHE = {}
+
+
+def _mailer_logo_url(name):
+    if not name:
+        return None
+    if name in _LOGO_CACHE:
+        return _LOGO_CACHE[name]
+    url = "https://bannerlogos.s3.us-east-1.amazonaws.com/" + urllib.parse.quote(name) + ".png"
     try:
-        companies = (_fetch_json(s3, "companies.json") or {}).get("companies", []) or []
+        req = urllib.request.Request(url, method="HEAD")
+        with urllib.request.urlopen(req, timeout=3) as resp:
+            ok = resp.status == 200
     except Exception:
-        return {}
-    out = {}
-    for c in companies:
-        site = (c.get("website") or "").strip()
-        if not site:
-            continue
-        dom = site.split("//")[-1].split("/")[0]
-        if dom.startswith("www."):
-            dom = dom[4:]
-        if dom:
-            out[_normalize_id(c.get("id"))] = dom
-    return out
+        ok = False
+    _LOGO_CACHE[name] = url if ok else None
+    return _LOGO_CACHE[name]
 
 
 def _mailer_logo_img(logos, deal):
-    dom = (logos or {}).get(_normalize_id(_company_id(deal)))
-    if not dom:
+    url = _mailer_logo_url(_company_name(deal) or _deal_title(deal))
+    if not url:
         return ""
-    return ('<img src="https://www.google.com/s2/favicons?domain=' + escape(dom, quote=True)
-            + '&amp;sz=32" width="16" height="16" alt="" '
-            'style="vertical-align:-3px;margin-right:6px;border:0;">')
+    return ('<img src="' + escape(url, quote=True)
+            + '" width="16" height="16" alt="" '
+            'style="vertical-align:-3px;margin-right:6px;border:0;object-fit:contain;">')
 
 
 def _mailer_buyer_counts(s3):
@@ -3899,7 +3900,7 @@ def _handle_mailer_test(body):
     selected = _load_mailer_selection(s3)
     sells = [d for d in sells_all if str(d.get("id")) in selected]
     buys = [d for d in buys_all if str(d.get("id")) in selected]
-    email_html = _render_mailer_email("Chad", pid, sells, buys, counts, _mailer_logo_map(s3))
+    email_html = _render_mailer_email("Chad", pid, sells, buys, counts, True)
     boto3.client("ses", region_name=SES_REGION).send_email(
         Source=FROM_ADDR,
         Destination={"ToAddresses": ["cgracia@rainmakersecurities.com"]},
@@ -3920,7 +3921,7 @@ def _render_mailer_composer(pid):
     selected = _load_mailer_selection(s3)
     sells = [d for d in sells_all if str(d.get("id")) in selected]
     buys = [d for d in buys_all if str(d.get("id")) in selected]
-    email_html = _render_mailer_email("Chad", pid, sells, buys, counts, _mailer_logo_map(s3))
+    email_html = _render_mailer_email("Chad", pid, sells, buys, counts, True)
 
     html = (
         '<!doctype html><html lang="en"><head><meta charset="utf-8">'
