@@ -3579,21 +3579,52 @@ def _mailer_table(title, rows, person_id, buyer_counts=None):
     return "".join(out)
 
 
+def _mailer_buy_table(title, rows, person_id, buyer_counts):
+    td = 'style="padding:9px 10px;border-bottom:1px solid #e5e7eb;font-size:14px;color:#1f2937;"'
+    out = [
+        '<h2 style="font-size:16px;margin:28px 0 8px 0;color:#111827;">' + escape(title) + "</h2>",
+        '<table style="border-collapse:collapse;width:100%;">',
+    ]
+    if not rows:
+        out.append("<tr><td " + td + ">None this week</td></tr>")
+    seen = set()
+    for d in rows:
+        cid = _normalize_id(_company_id(d))
+        if cid in seen:
+            continue
+        seen.add(cid)
+        href = _mailer_click_url(person_id, d.get("id"))
+        name = escape(_company_name(d) or _deal_title(d))
+        n = (buyer_counts or {}).get(cid, 0)
+        buyers = str(n) + " Buyer" + ("" if n == 1 else "s") if n else "Buyers waiting"
+        out.append(
+            "<tr><td " + td + '><span style="font-weight:600;">' + name + "</span>"
+            " &mdash; " + buyers + ' &mdash; <a href="' + href
+            + '" style="color:#1d4ed8;font-weight:600;text-decoration:none;">Make an offer</a></td></tr>'
+        )
+    out.append("</table>")
+    return "".join(out)
+
+
 def _render_mailer_email(first_name, person_id, sells, buys, buyer_counts=None):
     greet = "Hello " + escape(first_name) + "," if first_name else "Hello,"
     return (
         '<div style="font-family:-apple-system,BlinkMacSystemFont,\'Segoe UI\',Roboto,'
         'Helvetica,Arial,sans-serif;max-width:680px;margin:0 auto;padding:24px;color:#1f2937;">'
-        '<p style="font-size:15px;margin:0 0 6px 0;">' + greet + "</p>"
-        '<p style="font-size:15px;margin:0 0 4px 0;">Live orders this week. '
-        "Click any company to register your interest and see full details.</p>"
-        + _mailer_table("Sell orders — shares available", sells, person_id)
-        + _mailer_table("Buy orders — buyers seeking shares", buys, person_id, buyer_counts)
-        + '<p style="font-size:14px;margin:24px 0 0 0;">Want a daily highlight on a single '
-        'transaction? <a href="https://bddpwqsqvt32ritxpjqlqwhaim0ykbol.lambda-url.us-east-1.on.aws/'
+        '<p style="font-size:15px;margin:0 0 16px 0;">' + greet + "</p>"
+        '<p style="font-size:14px;margin:0 0 16px 0;">We will continue to send this weekly '
+        "overview of all our buy and sell orders. If you are looking for something not listed, "
+        'let me know. Also, we&rsquo;re launching &ldquo;Daily Highlight,&rdquo; where I&rsquo;ll '
+        "share information on one trade that stands out: a recent news item, a distressed seller, "
+        "limited supply &mdash; or which for various reasons is not published in our main books. "
+        'Be among the first to see these opportunities. Stop any time. '
+        '<a href="https://bddpwqsqvt32ritxpjqlqwhaim0ykbol.lambda-url.us-east-1.on.aws/'
         '?view=daily&amp;pid=' + str(person_id) + "&amp;t=" + _mailer_token(person_id, "daily")
-        + '" style="color:#1d4ed8;font-weight:600;">Click here to receive the Daily Highlight</a>. '
-        "Unsubscribe any time.</p>"
+        + '" style="color:#1d4ed8;font-weight:600;">Click here</a>.</p>'
+        '<p style="font-size:15px;margin:0 0 4px 0;">Live orders this week. '
+        "Click any company to see full details.</p>"
+        + _mailer_table("Sell orders — shares available", sells, person_id)
+        + _mailer_buy_table("Buy orders — buyers seeking shares", buys, person_id, buyer_counts)
         + '<p style="font-size:13px;color:#6b7280;margin:28px 0 0 0;">Chad Gracia &middot; '
         "Gracia Group &middot; Rainmaker Securities</p>"
         "</div>"
@@ -3697,6 +3728,11 @@ def _handle_mailer_click(params):
         if side not in ("SELL", "BUY") or cid is None:
             return redirect
         co_name = _company_name(deal) or _deal_title(deal)
+        if side == "BUY":
+            redirect = {"statusCode": 302,
+                        "headers": {"Location": "https://7u6sphgup5gjuywcvpuwzhruiq0asgdz.lambda-url.us-east-1.on.aws/"
+                                    "?name=" + urllib.parse.quote(co_name) + "&side=sell"},
+                        "body": ""}
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         jwt = get_jwt()
         cur = call_pipeline_api("GET", f"/people/{pid}.json", jwt=jwt)
