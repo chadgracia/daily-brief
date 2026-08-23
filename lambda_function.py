@@ -3493,6 +3493,8 @@ def _mailer_fmt_money(v):
 def _mailer_size(deal):
     lo = _cf_number(deal, CF_TICKET_MIN)
     hi = _cf_number(deal, CF_TICKET_MAX)
+    if lo and hi and lo == hi:
+        return _mailer_fmt_money(lo)
     if lo and hi:
         return _mailer_fmt_money(lo) + " – " + _mailer_fmt_money(hi)
     if hi:
@@ -3538,11 +3540,15 @@ def _save_mailer_selection(deal_ids):
     )
 
 
-def _mailer_buyer_counts(people):
+def _mailer_buyer_counts(s3):
+    try:
+        buy = (_fetch_json(s3, "interest_people.json") or {}).get("buy") or {}
+    except Exception:
+        return {}
     counts = {}
-    for p in people:
-        for cid in _cf_option_ids(p, CF_PERSON_BUY_INTERESTS):
-            counts[cid] = counts.get(cid, 0) + 1
+    for name, ids in buy.items():
+        if isinstance(ids, list):
+            counts[name.strip().lower()] = len(ids)
     return counts
 
 
@@ -3555,11 +3561,12 @@ def _mailer_table(title, rows, person_id, buyer_counts=None):
     out = [
         '<h2 style="font-size:16px;margin:28px 0 8px 0;color:#111827;">' + escape(title) + "</h2>",
         '<table style="border-collapse:collapse;width:100%;">',
-        "<tr><th " + th + ">Company</th><th " + th + ">Structure</th>"
-        "<th " + th + ">Size</th><th " + th + ">Price / share</th></tr>",
+        "<tr><th " + th + ">Company (Click for Details)</th><th " + th + ">Structure</th>"
+        "<th " + th + ">Size</th><th " + th + ">Net / share</th>"
+        "<th " + th + ">Gross / share</th></tr>",
     ]
     if not rows:
-        out.append("<tr><td " + td + ' colspan="4">None this week</td></tr>')
+        out.append("<tr><td " + td + ' colspan="5">None this week</td></tr>')
     for d in rows:
         href = _mailer_click_url(person_id, d.get("id"))
         name = escape(_company_name(d) or _deal_title(d))
@@ -3572,6 +3579,7 @@ def _mailer_table(title, rows, person_id, buyer_counts=None):
             "<td " + td + '><a href="' + href + '" style="color:#1d4ed8;font-weight:600;text-decoration:none;">' + name + "</a></td>"
             "<td " + td + ">" + escape(_deal_structure_label(d) or "—") + "</td>"
             "<td " + td + ">" + escape(_mailer_size(d)) + "</td>"
+            "<td " + td + ">" + escape(_fmt_price(_cf_number(d, CF_NET)) or "—") + "</td>"
             "<td " + td + ">" + escape(_fmt_price(_cf_number(d, CF_GROSS)) or "—") + "</td>"
             "</tr>"
         )
@@ -3595,7 +3603,7 @@ def _mailer_buy_table(title, rows, person_id, buyer_counts):
         seen.add(cid)
         href = _mailer_click_url(person_id, d.get("id"))
         name = escape(_company_name(d) or _deal_title(d))
-        n = (buyer_counts or {}).get(cid, 0)
+        n = (buyer_counts or {}).get((_company_name(d) or _deal_title(d)).strip().lower(), 0)
         buyers = str(n) + " Buyer" + ("" if n == 1 else "s") if n else "Buyers waiting"
         out.append(
             "<tr><td " + td + '><span style="font-weight:600;">' + name + "</span>"
@@ -3614,13 +3622,20 @@ def _render_mailer_email(first_name, person_id, sells, buys, buyer_counts=None):
         '<p style="font-size:15px;margin:0 0 16px 0;">' + greet + "</p>"
         '<p style="font-size:14px;margin:0 0 16px 0;">We will continue to send this weekly '
         "overview of all our buy and sell orders. If you are looking for something not listed, "
-        'let me know. Also, we&rsquo;re launching &ldquo;Daily Highlight,&rdquo; where I&rsquo;ll '
-        "share information on one trade that stands out: a recent news item, a distressed seller, "
-        "limited supply &mdash; or which for various reasons is not published in our main books. "
-        'Be among the first to see these opportunities. Stop any time. '
+        "let me know.</p>"
+        '<div style="border:1px solid #cdc9c0;border-left:4px solid #3d5a73;background:#f7f6f3;'
+        'border-radius:6px;padding:14px 18px;margin:0 0 20px 0;">'
+        '<p style="font-size:11px;letter-spacing:.08em;text-transform:uppercase;'
+        'color:#3d5a73;font-weight:700;margin:0 0 6px 0;">New &mdash; Daily Highlight</p>'
+        '<p style="font-size:14px;margin:0 0 10px 0;">One trade that stands out, in your inbox '
+        "each day: a recent news item, a distressed seller, limited supply &mdash; or a deal that "
+        "for various reasons is not published in our main books. Be among the first to see these "
+        "opportunities. Stop any time.</p>"
         '<a href="https://bddpwqsqvt32ritxpjqlqwhaim0ykbol.lambda-url.us-east-1.on.aws/'
         '?view=daily&amp;pid=' + str(person_id) + "&amp;t=" + _mailer_token(person_id, "daily")
-        + '" style="color:#1d4ed8;font-weight:600;">Click here</a>.</p>'
+        + '" style="display:inline-block;background:#3d5a73;color:#ffffff;font-size:14px;'
+        'font-weight:600;padding:8px 18px;border-radius:6px;text-decoration:none;">'
+        "Get the Daily Highlight</a></div>"
         '<p style="font-size:15px;margin:0 0 4px 0;">Live orders this week. '
         "Click any company to see full details.</p>"
         + _mailer_table("Sell orders — shares available", sells, person_id)
@@ -3828,8 +3843,7 @@ def _render_mailer_composer(pid):
     selected = _load_mailer_selection(s3)
     sells = [d for d in sells_all if str(d.get("id")) in selected]
     buys = [d for d in buys_all if str(d.get("id")) in selected]
-    people = (_fetch_json(s3, "people.json") or {}).get("people", []) or []
-    email_html = _render_mailer_email("Chad", pid, sells, buys, _mailer_buyer_counts(people))
+    email_html = _render_mailer_email("Chad", pid, sells, buys, _mailer_buyer_counts(s3))
 
     html = (
         '<!doctype html><html lang="en"><head><meta charset="utf-8">'
