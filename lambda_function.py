@@ -3292,6 +3292,7 @@ def _collect_mailer_entries(data, seen, rows, missing):
         )
     i_first = cols.index("person_first_name")
     i_email = cols.index("person_email")
+    i_pid = cols.index("person_id") if "person_id" in cols else 7
     for entry in (data.get("entries") or []):
         if not isinstance(entry, list) or len(entry) <= max(i_first, i_email):
             continue
@@ -3305,7 +3306,8 @@ def _collect_mailer_entries(data, seen, rows, missing):
         seen.add(dedupe_key)
         if not first:
             missing.append(email)
-        rows.append((first, email))
+        pid = entry[i_pid] if len(entry) > i_pid else None
+        rows.append((first, email, pid))
 
 
 def _fetch_mailer_rows(search_id=MAILER_SEARCH_ID):
@@ -3370,7 +3372,7 @@ def _render_mailer_page(search_id=MAILER_SEARCH_ID):
             "body": "Could not build the mailer list: " + str(exc),
         }
 
-    tsv = "\n".join(f + "\t" + e for f, e in rows)
+    tsv = "\n".join(f + "\t" + e for f, e, _pid in rows)
 
     out = []
     out.append(
@@ -3440,7 +3442,7 @@ def _render_mailer_page(search_id=MAILER_SEARCH_ID):
         '<th style="border:1px solid #e5e7eb;padding:6px 10px;'
         'text-align:left;background:#f9fafb;">Email</th></tr>'
     )
-    for first, email in rows:
+    for first, email, _pid in rows:
         out.append(
             '<tr><td style="border:1px solid #e5e7eb;padding:6px 10px;">'
             + escape(first)
@@ -3970,6 +3972,22 @@ MAILER_COMPOSER_SCRIPT = """
       tst.disabled = false;
     }).catch(function () { tst.textContent = 'Failed — try again'; tst.disabled = false; });
   });
+  var snd = document.getElementById('send-all');
+  if (snd) snd.addEventListener('click', function () {
+    var subj = (document.getElementById('send-subject').value || '').trim();
+    if (!subj) { alert('Enter a subject line first.'); return; }
+    var ok = prompt('This emails the entire Weekly Mailer Leads list.\nType SEND to confirm.');
+    if (ok !== 'SEND') return;
+    snd.disabled = true; snd.textContent = 'Sending… (takes a few minutes)';
+    fetch(window.location.href, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({action: 'mailer_send', subject: subj})
+    }).then(function (r) { return r.json(); }).then(function (j) {
+      snd.textContent = j.ok ? ('Sent to ' + j.sent + ' ✓') : ('Failed: ' + (j.error || 'try again'));
+      snd.disabled = false;
+    }).catch(function () { snd.textContent = 'Failed — try again'; snd.disabled = false; });
+  });
   var clr = document.getElementById('clear-sel');
   if (clr) clr.addEventListener('click', function () {
     document.querySelectorAll('input[name=deal]').forEach(function (c) { c.checked = false; });
@@ -4036,6 +4054,85 @@ MAILER_SIGNATURE_HTML = (
 )
 
 
+def _handle_mailer_send(body):
+    subject = str(body.get("subject") or "").strip()
+    if not subject:
+        return {"statusCode": 400, "headers": {"Content-Type": "application/json"},
+                "body": json.dumps({"ok": False, "error": "subject required"})}
+    s3 = boto3.client("s3", region_name=S3_REGION)
+    deals = (_fetch_json(s3, "deals.json") or {}).get("deals", []) or []
+    counts = _mailer_buyer_counts(s3)
+    sells_all, buys_all = _mailer_eligible(deals, counts)
+    selected = _load_mailer_selection(s3)
+    sells = [d for d in sells_all if str(d.get("id")) in selected]
+    buys = [(nm, n) for nm, n in _mailer_buy_companies(s3, counts) if "c:" + nm in selected]
+    if not sells and not buys:
+        return {"statusCode": 400, "headers": {"Content-Type": "application/json"},
+                "body": json.dumps({"ok": False, "error": "nothing selected"})}
+    rows, missing = _fetch_mailer_rows()
+    progress_key = "mailer-send-" + datetime.now(timezone.utc).strftime("%Y-%m-%d") + ".json"
+    already = set()
+    try:
+        obj = s3.get_object(Bucket=S3_BUCKET, Key=progress_key)
+        already = set(json.loads(obj["Body"].read()).get("sent", []))
+    except Exception:
+        pass
+    ses = boto3.client("ses", region_name=SES_REGION)
+    sent, failed, skipped = 0, 0, 0
+
+    def _flush():
+        try:
+            s3.put_object(Bucket=S3_BUCKET, Key=progress_key,
+                          Body=json.dumps({"sent": sorted(already)}).encode("utf-8"),
+                          ContentType="application/json")
+        except Exception as e:
+            print(f"mailer send progress write failed: {e}")
+
+    for first, email, pid in rows:
+        key = email.lower()
+        if key in already:
+            skipped += 1
+            continue
+        npid = _normalize_id(pid)
+        if npid is None:
+            skipped += 1
+            continue
+        try:
+            html = _render_mailer_email(first, npid, sells, buys, counts, True)
+            ses.send_email(
+                Source=MAILER_FROM,
+                Destination={"ToAddresses": [email]},
+                ReplyToAddresses=["cgracia@rainmakersecurities.com"],
+                Message={"Subject": {"Data": subject, "Charset": "UTF-8"},
+                         "Body": {"Html": {"Data": html, "Charset": "UTF-8"}}},
+            )
+            already.add(key)
+            sent += 1
+        except Exception as e:
+            failed += 1
+            print(f"mailer send failed to {email}: {e}")
+        if sent and sent % 25 == 0:
+            _flush()
+    _flush()
+    report = ("Weekly mailer send complete.\n\nSubject: " + subject
+              + "\nSent: " + str(sent)
+              + "\nSkipped (already sent today / no person id): " + str(skipped)
+              + "\nFailed: " + str(failed)
+              + "\nNo email on record: " + str(len(missing))
+              + "\nSell orders: " + str(len(sells)) + "  Buy companies: " + str(len(buys)) + "\n")
+    try:
+        ses.send_email(
+            Source=FROM_ADDR,
+            Destination={"ToAddresses": TO_ADDRS},
+            Message={"Subject": {"Data": "Weekly mailer sent: " + str(sent) + " recipients", "Charset": "UTF-8"},
+                     "Body": {"Text": {"Data": report, "Charset": "UTF-8"}}},
+        )
+    except Exception as e:
+        print(f"mailer send report failed: {e}")
+    return {"statusCode": 200, "headers": {"Content-Type": "application/json"},
+            "body": json.dumps({"ok": True, "sent": sent, "failed": failed, "skipped": skipped})}
+
+
 def _handle_mailer_test(body):
     pid = 1259927678
     s3 = boto3.client("s3", region_name=S3_REGION)
@@ -4088,6 +4185,14 @@ def _render_mailer_composer(pid):
         '<button type="button" id="test-send" style="margin:0 0 12px 10px;padding:8px 18px;'
         "border:1px solid #3d5a73;background:#3d5a73;color:#ffffff;font-size:14px;font-weight:600;"
         'border-radius:6px;cursor:pointer;font-family:inherit;">Send test to cgracia@rainmakersecurities.com</button>'
+        '<div style="margin:0 0 12px 0;">'
+        '<input type="text" id="send-subject" value="Weekly Pre-IPO secondary transactions: " '
+        'style="padding:8px 10px;border:1px solid #d1d5db;border-radius:6px;font-size:14px;'
+        'font-family:inherit;width:420px;max-width:100%;">'
+        '<button type="button" id="send-all" style="margin-left:8px;padding:8px 18px;'
+        "border:1px solid #b91c1c;background:#b91c1c;color:#ffffff;font-size:14px;font-weight:700;"
+        'border-radius:6px;cursor:pointer;font-family:inherit;">Send to all recipients</button>'
+        "</div>"
         '<div style="display:flex;gap:24px;flex-wrap:wrap;background:#ffffff;border:1px solid #e5e7eb;'
         'border-radius:6px;padding:16px;margin-bottom:24px;">'
         + _mailer_composer_column("Sell orders (" + str(len(sells_all)) + ")", sells_all, selected,
@@ -4141,6 +4246,8 @@ def handle_http_request(event):
             return _handle_lead_email(body)
         if body.get("action") == "mailer_test":
             return _handle_mailer_test(body)
+        if body.get("action") == "mailer_send":
+            return _handle_mailer_send(body)
         if body.get("action") == "mailer_select":
             ids = {str(x) for x in (body.get("deal_ids") or [])
                    if str(x).isdigit() or str(x).startswith("c:")}
