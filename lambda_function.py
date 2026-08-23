@@ -3568,6 +3568,23 @@ def _mailer_logo_img(logos, deal):
             'style="vertical-align:-3px;margin-right:6px;border:0;object-fit:contain;">')
 
 
+def _mailer_buy_companies(s3, counts):
+    display = {}
+    try:
+        for c in (_fetch_json(s3, "companies.json") or {}).get("companies", []) or []:
+            nm = (c.get("name") or "").strip()
+            if nm:
+                display[nm.lower()] = nm
+    except Exception:
+        pass
+    out = []
+    for key, n in counts.items():
+        if n:
+            out.append((display.get(key, key), n))
+    out.sort(key=lambda t: (-t[1], t[0].lower()))
+    return out
+
+
 def _mailer_buyer_counts(s3):
     try:
         buy = (_fetch_json(s3, "interest_people.json") or {}).get("buy") or {}
@@ -3612,26 +3629,19 @@ def _mailer_table(title, rows, person_id, buyer_counts=None, logos=None):
     return "".join(out)
 
 
-def _mailer_buy_table(title, rows, person_id, buyer_counts, logos=None):
+def _mailer_buy_table(title, companies, person_id, buyer_counts=None, logos=None):
     td = 'style="padding:9px 10px;border-bottom:1px solid #e5e7eb;font-size:14px;color:#1f2937;"'
     out = [
         '<h2 style="font-size:16px;margin:28px 0 8px 0;color:#111827;">' + escape(title) + "</h2>",
         '<table style="border-collapse:collapse;width:100%;">',
     ]
-    if not rows:
+    if not companies:
         out.append("<tr><td " + td + ">None this week</td></tr>")
-    seen = set()
-    for d in rows:
-        cid = _normalize_id(_company_id(d))
-        if cid in seen:
-            continue
-        seen.add(cid)
-        href = _mailer_click_url(person_id, d.get("id"))
-        name = escape(_company_name(d) or _deal_title(d))
-        n = (buyer_counts or {}).get((_company_name(d) or _deal_title(d)).strip().lower(), 0)
+    for name, n in sorted(companies, key=lambda t: t[0].lower()):
+        href = _mailer_click_url_co(person_id, name)
         buyers = str(n) + " Buyer" + ("" if n == 1 else "s") if n else "Buyers waiting"
         out.append(
-            "<tr><td " + td + '><span style="font-weight:600;">' + name + "</span>"
+            "<tr><td " + td + '><span style="font-weight:600;">' + escape(name) + "</span>"
             " &mdash; " + buyers + ' &mdash; <a href="' + href
             + '" style="color:#1d4ed8;font-weight:600;text-decoration:none;">Make an offer</a></td></tr>'
         )
@@ -3750,6 +3760,54 @@ def _handle_daily_signup(params):
         return _daily_signup_page("Something went wrong &mdash; please reply to any of our emails and we&rsquo;ll sort it.")
 
 
+def _mailer_click_url_co(person_id, co_name):
+    return (
+        MAILER_BASE_URL
+        + "?view=click&pid=" + str(person_id)
+        + "&co=" + urllib.parse.quote(str(co_name))
+        + "&t=" + _mailer_token(person_id, "c:" + str(co_name))
+    )
+
+
+def _handle_mailer_click_co(params):
+    pid_raw = str(params.get("pid") or "").strip()
+    co_name = str(params.get("co") or "").strip()
+    token = str(params.get("t") or "").strip()
+    if not (pid_raw.isdigit() and co_name):
+        return {"statusCode": 400, "body": "Bad link"}
+    if not hmac.compare_digest(token, _mailer_token(pid_raw, "c:" + co_name)):
+        return {"statusCode": 403, "body": "Invalid link"}
+    pid = int(pid_raw)
+    redirect = {"statusCode": 302,
+                "headers": {"Location": "https://7u6sphgup5gjuywcvpuwzhruiq0asgdz.lambda-url.us-east-1.on.aws/"
+                            "?name=" + urllib.parse.quote(co_name) + "&side=sell"},
+                "body": ""}
+    try:
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        jwt = get_jwt()
+        cur = call_pipeline_api("GET", f"/people/{pid}.json", jwt=jwt)
+        person = cur["data"] if cur.get("status") == 200 and isinstance(cur.get("data"), dict) else {}
+        who = _person_full_name(person) or "Person " + str(pid)
+        who_email = _person_email(person) or ""
+        call_pipeline_api("POST", "/notes.json",
+                          {"note": {"content": "Clicked " + co_name + " buy order via weekly newsletter "
+                                    + today + " — note only", "note_category_id": 69759,
+                                    "person_id": pid}},
+                          jwt=jwt)
+        boto3.client("ses", region_name=SES_REGION).send_email(
+            Source=FROM_ADDR,
+            Destination={"ToAddresses": TO_ADDRS},
+            Message={"Subject": {"Data": "Mailer click: " + who + " — " + co_name + " (buy)", "Charset": "UTF-8"},
+                     "Body": {"Text": {"Data": who + " (" + who_email + ") clicked " + co_name
+                                       + " buy order in the weekly mailer.\n\nPerson: "
+                                       "https://app.pipelinecrm.com/people/" + str(pid) + "\n",
+                                       "Charset": "UTF-8"}}},
+        )
+    except Exception as e:
+        print(f"mailer co click failed pid={pid_raw} co={co_name}: {e}")
+    return redirect
+
+
 def _handle_mailer_click(params):
     pid_raw = str(params.get("pid") or "").strip()
     did_raw = str(params.get("did") or "").strip()
@@ -3823,6 +3881,22 @@ def _handle_mailer_click(params):
 
 CF_DEAL_AGENT_AGREEMENT = "custom_label_3714334"
 AGENT_AGREEMENT_SELLSIDE = 6354277
+
+
+def _mailer_buy_co_column(title, companies, selected):
+    out = ['<div style="flex:1;min-width:280px;">'
+           '<h3 style="font-size:14px;margin:0 0 8px 0;">' + escape(title) + "</h3>"]
+    for name, n in companies:
+        val = "c:" + name
+        checked = " checked" if val in selected else ""
+        out.append(
+            '<label style="display:block;padding:4px 0;font-size:13px;">'
+            '<input type="checkbox" name="deal" value="' + escape(val, quote=True) + '"' + checked + "> "
+            + escape(name) + ' <span style="color:#9ca3af;">(' + str(n) + " bid"
+            + ("" if n == 1 else "s") + ")</span></label>"
+        )
+    out.append("</div>")
+    return "".join(out)
 
 
 def _mailer_composer_column(title, rows, selected):
@@ -3944,7 +4018,7 @@ def _handle_mailer_test(body):
     sells_all, buys_all = _mailer_eligible(deals, counts)
     selected = _load_mailer_selection(s3)
     sells = [d for d in sells_all if str(d.get("id")) in selected]
-    buys = [d for d in buys_all if str(d.get("id")) in selected]
+    buys = [(nm, n) for nm, n in _mailer_buy_companies(s3, counts) if "c:" + nm in selected]
     email_html = _render_mailer_email("Chad", pid, sells, buys, counts, True)
     boto3.client("ses", region_name=SES_REGION).send_email(
         Source=MAILER_FROM,
@@ -3963,9 +4037,10 @@ def _render_mailer_composer(pid):
     deals = (_fetch_json(s3, "deals.json") or {}).get("deals", []) or []
     counts = _mailer_buyer_counts(s3)
     sells_all, buys_all = _mailer_eligible(deals, counts)
+    buy_cos = _mailer_buy_companies(s3, counts)
     selected = _load_mailer_selection(s3)
     sells = [d for d in sells_all if str(d.get("id")) in selected]
-    buys = [d for d in buys_all if str(d.get("id")) in selected]
+    buys = [(nm, n) for nm, n in buy_cos if "c:" + nm in selected]
     email_html = _render_mailer_email("Chad", pid, sells, buys, counts, True)
 
     html = (
@@ -3990,11 +4065,7 @@ def _render_mailer_composer(pid):
         '<div style="display:flex;gap:24px;flex-wrap:wrap;background:#ffffff;border:1px solid #e5e7eb;'
         'border-radius:6px;padding:16px;margin-bottom:24px;">'
         + _mailer_composer_column("Sell orders (" + str(len(sells_all)) + ")", sells_all, selected)
-        + _mailer_composer_column(
-            "Buy orders (" + str(len(buys_all)) + ")",
-            sorted(buys_all, key=lambda d: (counts or {}).get(
-                (_company_name(d) or _deal_title(d)).strip().lower(), 0), reverse=True),
-            selected)
+        + _mailer_buy_co_column("Buy interest (" + str(len(buy_cos)) + " companies)", buy_cos, selected)
         + "</div>"
         '<p style="color:#6b7280;font-size:13px;margin:0 0 8px 0;">Preview as recipient &middot; '
         + str(len(sells)) + " sell / " + str(len(buys)) + " buy selected</p>"
@@ -4013,6 +4084,8 @@ def _render_mailer_composer(pid):
 def handle_http_request(event):
     params = event.get("queryStringParameters") or {}
     if isinstance(params, dict) and params.get("view") == "click":
+        if params.get("co"):
+            return _handle_mailer_click_co(params)
         return _handle_mailer_click(params)
     if isinstance(params, dict) and params.get("view") == "daily":
         return _handle_daily_signup(params)
@@ -4042,7 +4115,8 @@ def handle_http_request(event):
         if body.get("action") == "mailer_test":
             return _handle_mailer_test(body)
         if body.get("action") == "mailer_select":
-            ids = {str(x) for x in (body.get("deal_ids") or []) if str(x).isdigit()}
+            ids = {str(x) for x in (body.get("deal_ids") or [])
+                   if str(x).isdigit() or str(x).startswith("c:")}
             _save_mailer_selection(ids)
             return {"statusCode": 200,
                     "headers": {"Content-Type": "application/json"},
