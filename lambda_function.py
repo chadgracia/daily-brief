@@ -3596,7 +3596,7 @@ def _mailer_table(title, rows, person_id, buyer_counts=None, logos=None):
         out.append("<tr><td " + td + ' colspan="3">None this week</td></tr>')
     for d in rows:
         href = _mailer_click_url(person_id, d.get("id"))
-        name = _mailer_logo_img(logos, d) + escape(_company_name(d) or _deal_title(d))
+        name = escape(_company_name(d) or _deal_title(d))
         if buyer_counts is not None:
             n = buyer_counts.get(_normalize_id(_company_id(d)), 0)
             if n:
@@ -3627,7 +3627,7 @@ def _mailer_buy_table(title, rows, person_id, buyer_counts, logos=None):
             continue
         seen.add(cid)
         href = _mailer_click_url(person_id, d.get("id"))
-        name = _mailer_logo_img(logos, d) + escape(_company_name(d) or _deal_title(d))
+        name = escape(_company_name(d) or _deal_title(d))
         n = (buyer_counts or {}).get((_company_name(d) or _deal_title(d)).strip().lower(), 0)
         buyers = str(n) + " Buyer" + ("" if n == 1 else "s") if n else "Buyers waiting"
         out.append(
