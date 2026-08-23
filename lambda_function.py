@@ -3945,7 +3945,11 @@ def _render_mailer_composer(pid):
         '<div style="display:flex;gap:24px;flex-wrap:wrap;background:#ffffff;border:1px solid #e5e7eb;'
         'border-radius:6px;padding:16px;margin-bottom:24px;">'
         + _mailer_composer_column("Sell orders (" + str(len(sells_all)) + ")", sells_all, selected)
-        + _mailer_composer_column("Buy orders (" + str(len(buys_all)) + ")", buys_all, selected)
+        + _mailer_composer_column(
+            "Buy orders (" + str(len(buys_all)) + ")",
+            sorted(buys_all, key=lambda d: (counts or {}).get(
+                (_company_name(d) or _deal_title(d)).strip().lower(), 0), reverse=True),
+            selected)
         + "</div>"
         '<p style="color:#6b7280;font-size:13px;margin:0 0 8px 0;">Preview as recipient &middot; '
         + str(len(sells)) + " sell / " + str(len(buys)) + " buy selected</p>"
