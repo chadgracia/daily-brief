@@ -3384,11 +3384,28 @@ def _render_mailer_page(search_id=MAILER_SEARCH_ID):
     out.append(
         '<h1 style="font-size:20px;margin:0 0 4px 0;">Weekly Mailer Recipients</h1>'
     )
+    src_label = ("&ldquo;S: Weekly Mailer Leads&rdquo;" if search_id == MAILER_SEARCH_ID
+                 else "saved search " + str(search_id))
     out.append(
         '<p style="color:#6b7280;margin:0 0 16px 0;">Source: focused list '
-        '&ldquo;S: Weekly Mailer Leads&rdquo; &middot; '
+        + src_label + " &middot; "
         + str(len(rows))
         + " recipients</p>"
+    )
+    out.append(
+        '<form method="get" style="margin:0 0 16px 0;">'
+        '<input type="hidden" name="view" value="mailer">'
+        '<input type="hidden" name="list" value="1">'
+        '<input type="hidden" name="key" value="' + escape(os.environ.get("BRIEF_PAGE_KEY", ""), quote=True) + '">'
+        '<input type="text" name="search" inputmode="numeric" placeholder="Saved search ID" '
+        'value="' + (str(search_id) if search_id != MAILER_SEARCH_ID else "") + '" '
+        'style="padding:8px 10px;border:1px solid #d1d5db;border-radius:6px;'
+        'font-size:14px;font-family:inherit;width:180px;">'
+        '<button type="submit" style="margin-left:8px;padding:8px 18px;'
+        "border:1px solid #d1d5db;background:#ffffff;color:#374151;"
+        "font-size:14px;font-weight:500;border-radius:6px;cursor:pointer;"
+        'font-family:inherit;">Load list</button>'
+        "</form>"
     )
     out.append(
         '<button type="button" id="copy-tsv" style="padding:8px 18px;'
