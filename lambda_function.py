@@ -3589,11 +3589,10 @@ def _mailer_table(title, rows, person_id, buyer_counts=None, logos=None):
         '<h2 style="font-size:16px;margin:28px 0 8px 0;color:#111827;">' + escape(title) + "</h2>",
         '<table style="border-collapse:collapse;width:100%;">',
         "<tr><th " + th + ">Company (Click for Details)</th><th " + th + ">Structure</th>"
-        "<th " + th + ">Size</th><th " + th + ">Net / share</th>"
-        "<th " + th + ">Gross / share</th></tr>",
+        "<th " + th + ">Size</th></tr>",
     ]
     if not rows:
-        out.append("<tr><td " + td + ' colspan="5">None this week</td></tr>')
+        out.append("<tr><td " + td + ' colspan="3">None this week</td></tr>')
     for d in rows:
         href = _mailer_click_url(person_id, d.get("id"))
         name = _mailer_logo_img(logos, d) + escape(_company_name(d) or _deal_title(d))
@@ -3606,8 +3605,6 @@ def _mailer_table(title, rows, person_id, buyer_counts=None, logos=None):
             "<td " + td + '><a href="' + href + '" style="color:#1d4ed8;font-weight:600;text-decoration:none;">' + name + "</a></td>"
             "<td " + td + ">" + escape(_deal_structure_label(d) or "—") + "</td>"
             "<td " + td + ">" + escape(_mailer_size(d)) + "</td>"
-            "<td " + td + ">" + escape(_fmt_price(_cf_number(d, CF_NET)) or "—") + "</td>"
-            "<td " + td + ">" + escape(_fmt_price(_cf_number(d, CF_GROSS)) or "—") + "</td>"
             "</tr>"
         )
     out.append("</table>")
