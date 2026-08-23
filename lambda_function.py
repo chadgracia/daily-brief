@@ -3579,7 +3579,7 @@ def _mailer_buy_companies(s3, counts):
         pass
     out = []
     for key, n in counts.items():
-        if n:
+        if n >= 5:
             out.append((display.get(key, key), n))
     out.sort(key=lambda t: (-t[1], t[0].lower()))
     return out
@@ -3899,16 +3899,42 @@ def _mailer_buy_co_column(title, companies, selected):
     return "".join(out)
 
 
-def _mailer_composer_column(title, rows, selected):
+def _mailer_seller_firms(deals):
+    pids = {_normalize_id(d.get("primary_contact_id")) for d in deals}
+    pids.discard(None)
+    firms = {}
+
+    def _one(pid):
+        try:
+            r = call_pipeline_api("GET", f"/people/{pid}.json", jwt=get_jwt())
+            if r.get("status") == 200 and isinstance(r.get("data"), dict):
+                return pid, (r["data"].get("company_name") or "").strip()
+        except Exception:
+            pass
+        return pid, ""
+
+    if pids:
+        from concurrent.futures import ThreadPoolExecutor
+        with ThreadPoolExecutor(max_workers=10) as ex:
+            for pid, firm in ex.map(_one, pids):
+                if firm:
+                    firms[pid] = firm
+    return firms
+
+
+def _mailer_composer_column(title, rows, selected, firms=None):
     out = ['<div style="flex:1;min-width:280px;">'
            '<h3 style="font-size:14px;margin:0 0 8px 0;">' + escape(title) + "</h3>"]
     for d in rows:
         did = str(d.get("id"))
         checked = " checked" if did in selected else ""
         co = _company_name(d) or _deal_title(d)
-        dt = _deal_title(d)
-        extra = (' <span style="color:#9ca3af;">(' + escape(dt) + ")</span>"
-                 if dt and dt != co else "")
+        firm = (firms or {}).get(_normalize_id(d.get("primary_contact_id")), "")
+        if not firm:
+            pc = _primary_contact(d)
+            firm = " ".join(x for x in (pc.get("first_name"), pc.get("last_name")) if x).strip()
+        extra = (' <span style="color:#9ca3af;">(' + escape(firm) + ")</span>"
+                 if firm else "")
         ssa = ('<span title="Sell-side agreement in place" '
                'style="color:#1f7a4d;font-weight:700;"> &#9679;</span>'
                if _cf_option_id(d, CF_DEAL_AGENT_AGREEMENT) == AGENT_AGREEMENT_SELLSIDE else "")
@@ -4064,7 +4090,8 @@ def _render_mailer_composer(pid):
         'border-radius:6px;cursor:pointer;font-family:inherit;">Send test to cgracia@rainmakersecurities.com</button>'
         '<div style="display:flex;gap:24px;flex-wrap:wrap;background:#ffffff;border:1px solid #e5e7eb;'
         'border-radius:6px;padding:16px;margin-bottom:24px;">'
-        + _mailer_composer_column("Sell orders (" + str(len(sells_all)) + ")", sells_all, selected)
+        + _mailer_composer_column("Sell orders (" + str(len(sells_all)) + ")", sells_all, selected,
+                                  _mailer_seller_firms(sells_all))
         + _mailer_buy_co_column("Buy interest (" + str(len(buy_cos)) + " companies)", buy_cos, selected)
         + "</div>"
         '<p style="color:#6b7280;font-size:13px;margin:0 0 8px 0;">Preview as recipient &middot; '
