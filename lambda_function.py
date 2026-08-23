@@ -3620,9 +3620,9 @@ def _render_mailer_email(first_name, person_id, sells, buys, buyer_counts=None):
         '<div style="font-family:-apple-system,BlinkMacSystemFont,\'Segoe UI\',Roboto,'
         'Helvetica,Arial,sans-serif;max-width:680px;margin:0 auto;padding:24px;color:#1f2937;">'
         '<p style="font-size:15px;margin:0 0 16px 0;">' + greet + "</p>"
-        '<p style="font-size:14px;margin:0 0 16px 0;">We will continue to send this weekly '
-        "overview of all our buy and sell orders. If you are looking for something not listed, "
-        "let me know.</p>"
+        '<p style="font-size:15px;margin:0 0 16px 0;">See this week&rsquo;s trades for '
+        "accredited investors below. If you are looking for something that isn&rsquo;t listed, "
+        "just let me know.</p>"
         '<div style="border:1px solid #cdc9c0;border-left:4px solid #3d5a73;background:#f7f6f3;'
         'border-radius:6px;padding:14px 18px;margin:0 0 20px 0;">'
         '<p style="font-size:11px;letter-spacing:.08em;text-transform:uppercase;'
