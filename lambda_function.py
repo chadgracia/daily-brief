@@ -3814,6 +3814,18 @@ MAILER_COMPOSER_SCRIPT = """
 (function () {
   var btn = document.getElementById('save-sel');
   if (!btn) return;
+  var tst = document.getElementById('test-send');
+  if (tst) tst.addEventListener('click', function () {
+    tst.disabled = true; tst.textContent = 'Sending…';
+    fetch(window.location.href, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({action: 'mailer_test'})
+    }).then(function (r) { return r.json(); }).then(function (j) {
+      tst.textContent = j.ok ? 'Test sent ✓' : 'Failed — try again';
+      tst.disabled = false;
+    }).catch(function () { tst.textContent = 'Failed — try again'; tst.disabled = false; });
+  });
   var clr = document.getElementById('clear-sel');
   if (clr) clr.addEventListener('click', function () {
     document.querySelectorAll('input[name=deal]').forEach(function (c) { c.checked = false; });
@@ -3834,6 +3846,27 @@ MAILER_COMPOSER_SCRIPT = """
 })();
 </script>
 """
+
+
+def _handle_mailer_test(body):
+    pid = 1259927678
+    s3 = boto3.client("s3", region_name=S3_REGION)
+    deals = (_fetch_json(s3, "deals.json") or {}).get("deals", []) or []
+    sells_all, buys_all = _mailer_eligible(deals)
+    selected = _load_mailer_selection(s3)
+    sells = [d for d in sells_all if str(d.get("id")) in selected]
+    buys = [d for d in buys_all if str(d.get("id")) in selected]
+    email_html = _render_mailer_email("Chad", pid, sells, buys, _mailer_buyer_counts(s3))
+    boto3.client("ses", region_name=SES_REGION).send_email(
+        Source=FROM_ADDR,
+        Destination={"ToAddresses": ["cgracia@rainmakersecurities.com"]},
+        ReplyToAddresses=["cgracia@rainmakersecurities.com"],
+        Message={"Subject": {"Data": "[TEST] Live orders this week — Gracia Group", "Charset": "UTF-8"},
+                 "Body": {"Html": {"Data": email_html, "Charset": "UTF-8"}}},
+    )
+    return {"statusCode": 200,
+            "headers": {"Content-Type": "application/json"},
+            "body": json.dumps({"ok": True, "sells": len(sells), "buys": len(buys)})}
 
 
 def _render_mailer_composer(pid):
@@ -3861,6 +3894,9 @@ def _render_mailer_composer(pid):
         '<button type="button" id="clear-sel" style="margin:0 0 12px 10px;padding:8px 18px;'
         "border:1px solid #d1d5db;background:#ffffff;color:#374151;font-size:14px;font-weight:500;"
         'border-radius:6px;cursor:pointer;font-family:inherit;">Clear all</button>'
+        '<button type="button" id="test-send" style="margin:0 0 12px 10px;padding:8px 18px;'
+        "border:1px solid #3d5a73;background:#3d5a73;color:#ffffff;font-size:14px;font-weight:600;"
+        'border-radius:6px;cursor:pointer;font-family:inherit;">Send test to cgracia@rainmakersecurities.com</button>'
         '<div style="display:flex;gap:24px;flex-wrap:wrap;background:#ffffff;border:1px solid #e5e7eb;'
         'border-radius:6px;padding:16px;margin-bottom:24px;">'
         + _mailer_composer_column("Sell orders (" + str(len(sells_all)) + ")", sells_all, selected)
@@ -3909,6 +3945,8 @@ def handle_http_request(event):
             return _handle_row_done(body)
         if body.get("action") == "lead_email":
             return _handle_lead_email(body)
+        if body.get("action") == "mailer_test":
+            return _handle_mailer_test(body)
         if body.get("action") == "mailer_select":
             ids = {str(x) for x in (body.get("deal_ids") or []) if str(x).isdigit()}
             _save_mailer_selection(ids)
