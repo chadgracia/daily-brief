@@ -3644,6 +3644,8 @@ def _render_mailer_email(first_name, person_id, sells, buys, buyer_counts=None, 
     return (
         '<div style="font-family:-apple-system,BlinkMacSystemFont,\'Segoe UI\',Roboto,'
         'Helvetica,Arial,sans-serif;max-width:680px;margin:0 auto;padding:24px;color:#1f2937;">'
+        '<h1 style="font-size:18px;margin:0 0 18px 0;color:#111827;">Pre-IPO Secondary '
+        "Opportunities from the Gracia Group</h1>"
         '<table role="presentation" width="100%" style="border-collapse:collapse;margin:0 0 20px 0;"><tr>'
         '<td valign="top" style="padding-right:18px;">'
         '<p style="font-size:15px;margin:0 0 16px 0;">' + greet + "</p>"
@@ -3670,9 +3672,8 @@ def _render_mailer_email(first_name, person_id, sells, buys, buyer_counts=None, 
         "</tr></table>"
         + _mailer_table("Sell orders — shares available", sells, person_id, None, logos)
         + _mailer_buy_table("Buy orders — buyers seeking shares", buys, person_id, buyer_counts, logos)
-        + '<p style="font-size:13px;color:#6b7280;margin:28px 0 0 0;">Chad Gracia &middot; '
-        "Gracia Group &middot; Rainmaker Securities</p>"
-        "</div>"
+        + MAILER_SIGNATURE_HTML
+        + "</div>"
     )
 
 
@@ -3891,6 +3892,50 @@ MAILER_COMPOSER_SCRIPT = """
 """
 
 
+MAILER_FROM = "Chad Gracia <cgracia@graciagroup.com>"
+
+MAILER_SIGNATURE_HTML = (
+    '<p style="font-size:14px;margin:28px 0 0 0;color:#1f2937;">Chad Gracia<br>'
+    "Registered Representative, Rainmaker Securities<br>"
+    "WhatsApp: +380 99 346 4098</p>"
+    '<p style="font-size:14px;margin:10px 0 0 0;">Indications for Accredited Investors: '
+    '<a href="https://trades.graciagroup.com/" style="color:#1d4ed8;">https://trades.graciagroup.com/</a></p>'
+    '<hr style="border:none;border-top:1px solid #e5e7eb;margin:20px 0;">'
+    '<div style="font-size:11px;color:#6b7280;line-height:1.5;">'
+    "<p style=\"margin:0 0 8px 0;\">DISCLOSURE: Rainmaker Securities, LLC (&ldquo;RMS&rdquo;) is a "
+    '<a href="https://www.finra.org/#/" style="color:#6b7280;">FINRA</a> registered broker-dealer and '
+    '<a href="https://www.sipc.org/" style="color:#6b7280;">SIPC</a> member. Find this broker-dealer and its agents on '
+    '<a href="https://brokercheck.finra.org" style="color:#6b7280;">BrokerCheck</a>. Our relationship summary can be found on the '
+    '<a href="https://www.rainmakersecurities.com/crs" style="color:#6b7280;">RMS website</a>.</p>'
+    '<p style="margin:0 0 8px 0;">RMS is engaged by its clients to make referrals to buyers or sellers of private '
+    "securities (&ldquo;Securities&rdquo;). If such client closes a Securities transaction with a buyer or seller so "
+    "referred, RMS is entitled to a success fee from the client. Such success fee may be in the form of cash or in "
+    "warrants to purchase securities of the client or client&rsquo;s affiliate. RMS or RMS representatives may hold "
+    "equity in its issuer clients or in the issuers of securities purchased or sold by the parties to a transaction.</p>"
+    '<p style="margin:0 0 8px 0;">This communication is confidential and is addressed only to its intended recipient. '
+    "This communication does not represent an offer or solicitation to buy or sell Securities. Such an offer must be "
+    "made via definitive legal documentation by the seller of securities.</p>"
+    '<p style="margin:0 0 8px 0;">Investments in the Securities are speculative and involve a high degree of risk. '
+    "An investor in the Securities should have little to no need for liquidity in the foreseeable future and have "
+    "sufficient finances to withstand the loss of the entire investment.</p>"
+    '<p style="margin:0 0 8px 0;">RMS does not recommend the purchase or sale of Securities. Potential buyers or '
+    "sellers of the Securities should seek professional counsel prior to entering into any transaction.</p>"
+    '<p style="margin:0 0 4px 0;font-weight:700;">RISK FACTORS</p>'
+    '<p style="margin:0 0 8px 0;">Investments in the Securities are speculative and involve a high degree of risk. '
+    "Companies engaging in private placements may be early stage and high risk. You should be able to afford the "
+    "increased risk of loss with such investments, including the potential of a total loss.</p>"
+    '<p style="margin:0 0 8px 0;">An investor in the Securities should have little to no need for liquidity in the '
+    "foreseeable future. Unlike an investment purchased on a stock exchange, an investment in a private placement is "
+    "highly illiquid. You will most likely be investing in restricted securities, may have difficulty finding a buyer "
+    "for the securities when you can resell and, as a result, may need to hold the securities indefinitely.</p>"
+    '<p style="margin:0;">Limited disclosure Information. Companies engaging in private placements are not required '
+    "to provide the disclosure that would be required in a registered offering. You may have less information to make "
+    "an informed investment decision than, for example, stock purchased on a stock exchange, including information "
+    "that may help you determine whether the price asked for the investment is a fair price. Potential buyers or "
+    "sellers of the Securities should seek professional counsel prior to entering into any transaction.</p></div>"
+)
+
+
 def _handle_mailer_test(body):
     pid = 1259927678
     s3 = boto3.client("s3", region_name=S3_REGION)
@@ -3902,7 +3947,7 @@ def _handle_mailer_test(body):
     buys = [d for d in buys_all if str(d.get("id")) in selected]
     email_html = _render_mailer_email("Chad", pid, sells, buys, counts, True)
     boto3.client("ses", region_name=SES_REGION).send_email(
-        Source=FROM_ADDR,
+        Source=MAILER_FROM,
         Destination={"ToAddresses": ["cgracia@rainmakersecurities.com"]},
         ReplyToAddresses=["cgracia@rainmakersecurities.com"],
         Message={"Subject": {"Data": "[TEST] Live orders this week — Gracia Group", "Charset": "UTF-8"},
