@@ -3595,6 +3595,79 @@ def _render_mailer_email(first_name, person_id, sells, buys, buyer_counts=None):
     )
 
 
+CF_PERSON_DAILY_MAILER = "custom_label_4006998"
+DAILY_MAILER_SUBSCRIBED = 7203960
+DAILY_MAILER_UNSUBSCRIBED = 7203961
+DAILY_MAILER_HOLD = 7203962
+
+
+def _daily_signup_page(message):
+    return {"statusCode": 200,
+            "headers": {"Content-Type": "text/html; charset=utf-8"},
+            "body": ('<!doctype html><html lang="en"><head><meta charset="utf-8">'
+                     '<meta name="viewport" content="width=device-width, initial-scale=1">'
+                     "<title>Daily Highlight</title></head>"
+                     '<body style="font-family:-apple-system,BlinkMacSystemFont,'
+                     "'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#1f2937;"
+                     'max-width:560px;margin:80px auto;padding:0 24px;text-align:center;">'
+                     '<h1 style="font-size:22px;">' + message + "</h1>"
+                     '<p style="color:#6b7280;font-size:14px;">Chad Gracia &middot; Gracia Group '
+                     "&middot; Rainmaker Securities</p></body></html>")}
+
+
+def _handle_daily_signup(params):
+    pid_raw = str(params.get("pid") or "").strip()
+    token = str(params.get("t") or "").strip()
+    unsub = str(params.get("off") or "").strip() == "1"
+    if not pid_raw.isdigit():
+        return {"statusCode": 400, "body": "Bad link"}
+    if not hmac.compare_digest(token, _mailer_token(pid_raw, "daily")):
+        return {"statusCode": 403, "body": "Invalid link"}
+    pid = int(pid_raw)
+    try:
+        jwt = get_jwt()
+        cur = call_pipeline_api("GET", f"/people/{pid}.json", jwt=jwt)
+        person = cur["data"] if cur.get("status") == 200 and isinstance(cur.get("data"), dict) else {}
+        who = _person_full_name(person) or "Person " + str(pid)
+        who_email = _person_email(person) or ""
+        current = _cf_option_id(person, CF_PERSON_DAILY_MAILER)
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        if unsub:
+            if current == DAILY_MAILER_HOLD:
+                action = "unsubscribe requested while on Hold — left as Hold"
+            else:
+                call_pipeline_api("PUT", f"/people/{pid}.json",
+                                  {"person": {"custom_fields": {CF_PERSON_DAILY_MAILER: DAILY_MAILER_UNSUBSCRIBED}}},
+                                  jwt=jwt)
+                action = "unsubscribed"
+            page = _daily_signup_page("You&rsquo;re unsubscribed from the Daily Highlight.")
+        else:
+            if current == DAILY_MAILER_HOLD:
+                action = "signup while on Hold — left as Hold"
+            else:
+                call_pipeline_api("PUT", f"/people/{pid}.json",
+                                  {"person": {"custom_fields": {CF_PERSON_DAILY_MAILER: DAILY_MAILER_SUBSCRIBED}}},
+                                  jwt=jwt)
+                action = "subscribed"
+            page = _daily_signup_page("You&rsquo;re in &mdash; the Daily Highlight starts with the next issue.")
+        call_pipeline_api("POST", "/notes.json",
+                          {"note": {"content": "Daily Highlight " + action + " via email link " + today,
+                                    "note_category_id": 69759, "person_id": pid}},
+                          jwt=jwt)
+        boto3.client("ses", region_name=SES_REGION).send_email(
+            Source=FROM_ADDR,
+            Destination={"ToAddresses": TO_ADDRS},
+            Message={"Subject": {"Data": "Daily Highlight: " + who + " " + action, "Charset": "UTF-8"},
+                     "Body": {"Text": {"Data": who + " (" + who_email + ") " + action
+                                       + ".\n\nPerson: https://app.pipelinecrm.com/people/" + str(pid) + "\n",
+                                       "Charset": "UTF-8"}}},
+        )
+        return page
+    except Exception as e:
+        print(f"daily signup failed pid={pid_raw}: {e}")
+        return _daily_signup_page("Something went wrong &mdash; please reply to any of our emails and we&rsquo;ll sort it.")
+
+
 def _handle_mailer_click(params):
     pid_raw = str(params.get("pid") or "").strip()
     did_raw = str(params.get("did") or "").strip()
@@ -3756,6 +3829,8 @@ def handle_http_request(event):
     params = event.get("queryStringParameters") or {}
     if isinstance(params, dict) and params.get("view") == "click":
         return _handle_mailer_click(params)
+    if isinstance(params, dict) and params.get("view") == "daily":
+        return _handle_daily_signup(params)
     key = params.get("key") if isinstance(params, dict) else None
     expected = os.environ.get("BRIEF_PAGE_KEY")
     if not expected or key != expected:
