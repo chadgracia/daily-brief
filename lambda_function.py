@@ -3589,6 +3589,11 @@ def _render_mailer_email(first_name, person_id, sells, buys, buyer_counts=None):
         "Click any company to register your interest and see full details.</p>"
         + _mailer_table("Sell orders — shares available", sells, person_id)
         + _mailer_table("Buy orders — buyers seeking shares", buys, person_id, buyer_counts)
+        + '<p style="font-size:14px;margin:24px 0 0 0;">Want a daily highlight on a single '
+        'transaction? <a href="https://bddpwqsqvt32ritxpjqlqwhaim0ykbol.lambda-url.us-east-1.on.aws/'
+        '?view=daily&amp;pid=' + str(person_id) + "&amp;t=" + _mailer_token(person_id, "daily")
+        + '" style="color:#1d4ed8;font-weight:600;">Click here to receive the Daily Highlight</a>. '
+        "Unsubscribe any time.</p>"
         + '<p style="font-size:13px;color:#6b7280;margin:28px 0 0 0;">Chad Gracia &middot; '
         "Gracia Group &middot; Rainmaker Securities</p>"
         "</div>"
