@@ -3519,11 +3519,7 @@ def _mailer_eligible(deals, buyer_counts=None):
         return _cf_number(d, CF_TICKET_MAX) or 0
 
     sells.sort(key=_key, reverse=True)
-    if buyer_counts:
-        buys.sort(key=lambda d: ((buyer_counts or {}).get(
-            (_company_name(d) or _deal_title(d)).strip().lower(), 0), _key(d)), reverse=True)
-    else:
-        buys.sort(key=_key, reverse=True)
+    buys.sort(key=lambda d: (_company_name(d) or _deal_title(d)).strip().lower())
     return sells, buys
 
 
@@ -3544,6 +3540,33 @@ def _save_mailer_selection(deal_ids):
     )
 
 
+def _mailer_logo_map(s3):
+    try:
+        companies = (_fetch_json(s3, "companies.json") or {}).get("companies", []) or []
+    except Exception:
+        return {}
+    out = {}
+    for c in companies:
+        site = (c.get("website") or "").strip()
+        if not site:
+            continue
+        dom = site.split("//")[-1].split("/")[0]
+        if dom.startswith("www."):
+            dom = dom[4:]
+        if dom:
+            out[_normalize_id(c.get("id"))] = dom
+    return out
+
+
+def _mailer_logo_img(logos, deal):
+    dom = (logos or {}).get(_normalize_id(_company_id(deal)))
+    if not dom:
+        return ""
+    return ('<img src="https://www.google.com/s2/favicons?domain=' + escape(dom, quote=True)
+            + '&amp;sz=32" width="16" height="16" alt="" '
+            'style="vertical-align:-3px;margin-right:6px;border:0;">')
+
+
 def _mailer_buyer_counts(s3):
     try:
         buy = (_fetch_json(s3, "interest_people.json") or {}).get("buy") or {}
@@ -3556,7 +3579,7 @@ def _mailer_buyer_counts(s3):
     return counts
 
 
-def _mailer_table(title, rows, person_id, buyer_counts=None):
+def _mailer_table(title, rows, person_id, buyer_counts=None, logos=None):
     th = (
         'style="text-align:left;padding:8px 10px;border-bottom:2px solid #1f2937;'
         'font-size:12px;letter-spacing:.04em;text-transform:uppercase;color:#374151;"'
@@ -3573,7 +3596,7 @@ def _mailer_table(title, rows, person_id, buyer_counts=None):
         out.append("<tr><td " + td + ' colspan="5">None this week</td></tr>')
     for d in rows:
         href = _mailer_click_url(person_id, d.get("id"))
-        name = escape(_company_name(d) or _deal_title(d))
+        name = _mailer_logo_img(logos, d) + escape(_company_name(d) or _deal_title(d))
         if buyer_counts is not None:
             n = buyer_counts.get(_normalize_id(_company_id(d)), 0)
             if n:
@@ -3591,7 +3614,7 @@ def _mailer_table(title, rows, person_id, buyer_counts=None):
     return "".join(out)
 
 
-def _mailer_buy_table(title, rows, person_id, buyer_counts):
+def _mailer_buy_table(title, rows, person_id, buyer_counts, logos=None):
     td = 'style="padding:9px 10px;border-bottom:1px solid #e5e7eb;font-size:14px;color:#1f2937;"'
     out = [
         '<h2 style="font-size:16px;margin:28px 0 8px 0;color:#111827;">' + escape(title) + "</h2>",
@@ -3606,7 +3629,7 @@ def _mailer_buy_table(title, rows, person_id, buyer_counts):
             continue
         seen.add(cid)
         href = _mailer_click_url(person_id, d.get("id"))
-        name = escape(_company_name(d) or _deal_title(d))
+        name = _mailer_logo_img(logos, d) + escape(_company_name(d) or _deal_title(d))
         n = (buyer_counts or {}).get((_company_name(d) or _deal_title(d)).strip().lower(), 0)
         buyers = str(n) + " Buyer" + ("" if n == 1 else "s") if n else "Buyers waiting"
         out.append(
@@ -3618,7 +3641,7 @@ def _mailer_buy_table(title, rows, person_id, buyer_counts):
     return "".join(out)
 
 
-def _render_mailer_email(first_name, person_id, sells, buys, buyer_counts=None):
+def _render_mailer_email(first_name, person_id, sells, buys, buyer_counts=None, logos=None):
     greet = "Hello " + escape(first_name) + "," if first_name else "Hello,"
     return (
         '<div style="font-family:-apple-system,BlinkMacSystemFont,\'Segoe UI\',Roboto,'
@@ -3647,8 +3670,8 @@ def _render_mailer_email(first_name, person_id, sells, buys, buyer_counts=None):
         'font-weight:600;padding:8px 14px;border-radius:6px;text-decoration:none;">'
         "Get the Daily Highlight</a></div></td>"
         "</tr></table>"
-        + _mailer_table("Sell orders — shares available", sells, person_id)
-        + _mailer_buy_table("Buy orders — buyers seeking shares", buys, person_id, buyer_counts)
+        + _mailer_table("Sell orders — shares available", sells, person_id, None, logos)
+        + _mailer_buy_table("Buy orders — buyers seeking shares", buys, person_id, buyer_counts, logos)
         + '<p style="font-size:13px;color:#6b7280;margin:28px 0 0 0;">Chad Gracia &middot; '
         "Gracia Group &middot; Rainmaker Securities</p>"
         "</div>"
@@ -3879,7 +3902,7 @@ def _handle_mailer_test(body):
     selected = _load_mailer_selection(s3)
     sells = [d for d in sells_all if str(d.get("id")) in selected]
     buys = [d for d in buys_all if str(d.get("id")) in selected]
-    email_html = _render_mailer_email("Chad", pid, sells, buys, counts)
+    email_html = _render_mailer_email("Chad", pid, sells, buys, counts, _mailer_logo_map(s3))
     boto3.client("ses", region_name=SES_REGION).send_email(
         Source=FROM_ADDR,
         Destination={"ToAddresses": ["cgracia@rainmakersecurities.com"]},
@@ -3900,7 +3923,7 @@ def _render_mailer_composer(pid):
     selected = _load_mailer_selection(s3)
     sells = [d for d in sells_all if str(d.get("id")) in selected]
     buys = [d for d in buys_all if str(d.get("id")) in selected]
-    email_html = _render_mailer_email("Chad", pid, sells, buys, counts)
+    email_html = _render_mailer_email("Chad", pid, sells, buys, counts, _mailer_logo_map(s3))
 
     html = (
         '<!doctype html><html lang="en"><head><meta charset="utf-8">'
