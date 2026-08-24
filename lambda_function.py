@@ -3656,6 +3656,9 @@ def _render_mailer_email(first_name, person_id, sells, buys, buyer_counts=None, 
     return (
         '<div style="font-family:-apple-system,BlinkMacSystemFont,\'Segoe UI\',Roboto,'
         'Helvetica,Arial,sans-serif;max-width:680px;margin:0 auto;padding:24px;color:#1f2937;">'
+        + '<a href="' + MAILER_BASE_URL + '?view=click&pid=' + str(person_id)
+        + '&hp=1&t=' + _mailer_token(person_id, "hp") + '" '
+        'style="display:none;visibility:hidden;color:#ffffff;font-size:1px;">&#8203;</a>'
         '<h1 style="font-size:18px;margin:0 0 18px 0;color:#111827;">Pre-IPO Secondary '
         "Opportunities from the Gracia Group</h1>"
         '<table role="presentation" width="100%" style="border-collapse:collapse;margin:0 0 20px 0;"><tr>'
@@ -3693,6 +3696,112 @@ CF_PERSON_DAILY_MAILER = "custom_label_4006998"
 DAILY_MAILER_SUBSCRIBED = 7203960
 DAILY_MAILER_UNSUBSCRIBED = 7203961
 DAILY_MAILER_HOLD = 7203962
+
+
+SCANNER_UA_MARKERS = ("bot", "scan", "crawl", "spider", "preview", "proofpoint",
+                      "barracuda", "mimecast", "safelink", "urldefense", "python-requests",
+                      "curl", "wget", "headlesschrome", "phantomjs", "validator", "monitor")
+_SCANNER_SET_KEY = "mailer-scanner-pids.json"
+_VELOCITY_PREFIX = "click-velocity/"
+
+
+def _http_meta(event):
+    http = ((event.get("requestContext") or {}).get("http") or {})
+    return {"ip": http.get("sourceIp") or "", "ua": http.get("userAgent") or ""}
+
+
+def _ua_is_automated(ua):
+    u = (ua or "").strip().lower()
+    if not u:
+        return True
+    return any(m in u for m in SCANNER_UA_MARKERS)
+
+
+def _scanner_day_key():
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+
+def _load_scanner_set(s3):
+    try:
+        obj = s3.get_object(Bucket=S3_BUCKET, Key=_SCANNER_SET_KEY)
+        return set(json.loads(obj["Body"].read()).get(_scanner_day_key(), []))
+    except Exception:
+        return set()
+
+
+def _flag_scanner(s3, pid, reason, meta=None, alert=True):
+    day = _scanner_day_key()
+    try:
+        try:
+            obj = s3.get_object(Bucket=S3_BUCKET, Key=_SCANNER_SET_KEY)
+            data = json.loads(obj["Body"].read())
+        except Exception:
+            data = {}
+        pids = set(data.get(day, []))
+        if pid in pids:
+            return
+        pids.add(pid)
+        s3.put_object(Bucket=S3_BUCKET, Key=_SCANNER_SET_KEY,
+                      Body=json.dumps({day: sorted(pids)}).encode("utf-8"),
+                      ContentType="application/json")
+        if alert:
+            ua = (meta or {}).get("ua", "")
+            ip = (meta or {}).get("ip", "")
+            boto3.client("ses", region_name=SES_REGION).send_email(
+                Source=FROM_ADDR, Destination={"ToAddresses": TO_ADDRS},
+                Message={"Subject": {"Data": "Mailer scanner flagged: person " + str(pid), "Charset": "UTF-8"},
+                         "Body": {"Text": {"Data": ("Person " + str(pid) + " classified as automated ("
+                                  + reason + ").\nUA: " + ua + "\nIP: " + ip
+                                  + "\nFurther clicks from this mailbox today are logged but not counted.\n"
+                                  + "Person: https://app.pipelinecrm.com/people/" + str(pid) + "\n"),
+                                  "Charset": "UTF-8"}}})
+    except Exception as e:
+        print(f"_flag_scanner failed pid={pid}: {e}")
+
+
+def _classify_click(s3, meta, pid):
+    """Return 'human' or 'scanner'. Deterministic signals plus machine-gun velocity
+    (4+ clicks inside 10 seconds). Velocity never fires on human-paced browsing."""
+    try:
+        if pid in _load_scanner_set(s3):
+            return "scanner"
+        if meta is not None and _ua_is_automated((meta or {}).get("ua", "")):
+            _flag_scanner(s3, pid, "scanner user-agent", meta)
+            return "scanner"
+        now = datetime.now(timezone.utc).timestamp()
+        key = _VELOCITY_PREFIX + str(pid) + ".json"
+        times = []
+        try:
+            vobj = s3.get_object(Bucket=S3_BUCKET, Key=key)
+            times = json.loads(vobj["Body"].read())
+        except Exception:
+            pass
+        times = [t for t in times if now - t < 600][-19:] + [now]
+        try:
+            s3.put_object(Bucket=S3_BUCKET, Key=key, Body=json.dumps(times).encode("utf-8"),
+                          ContentType="application/json")
+        except Exception:
+            pass
+        recent = [t for t in times if now - t <= 10]
+        if len(recent) >= 4:
+            _flag_scanner(s3, pid, str(len(recent)) + " clicks in 10 seconds", meta)
+            return "scanner"
+    except Exception as e:
+        print(f"_classify_click failed pid={pid}: {e}")
+    return "human"
+
+
+def _handle_mailer_honeypot(params):
+    pid_raw = str(params.get("pid") or "").strip()
+    token = str(params.get("t") or "").strip()
+    if not pid_raw.isdigit() or not hmac.compare_digest(token, _mailer_token(pid_raw, "hp")):
+        return {"statusCode": 400, "body": ""}
+    try:
+        s3 = boto3.client("s3", region_name=S3_REGION)
+        _flag_scanner(s3, int(pid_raw), "honeypot link fetched", alert=False)
+    except Exception as e:
+        print(f"honeypot flag failed: {e}")
+    return {"statusCode": 204, "headers": {}, "body": ""}
 
 
 def _click_interstitial(dest):
@@ -3750,7 +3859,7 @@ def _daily_signup_page(message):
                      "&middot; Rainmaker Securities</p></body></html>")}
 
 
-def _handle_daily_signup(params, method="GET"):
+def _handle_daily_signup(params, method="GET", meta=None):
     pid_raw = str(params.get("pid") or "").strip()
     token = str(params.get("t") or "").strip()
     unsub = str(params.get("off") or "").strip() == "1"
@@ -3762,6 +3871,10 @@ def _handle_daily_signup(params, method="GET"):
     if method != "POST":
         return _daily_signup_confirm_page()
     try:
+        _s3c = boto3.client("s3", region_name=S3_REGION)
+        if _classify_click(_s3c, meta, pid) != "human":
+            return {"statusCode": 200, "headers": {"Content-Type": "application/json"},
+                    "body": json.dumps({"ok": True, "message": "Thanks &mdash; you&rsquo;re all set."})}
         jwt = get_jwt()
         cur = call_pipeline_api("GET", f"/people/{pid}.json", jwt=jwt)
         person = cur["data"] if cur.get("status") == 200 and isinstance(cur.get("data"), dict) else {}
@@ -3817,7 +3930,7 @@ def _mailer_click_url_co(person_id, co_name):
     )
 
 
-def _handle_mailer_click_co(params, method="GET"):
+def _handle_mailer_click_co(params, method="GET", meta=None):
     pid_raw = str(params.get("pid") or "").strip()
     co_name = str(params.get("co") or "").strip()
     token = str(params.get("t") or "").strip()
@@ -3834,6 +3947,8 @@ def _handle_mailer_click_co(params, method="GET"):
                 "headers": {"Content-Type": "application/json"},
                 "body": json.dumps({"ok": True})}
     try:
+        s3 = boto3.client("s3", region_name=S3_REGION)
+        cls = _classify_click(s3, meta, pid)
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         jwt = get_jwt()
         cur = call_pipeline_api("GET", f"/people/{pid}.json", jwt=jwt)
@@ -3842,24 +3957,27 @@ def _handle_mailer_click_co(params, method="GET"):
         who_email = _person_email(person) or ""
         call_pipeline_api("POST", "/notes.json",
                           {"note": {"content": "Clicked " + co_name + " buy order via weekly newsletter "
-                                    + today + " — note only", "note_category_id": 69759,
+                                    + today + " — note only"
+                                    + (" (automated scan — not counted)" if cls != "human" else ""),
+                                    "note_category_id": 69759,
                                     "person_id": pid}},
                           jwt=jwt)
-        boto3.client("ses", region_name=SES_REGION).send_email(
-            Source=FROM_ADDR,
-            Destination={"ToAddresses": TO_ADDRS},
-            Message={"Subject": {"Data": "Mailer click: " + who + " — " + co_name + " (buy)", "Charset": "UTF-8"},
-                     "Body": {"Text": {"Data": who + " (" + who_email + ") clicked " + co_name
-                                       + " buy order in the weekly mailer.\n\nPerson: "
-                                       "https://app.pipelinecrm.com/people/" + str(pid) + "\n",
-                                       "Charset": "UTF-8"}}},
-        )
+        if cls == "human":
+            boto3.client("ses", region_name=SES_REGION).send_email(
+                Source=FROM_ADDR,
+                Destination={"ToAddresses": TO_ADDRS},
+                Message={"Subject": {"Data": "Mailer click: " + who + " — " + co_name + " (buy)", "Charset": "UTF-8"},
+                         "Body": {"Text": {"Data": who + " (" + who_email + ") clicked " + co_name
+                                           + " buy order in the weekly mailer.\n\nPerson: "
+                                           "https://app.pipelinecrm.com/people/" + str(pid) + "\n",
+                                           "Charset": "UTF-8"}}},
+            )
     except Exception as e:
         print(f"mailer co click failed pid={pid_raw} co={co_name}: {e}")
     return redirect
 
 
-def _handle_mailer_click(params, method="GET"):
+def _handle_mailer_click(params, method="GET", meta=None):
     pid_raw = str(params.get("pid") or "").strip()
     did_raw = str(params.get("did") or "").strip()
     token = str(params.get("t") or "").strip()
@@ -3887,6 +4005,7 @@ def _handle_mailer_click(params, method="GET"):
                 "body": json.dumps({"ok": True})}
     try:
         s3 = boto3.client("s3", region_name=S3_REGION)
+        cls = _classify_click(s3, meta, pid)
         deals = (_fetch_json(s3, "deals.json") or {}).get("deals", []) or []
         deal = next((d for d in deals if _normalize_id(d.get("id")) == did), None)
         if not deal:
@@ -3908,7 +4027,7 @@ def _handle_mailer_click(params, method="GET"):
         who = (_person_full_name(person) or "Person " + str(pid))
         who_email = _person_email(person) or ""
         interest_status = "note only"
-        if side == "SELL":
+        if side == "SELL" and cls == "human":
             agent_obj = s3.get_object(Bucket="pipeline-token", Key="agent-data.json")
             agent_data = json.loads(agent_obj["Body"].read())
             sec_ids = agent_data.get("security_ids", {}) or {}
@@ -3950,21 +4069,23 @@ def _handle_mailer_click(params, method="GET"):
             else:
                 interest_status = "Buy Interest NOT added — no security entry for '" + co_name + "' in agent-data.json"
         note = ("Clicked " + co_name + " " + side.lower() + " order via weekly newsletter "
-                + today + " — " + interest_status)
+                + today + " — " + interest_status
+                + (" (automated scan — not counted)" if cls != "human" else ""))
         call_pipeline_api("POST", "/notes.json",
                           {"note": {"content": note, "note_category_id": 69759,
                                     "person_id": pid, "company_id": cid, "deal_id": did}},
                           jwt=jwt)
-        alert = (who + " (" + who_email + ") clicked " + co_name + " " + side.lower()
-                 + " order in the weekly mailer.\n\n" + interest_status + "\n\n"
-                 + "Person: https://app.pipelinecrm.com/people/" + str(pid) + "\n"
-                 + "Deal: https://app.pipelinecrm.com/deals/" + str(did) + "\n")
-        boto3.client("ses", region_name=SES_REGION).send_email(
-            Source=FROM_ADDR,
-            Destination={"ToAddresses": TO_ADDRS},
-            Message={"Subject": {"Data": "Mailer click: " + who + " — " + co_name + " (" + side.lower() + ")", "Charset": "UTF-8"},
-                     "Body": {"Text": {"Data": alert, "Charset": "UTF-8"}}},
-        )
+        if cls == "human":
+            alert = (who + " (" + who_email + ") clicked " + co_name + " " + side.lower()
+                     + " order in the weekly mailer.\n\n" + interest_status + "\n\n"
+                     + "Person: https://app.pipelinecrm.com/people/" + str(pid) + "\n"
+                     + "Deal: https://app.pipelinecrm.com/deals/" + str(did) + "\n")
+            boto3.client("ses", region_name=SES_REGION).send_email(
+                Source=FROM_ADDR,
+                Destination={"ToAddresses": TO_ADDRS},
+                Message={"Subject": {"Data": "Mailer click: " + who + " — " + co_name + " (" + side.lower() + ")", "Charset": "UTF-8"},
+                         "Body": {"Text": {"Data": alert, "Charset": "UTF-8"}}},
+            )
     except Exception as e:
         print(f"mailer click write failed pid={pid} did={did}: {e}")
     return redirect
@@ -4305,12 +4426,15 @@ def _render_mailer_composer(pid):
 def handle_http_request(event):
     params = event.get("queryStringParameters") or {}
     _method = ((event.get("requestContext") or {}).get("http") or {}).get("method", "GET")
+    _meta = _http_meta(event)
     if isinstance(params, dict) and params.get("view") == "click":
+        if params.get("hp"):
+            return _handle_mailer_honeypot(params)
         if params.get("co"):
-            return _handle_mailer_click_co(params, _method)
-        return _handle_mailer_click(params, _method)
+            return _handle_mailer_click_co(params, _method, _meta)
+        return _handle_mailer_click(params, _method, _meta)
     if isinstance(params, dict) and params.get("view") == "daily":
-        return _handle_daily_signup(params, _method)
+        return _handle_daily_signup(params, _method, _meta)
     key = params.get("key") if isinstance(params, dict) else None
     expected = os.environ.get("BRIEF_PAGE_KEY")
     if not expected or key != expected:
