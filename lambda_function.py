@@ -3976,7 +3976,7 @@ MAILER_COMPOSER_SCRIPT = """
   if (snd) snd.addEventListener('click', function () {
     var subj = (document.getElementById('send-subject').value || '').trim();
     if (!subj) { alert('Enter a subject line first.'); return; }
-    var ok = prompt('This emails the entire Weekly Mailer Leads list.\nType SEND to confirm.');
+    var ok = prompt('This emails the entire Weekly Mailer Leads list.\\nType SEND to confirm.');
     if (ok !== 'SEND') return;
     snd.disabled = true; snd.textContent = 'Sending… (takes a few minutes)';
     fetch(window.location.href, {
