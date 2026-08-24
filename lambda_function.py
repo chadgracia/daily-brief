@@ -3910,8 +3910,35 @@ def _handle_mailer_click(params, method="GET"):
         interest_status = "note only"
         if side == "SELL":
             agent_obj = s3.get_object(Bucket="pipeline-token", Key="agent-data.json")
-            sec_ids = json.loads(agent_obj["Body"].read()).get("security_ids", {}) or {}
+            agent_data = json.loads(agent_obj["Body"].read())
+            sec_ids = agent_data.get("security_ids", {}) or {}
             entry = (sec_ids.get(co_name) or {}).get("b")
+            if not entry:
+                # Stale lookup file — refresh Buy Interest entries from the live field API
+                try:
+                    labels_res = call_pipeline_api(
+                        "GET", "/admin/custom_field_labels.json?conditions[entity_type]=person",
+                        jwt=jwt)
+                    body_l = labels_res.get("data") or {}
+                    labels = (body_l.get("custom_field_labels") or body_l.get("entries")
+                              or body_l.get("data") or []) if isinstance(body_l, dict) else body_l
+                    for label in labels:
+                        if isinstance(label, dict) and label.get("id") == 3322093:
+                            for ent in (label.get("custom_field_label_dropdown_entries") or []):
+                                nm, eid = ent.get("name"), ent.get("id")
+                                if nm and eid:
+                                    sec_ids.setdefault(nm, {"h": None, "b": None, "s": None})["b"] = int(eid)
+                            break
+                    agent_data["security_ids"] = sec_ids
+                    try:
+                        s3.put_object(Bucket="pipeline-token", Key="agent-data.json",
+                                      ContentType="application/json",
+                                      Body=json.dumps(agent_data).encode("utf-8"))
+                    except Exception as we:
+                        print(f"agent-data write-back failed (non-fatal): {we}")
+                    entry = (sec_ids.get(co_name) or {}).get("b")
+                except Exception as re:
+                    print(f"security_ids refresh failed: {re}")
             if entry:
                 existing = _cf_option_ids(person, CF_PERSON_BUY_INTERESTS)
                 new_ids = sorted(existing | {int(entry)})
