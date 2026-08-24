@@ -3695,6 +3695,47 @@ DAILY_MAILER_UNSUBSCRIBED = 7203961
 DAILY_MAILER_HOLD = 7203962
 
 
+def _click_interstitial(dest):
+    return {"statusCode": 200,
+            "headers": {"Content-Type": "text/html; charset=utf-8",
+                        "Cache-Control": "no-store"},
+            "body": ('<!doctype html><html lang="en"><head><meta charset="utf-8">'
+                     '<meta name="viewport" content="width=device-width, initial-scale=1">'
+                     '<meta name="robots" content="noindex">'
+                     "<title>One moment&hellip;</title></head>"
+                     '<body style="font-family:-apple-system,BlinkMacSystemFont,'
+                     "'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#1f2937;"
+                     'max-width:560px;margin:80px auto;padding:0 24px;text-align:center;">'
+                     '<p style="font-size:16px;">Taking you to the order&hellip;</p>'
+                     '<p><a href="' + dest + '" style="color:#3d5a73;">Continue</a></p>'
+                     "<script>try{navigator.sendBeacon(window.location.href);}catch(e){}"
+                     "window.location.replace(" + json.dumps(dest) + ");</script>"
+                     "</body></html>")}
+
+
+def _daily_signup_confirm_page():
+    return {"statusCode": 200,
+            "headers": {"Content-Type": "text/html; charset=utf-8",
+                        "Cache-Control": "no-store"},
+            "body": ('<!doctype html><html lang="en"><head><meta charset="utf-8">'
+                     '<meta name="viewport" content="width=device-width, initial-scale=1">'
+                     '<meta name="robots" content="noindex">'
+                     "<title>Daily Highlight</title></head>"
+                     '<body style="font-family:-apple-system,BlinkMacSystemFont,'
+                     "'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#1f2937;"
+                     'max-width:560px;margin:80px auto;padding:0 24px;text-align:center;">'
+                     '<h1 id="msg" style="font-size:22px;">One moment&hellip;</h1>'
+                     '<p style="color:#6b7280;font-size:14px;">Chad Gracia &middot; Gracia Group '
+                     "&middot; Rainmaker Securities</p>"
+                     "<noscript>Please reply to any of our emails and we&rsquo;ll update your subscription.</noscript>"
+                     '<script>fetch(window.location.href,{method:"POST"})'
+                     ".then(function(r){return r.json();})"
+                     '.then(function(j){document.getElementById("msg").innerHTML=j.message||"Done.";})'
+                     '.catch(function(){document.getElementById("msg").innerHTML='
+                     '"Something went wrong &mdash; please reply to any of our emails.";});</script>'
+                     "</body></html>")}
+
+
 def _daily_signup_page(message):
     return {"statusCode": 200,
             "headers": {"Content-Type": "text/html; charset=utf-8"},
@@ -3709,7 +3750,7 @@ def _daily_signup_page(message):
                      "&middot; Rainmaker Securities</p></body></html>")}
 
 
-def _handle_daily_signup(params):
+def _handle_daily_signup(params, method="GET"):
     pid_raw = str(params.get("pid") or "").strip()
     token = str(params.get("t") or "").strip()
     unsub = str(params.get("off") or "").strip() == "1"
@@ -3718,6 +3759,8 @@ def _handle_daily_signup(params):
     if not hmac.compare_digest(token, _mailer_token(pid_raw, "daily")):
         return {"statusCode": 403, "body": "Invalid link"}
     pid = int(pid_raw)
+    if method != "POST":
+        return _daily_signup_confirm_page()
     try:
         jwt = get_jwt()
         cur = call_pipeline_api("GET", f"/people/{pid}.json", jwt=jwt)
@@ -3734,7 +3777,8 @@ def _handle_daily_signup(params):
                                   {"person": {"custom_fields": {CF_PERSON_DAILY_MAILER: DAILY_MAILER_UNSUBSCRIBED}}},
                                   jwt=jwt)
                 action = "unsubscribed"
-            page = _daily_signup_page("You&rsquo;re unsubscribed from the Daily Highlight.")
+            page = {"statusCode": 200, "headers": {"Content-Type": "application/json"},
+                    "body": json.dumps({"ok": True, "message": "You&rsquo;re unsubscribed from the Daily Highlight."})}
         else:
             if current == DAILY_MAILER_HOLD:
                 action = "signup while on Hold — left as Hold"
@@ -3743,7 +3787,8 @@ def _handle_daily_signup(params):
                                   {"person": {"custom_fields": {CF_PERSON_DAILY_MAILER: DAILY_MAILER_SUBSCRIBED}}},
                                   jwt=jwt)
                 action = "subscribed"
-            page = _daily_signup_page("You&rsquo;re in &mdash; the Daily Highlight starts with the next issue.")
+            page = {"statusCode": 200, "headers": {"Content-Type": "application/json"},
+                    "body": json.dumps({"ok": True, "message": "You&rsquo;re in &mdash; the Daily Highlight starts with the next issue."})}
         call_pipeline_api("POST", "/notes.json",
                           {"note": {"content": "Daily Highlight " + action + " via email link " + today,
                                     "note_category_id": 69759, "person_id": pid}},
@@ -3759,7 +3804,8 @@ def _handle_daily_signup(params):
         return page
     except Exception as e:
         print(f"daily signup failed pid={pid_raw}: {e}")
-        return _daily_signup_page("Something went wrong &mdash; please reply to any of our emails and we&rsquo;ll sort it.")
+        return {"statusCode": 200, "headers": {"Content-Type": "application/json"},
+                "body": json.dumps({"ok": False, "message": "Something went wrong &mdash; please reply to any of our emails and we&rsquo;ll sort it."})}
 
 
 def _mailer_click_url_co(person_id, co_name):
@@ -3771,7 +3817,7 @@ def _mailer_click_url_co(person_id, co_name):
     )
 
 
-def _handle_mailer_click_co(params):
+def _handle_mailer_click_co(params, method="GET"):
     pid_raw = str(params.get("pid") or "").strip()
     co_name = str(params.get("co") or "").strip()
     token = str(params.get("t") or "").strip()
@@ -3780,10 +3826,13 @@ def _handle_mailer_click_co(params):
     if not hmac.compare_digest(token, _mailer_token(pid_raw, "c:" + co_name)):
         return {"statusCode": 403, "body": "Invalid link"}
     pid = int(pid_raw)
-    redirect = {"statusCode": 302,
-                "headers": {"Location": "https://7u6sphgup5gjuywcvpuwzhruiq0asgdz.lambda-url.us-east-1.on.aws/"
-                            "?name=" + urllib.parse.quote(co_name) + "&side=sell"},
-                "body": ""}
+    if method != "POST":
+        return _click_interstitial(
+            "https://7u6sphgup5gjuywcvpuwzhruiq0asgdz.lambda-url.us-east-1.on.aws/"
+            "?name=" + urllib.parse.quote(co_name) + "&side=sell")
+    redirect = {"statusCode": 200,
+                "headers": {"Content-Type": "application/json"},
+                "body": json.dumps({"ok": True})}
     try:
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         jwt = get_jwt()
@@ -3810,7 +3859,7 @@ def _handle_mailer_click_co(params):
     return redirect
 
 
-def _handle_mailer_click(params):
+def _handle_mailer_click(params, method="GET"):
     pid_raw = str(params.get("pid") or "").strip()
     did_raw = str(params.get("did") or "").strip()
     token = str(params.get("t") or "").strip()
@@ -3820,9 +3869,22 @@ def _handle_mailer_click(params):
         return {"statusCode": 403, "body": "Invalid link"}
     pid = int(pid_raw)
     did = int(did_raw)
-    redirect = {"statusCode": 302,
-                "headers": {"Location": "https://trades.graciagroup.com/deal/" + str(did)},
-                "body": ""}
+    if method != "POST":
+        dest = "https://trades.graciagroup.com/deal/" + str(did)
+        try:
+            s3 = boto3.client("s3", region_name=S3_REGION)
+            deals = (_fetch_json(s3, "deals.json") or {}).get("deals", []) or []
+            deal = next((d for d in deals if _normalize_id(d.get("id")) == did), None)
+            if deal and _deal_side(deal) == "BUY":
+                co_name = _company_name(deal) or _deal_title(deal)
+                dest = ("https://7u6sphgup5gjuywcvpuwzhruiq0asgdz.lambda-url.us-east-1.on.aws/"
+                        "?name=" + urllib.parse.quote(co_name) + "&side=sell")
+        except Exception as e:
+            print(f"mailer click interstitial dest failed did={did}: {e}")
+        return _click_interstitial(dest)
+    redirect = {"statusCode": 200,
+                "headers": {"Content-Type": "application/json"},
+                "body": json.dumps({"ok": True})}
     try:
         s3 = boto3.client("s3", region_name=S3_REGION)
         deals = (_fetch_json(s3, "deals.json") or {}).get("deals", []) or []
@@ -4215,12 +4277,13 @@ def _render_mailer_composer(pid):
 
 def handle_http_request(event):
     params = event.get("queryStringParameters") or {}
+    _method = ((event.get("requestContext") or {}).get("http") or {}).get("method", "GET")
     if isinstance(params, dict) and params.get("view") == "click":
         if params.get("co"):
-            return _handle_mailer_click_co(params)
-        return _handle_mailer_click(params)
+            return _handle_mailer_click_co(params, _method)
+        return _handle_mailer_click(params, _method)
     if isinstance(params, dict) and params.get("view") == "daily":
-        return _handle_daily_signup(params)
+        return _handle_daily_signup(params, _method)
     key = params.get("key") if isinstance(params, dict) else None
     expected = os.environ.get("BRIEF_PAGE_KEY")
     if not expected or key != expected:
