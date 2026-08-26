@@ -17,7 +17,7 @@ S3_REGION = "us-east-1"
 SES_REGION = "us-east-1"
 
 FROM_ADDR = "agent@agent.graciagroup.com"
-TO_ADDRS = ["cgracia@rainmakersecurities.com", "kate@graciagroup.com"]
+TO_ADDRS = ["cgracia@rainmakersecurities.com"]
 
 PIPELINE_DEAL_URL = "https://app.pipelinecrm.com/deals/{}"
 PIPELINE_PERSON_URL = "https://app.pipelinecrm.com/people/{}"
