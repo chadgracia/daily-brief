@@ -3833,15 +3833,24 @@ def _daily_signup_confirm_page():
                      '<body style="font-family:-apple-system,BlinkMacSystemFont,'
                      "'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#1f2937;"
                      'max-width:560px;margin:80px auto;padding:0 24px;text-align:center;">'
-                     '<h1 id="msg" style="font-size:22px;">One moment&hellip;</h1>'
+                     '<h1 id="msg" style="font-size:22px;">Daily Highlight</h1>'
+                     '<p id="sub" style="font-size:15px;color:#374151;">One trade that stands out, in your inbox each day. '
+                     "Confirm below to start &mdash; stop any time.</p>"
+                     '<p><button type="button" id="go" style="background:#3d5a73;color:#ffffff;font-size:15px;'
+                     'font-weight:600;padding:12px 24px;border:none;border-radius:6px;cursor:pointer;'
+                     'font-family:inherit;">Yes, send me the Daily Highlight</button></p>'
                      '<p style="color:#6b7280;font-size:14px;">Chad Gracia &middot; Gracia Group '
                      "&middot; Rainmaker Securities</p>"
                      "<noscript>Please reply to any of our emails and we&rsquo;ll update your subscription.</noscript>"
-                     '<script>fetch(window.location.href,{method:"POST"})'
+                     '<script>document.getElementById("go").addEventListener("click",function(){'
+                     'var b=document.getElementById("go");b.disabled=true;b.textContent="One moment\\u2026";'
+                     'fetch(window.location.href,{method:"POST"})'
                      ".then(function(r){return r.json();})"
-                     '.then(function(j){document.getElementById("msg").innerHTML=j.message||"Done.";})'
+                     '.then(function(j){document.getElementById("msg").innerHTML=j.message||"Done.";'
+                     'document.getElementById("sub").style.display="none";b.style.display="none";})'
                      '.catch(function(){document.getElementById("msg").innerHTML='
-                     '"Something went wrong &mdash; please reply to any of our emails.";});</script>'
+                     '"Something went wrong &mdash; please reply to any of our emails.";b.style.display="none";});'
+                     "});</script>"
                      "</body></html>")}
 
 
