@@ -4388,6 +4388,83 @@ def _handle_news_test(body):
             "body": json.dumps({"ok": True})}
 
 
+def _handle_news_send(body):
+    subject = str(body.get("subject") or "").strip()
+    if not subject:
+        return {"statusCode": 400, "headers": {"Content-Type": "application/json"},
+                "body": json.dumps({"ok": False, "error": "subject required"})}
+    sid_raw = str(body.get("search_id") or "").strip()
+    search_id = int(sid_raw) if sid_raw.isdigit() else MAILER_SEARCH_ID
+    s3 = boto3.client("s3", region_name=S3_REGION)
+    content = _load_news_mailer(s3)
+    if not content.get("items"):
+        return {"statusCode": 400, "headers": {"Content-Type": "application/json"},
+                "body": json.dumps({"ok": False, "error": "no items in news mailer"})}
+    rows, missing = _fetch_mailer_rows(search_id)
+    progress_key = "news-send-" + datetime.now(timezone.utc).strftime("%Y-%m-%d") + ".json"
+    already = set()
+    try:
+        obj = s3.get_object(Bucket=S3_BUCKET, Key=progress_key)
+        already = set(json.loads(obj["Body"].read()).get("sent", []))
+    except Exception:
+        pass
+    ses = boto3.client("ses", region_name=SES_REGION)
+    sent, failed, skipped = 0, 0, 0
+
+    def _flush():
+        try:
+            s3.put_object(Bucket=S3_BUCKET, Key=progress_key,
+                          Body=json.dumps({"sent": sorted(already)}).encode("utf-8"),
+                          ContentType="application/json")
+        except Exception as e:
+            print(f"news send progress write failed: {e}")
+
+    for first, email, pid in rows:
+        key = email.lower()
+        if key in already:
+            skipped += 1
+            continue
+        npid = _normalize_id(pid)
+        if npid is None:
+            skipped += 1
+            continue
+        try:
+            html = _render_news_email(first, npid, content)
+            ses.send_email(
+                Source=MAILER_FROM,
+                Destination={"ToAddresses": [email]},
+                ReplyToAddresses=["cgracia@rainmakersecurities.com"],
+                Message={"Subject": {"Data": subject, "Charset": "UTF-8"},
+                         "Body": {"Html": {"Data": html, "Charset": "UTF-8"}}},
+            )
+            already.add(key)
+            sent += 1
+        except Exception as e:
+            failed += 1
+            print(f"news send failed to {email}: {e}")
+        if sent and sent % 25 == 0:
+            _flush()
+    _flush()
+    report = ("News mailer send complete.\n\nSubject: " + subject
+              + "\nSaved search: " + str(search_id)
+              + "\nSent: " + str(sent)
+              + "\nSkipped (already sent today / no person id): " + str(skipped)
+              + "\nFailed: " + str(failed)
+              + "\nNo email on record: " + str(len(missing))
+              + "\nItems: " + str(len(content.get("items") or [])) + "\n")
+    try:
+        ses.send_email(
+            Source=FROM_ADDR,
+            Destination={"ToAddresses": TO_ADDRS},
+            Message={"Subject": {"Data": "News mailer sent: " + str(sent) + " recipients", "Charset": "UTF-8"},
+                     "Body": {"Text": {"Data": report, "Charset": "UTF-8"}}},
+        )
+    except Exception as e:
+        print(f"news send report failed: {e}")
+    return {"statusCode": 200, "headers": {"Content-Type": "application/json"},
+            "body": json.dumps({"ok": True, "sent": sent, "failed": failed, "skipped": skipped})}
+
+
 NEWS_COMPOSER_SCRIPT = """
 <script>
 (function () {
@@ -4403,6 +4480,24 @@ NEWS_COMPOSER_SCRIPT = """
       if (j.ok) { window.location.reload(); }
       else { alert(j.error || 'Save failed'); sv.disabled = false; sv.textContent = 'Save & update preview'; }
     }).catch(function () { alert('Save failed'); sv.disabled = false; sv.textContent = 'Save & update preview'; });
+  });
+  var snd = document.getElementById('news-send');
+  if (snd) snd.addEventListener('click', function () {
+    var subj = (document.getElementById('news-subject').value || '').trim();
+    var sid = (document.getElementById('news-search').value || '').trim();
+    if (!subj) { alert('Enter a subject line first.'); return; }
+    if (!/^\\d+$/.test(sid)) { alert('Saved search ID must be a number.'); return; }
+    var ok = prompt('This emails every recipient in saved search ' + sid + '.\\nType SEND to confirm.');
+    if (ok !== 'SEND') return;
+    snd.disabled = true; snd.textContent = 'Sending… (takes a few minutes)';
+    fetch(window.location.href, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({action: 'news_send', subject: subj, search_id: sid})
+    }).then(function (r) { return r.json(); }).then(function (j) {
+      snd.textContent = j.ok ? ('Sent to ' + j.sent + ' ✓') : ('Failed: ' + (j.error || 'try again'));
+      snd.disabled = false;
+    }).catch(function () { snd.textContent = 'Failed — try again'; snd.disabled = false; });
   });
   var tst = document.getElementById('news-test');
   if (tst) tst.addEventListener('click', function () {
@@ -4450,6 +4545,15 @@ def _render_news_composer(pid):
         '<button type="button" id="news-test" style="margin-left:8px;padding:8px 18px;border:1px solid #3d5a73;'
         "background:#3d5a73;color:#ffffff;font-size:14px;font-weight:600;border-radius:6px;cursor:pointer;"
         'font-family:inherit;">Send test to cgracia@rainmakersecurities.com</button>'
+        "</div>"
+        '<div style="margin:0 0 16px 0;">'
+        '<input type="text" id="news-search" inputmode="numeric" value="19530439" '
+        'style="padding:8px 10px;border:1px solid #d1d5db;border-radius:6px;font-size:14px;'
+        'font-family:inherit;width:160px;">'
+        '<span style="font-size:13px;color:#6b7280;margin-left:8px;">Pipeline saved search ID (19530439 = Weekly Mailer Leads)</span>'
+        '<button type="button" id="news-send" style="margin-left:12px;padding:8px 18px;'
+        "border:1px solid #b91c1c;background:#b91c1c;color:#ffffff;font-size:14px;font-weight:700;"
+        'border-radius:6px;cursor:pointer;font-family:inherit;">Send to list</button>'
         "</div>"
         '<p style="color:#6b7280;font-size:13px;margin:0 0 8px 0;">Preview as recipient</p>'
         '<div style="background:#ffffff;border:1px solid #e5e7eb;border-radius:6px;">'
@@ -4708,6 +4812,8 @@ def handle_http_request(event):
             return _handle_news_save(body)
         if body.get("action") == "news_test":
             return _handle_news_test(body)
+        if body.get("action") == "news_send":
+            return _handle_news_send(body)
         if body.get("action") == "mailer_select":
             ids = {str(x) for x in (body.get("deal_ids") or [])
                    if str(x).isdigit() or str(x).startswith("c:")}
