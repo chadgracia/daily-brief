@@ -3760,8 +3760,9 @@ def _flag_scanner(s3, pid, reason, meta=None, alert=True):
 
 
 def _classify_click(s3, meta, pid):
-    """Return 'human' or 'scanner'. Deterministic signals plus machine-gun velocity
-    (4+ clicks inside 10 seconds). Velocity never fires on human-paced browsing."""
+    """Return 'human' or 'scanner'. Deterministic signals, per-person velocity
+    (4+ clicks inside 10 seconds), and per-IP fan-out (one IP touching 5+ different
+    recipients inside 15 minutes = sandbox farm)."""
     try:
         if pid in _load_scanner_set(s3):
             return "scanner"
@@ -3769,6 +3770,25 @@ def _classify_click(s3, meta, pid):
             _flag_scanner(s3, pid, "scanner user-agent", meta)
             return "scanner"
         now = datetime.now(timezone.utc).timestamp()
+        ip = str((meta or {}).get("ip") or "").strip()
+        if ip:
+            ipkey = "ip-velocity/" + ip.replace(":", "_") + ".json"
+            hits = {}
+            try:
+                hits = json.loads(s3.get_object(Bucket=S3_BUCKET, Key=ipkey)["Body"].read())
+            except Exception:
+                hits = {}
+            hits = {p: t for p, t in hits.items() if now - float(t) < 900}
+            hits[str(pid)] = now
+            try:
+                s3.put_object(Bucket=S3_BUCKET, Key=ipkey, Body=json.dumps(hits).encode("utf-8"),
+                              ContentType="application/json")
+            except Exception:
+                pass
+            if len(hits) >= 5:
+                _flag_scanner(s3, pid, "IP " + ip + " reached " + str(len(hits))
+                              + " different recipients in 15 minutes", meta, alert=(len(hits) == 5))
+                return "scanner"
         key = _VELOCITY_PREFIX + str(pid) + ".json"
         times = []
         try:
