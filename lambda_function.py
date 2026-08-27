@@ -3759,19 +3759,115 @@ def _flag_scanner(s3, pid, reason, meta=None, alert=True):
         print(f"_flag_scanner failed pid={pid}: {e}")
 
 
-def _classify_click(s3, meta, pid):
-    """Return 'human' or 'scanner'. Deterministic signals, per-person velocity
-    (4+ clicks inside 10 seconds), and per-IP fan-out (one IP touching 5+ different
-    recipients inside 15 minutes = sandbox farm)."""
+_SEND_TIMES_KEY = "mailer-send-times.json"
+_IP_CACHE_PREFIX = "ip-cache/"
+_CLICK_LOG_PREFIX = "click-log/"
+_DC_ORG_MARKERS = ("amazon", "aws", "microsoft", "azure", "google", "oracle", "digitalocean",
+                   "hetzner", "ovh", "linode", "akamai", "vultr", "proofpoint", "mimecast",
+                   "barracuda", "zscaler", "palo alto", "fortinet", "cisco", "sophos",
+                   "trend micro", "broadcom", "symantec", "cloudflare", "fastly", "hosting",
+                   "data center", "datacenter", "cloud")
+
+
+def _load_send_times(s3):
     try:
-        if pid in _load_scanner_set(s3):
-            return "scanner"
-        if meta is not None and _ua_is_automated((meta or {}).get("ua", "")):
-            _flag_scanner(s3, pid, "scanner user-agent", meta)
-            return "scanner"
+        obj = s3.get_object(Bucket=S3_BUCKET, Key=_SEND_TIMES_KEY)
+        return json.loads(obj["Body"].read()) or {}
+    except Exception:
+        return {}
+
+
+def _merge_send_times(s3, new_times):
+    if not new_times:
+        return
+    try:
+        data = _load_send_times(s3)
+        cutoff = datetime.now(timezone.utc).timestamp() - 3 * 86400
+        data = {p: t for p, t in data.items() if float(t) > cutoff}
+        data.update(new_times)
+        s3.put_object(Bucket=S3_BUCKET, Key=_SEND_TIMES_KEY,
+                      Body=json.dumps(data).encode("utf-8"), ContentType="application/json")
+    except Exception as e:
+        print(f"send-times merge failed: {e}")
+
+
+def _ip_is_datacenter(s3, ip):
+    """Return (is_dc, org). Uses ip-api.com with a 7-day per-IP cache in S3.
+    Unknown/failed lookups return (False, '') — never blocks on lookup failure."""
+    ip = str(ip or "").strip()
+    if not ip:
+        return False, ""
+    ckey = _IP_CACHE_PREFIX + ip.replace(":", "_") + ".json"
+    now = datetime.now(timezone.utc).timestamp()
+    try:
+        c = json.loads(s3.get_object(Bucket=S3_BUCKET, Key=ckey)["Body"].read())
+        if now - float(c.get("at", 0)) < 7 * 86400:
+            return bool(c.get("dc")), str(c.get("org") or "")
+    except Exception:
+        pass
+    dc, org = False, ""
+    try:
+        req = urllib.request.Request(
+            "http://ip-api.com/json/" + ip + "?fields=status,hosting,org,as,isp",
+            headers={"User-Agent": "gracia-mailer/1.0"})
+        with urllib.request.urlopen(req, timeout=3) as r:
+            j = json.loads(r.read().decode("utf-8"))
+        if j.get("status") == "success":
+            org = " | ".join(str(j.get(k) or "") for k in ("org", "as", "isp"))
+            low = org.lower()
+            dc = bool(j.get("hosting")) or any(m in low for m in _DC_ORG_MARKERS)
+            try:
+                s3.put_object(Bucket=S3_BUCKET, Key=ckey,
+                              Body=json.dumps({"at": now, "dc": dc, "org": org}).encode("utf-8"),
+                              ContentType="application/json")
+            except Exception:
+                pass
+    except Exception as e:
+        print(f"ip lookup failed {ip}: {e}")
+    return dc, org
+
+
+def _log_click(s3, pid, did, meta, verdict, reason, secs_since_send, org):
+    try:
+        now = datetime.now(timezone.utc)
+        key = (_CLICK_LOG_PREFIX + now.strftime("%Y-%m-%d") + "/"
+               + now.strftime("%H%M%S%f") + "-" + str(pid) + ".json")
+        s3.put_object(Bucket=S3_BUCKET, Key=key, ContentType="application/json",
+                      Body=json.dumps({"ts": now.isoformat(), "pid": pid, "did": did,
+                                       "ip": (meta or {}).get("ip", ""), "ua": (meta or {}).get("ua", ""),
+                                       "secs_since_send": secs_since_send, "verdict": verdict,
+                                       "reason": reason, "org": org}).encode("utf-8"))
+    except Exception as e:
+        print(f"click log failed pid={pid}: {e}")
+
+
+def _classify_click(s3, meta, pid, did=None):
+    """Return 'human' or 'scanner'. Layers, in order: already-flagged, scanner UA,
+    data-center / security-vendor IP, time-to-click (<20s after this recipient's own
+    delivery), per-IP fan-out (5+ recipients in 15 min), per-person velocity
+    (4+ clicks in 10s). Every click is logged to S3 with its verdict."""
+    verdict, reason, org, secs = "human", "", "", None
+    try:
         now = datetime.now(timezone.utc).timestamp()
         ip = str((meta or {}).get("ip") or "").strip()
-        if ip:
+        ua = (meta or {}).get("ua", "")
+        st = _load_send_times(s3).get(str(pid))
+        if st is not None:
+            secs = round(now - float(st), 1)
+        if pid in _load_scanner_set(s3):
+            verdict, reason = "scanner", "previously flagged today"
+        elif meta is not None and _ua_is_automated(ua):
+            verdict, reason = "scanner", "scanner user-agent"
+            _flag_scanner(s3, pid, reason, meta, alert=False)
+        else:
+            dc, org = _ip_is_datacenter(s3, ip)
+            if dc:
+                verdict, reason = "scanner", "data-center IP (" + org + ")"
+                _flag_scanner(s3, pid, reason, meta, alert=False)
+            elif secs is not None and 0 <= secs < 20:
+                verdict, reason = "scanner", "clicked " + str(secs) + "s after delivery"
+                _flag_scanner(s3, pid, reason, meta, alert=False)
+        if verdict == "human" and ip:
             ipkey = "ip-velocity/" + ip.replace(":", "_") + ".json"
             hits = {}
             try:
@@ -3786,29 +3882,29 @@ def _classify_click(s3, meta, pid):
             except Exception:
                 pass
             if len(hits) >= 5:
-                _flag_scanner(s3, pid, "IP " + ip + " reached " + str(len(hits))
-                              + " different recipients in 15 minutes", meta, alert=(len(hits) == 5))
-                return "scanner"
-        key = _VELOCITY_PREFIX + str(pid) + ".json"
-        times = []
-        try:
-            vobj = s3.get_object(Bucket=S3_BUCKET, Key=key)
-            times = json.loads(vobj["Body"].read())
-        except Exception:
-            pass
-        times = [t for t in times if now - t < 600][-19:] + [now]
-        try:
-            s3.put_object(Bucket=S3_BUCKET, Key=key, Body=json.dumps(times).encode("utf-8"),
-                          ContentType="application/json")
-        except Exception:
-            pass
-        recent = [t for t in times if now - t <= 10]
-        if len(recent) >= 4:
-            _flag_scanner(s3, pid, str(len(recent)) + " clicks in 10 seconds", meta)
-            return "scanner"
+                verdict, reason = "scanner", "IP " + ip + " reached " + str(len(hits)) + " recipients in 15 min"
+                _flag_scanner(s3, pid, reason, meta, alert=(len(hits) == 5))
+        if verdict == "human":
+            key = _VELOCITY_PREFIX + str(pid) + ".json"
+            times = []
+            try:
+                times = json.loads(s3.get_object(Bucket=S3_BUCKET, Key=key)["Body"].read())
+            except Exception:
+                pass
+            times = [t for t in times if now - t < 600][-19:] + [now]
+            try:
+                s3.put_object(Bucket=S3_BUCKET, Key=key, Body=json.dumps(times).encode("utf-8"),
+                              ContentType="application/json")
+            except Exception:
+                pass
+            recent = [t for t in times if now - t <= 10]
+            if len(recent) >= 4:
+                verdict, reason = "scanner", str(len(recent)) + " clicks in 10 seconds"
+                _flag_scanner(s3, pid, reason, meta)
     except Exception as e:
         print(f"_classify_click failed pid={pid}: {e}")
-    return "human"
+    _log_click(s3, pid, did, meta, verdict, reason, secs, org)
+    return verdict
 
 
 def _handle_mailer_honeypot(params):
@@ -4034,7 +4130,7 @@ def _handle_mailer_click(params, method="GET", meta=None):
                 "body": json.dumps({"ok": True})}
     try:
         s3 = boto3.client("s3", region_name=S3_REGION)
-        cls = _classify_click(s3, meta, pid)
+        cls = _classify_click(s3, meta, pid, did=did)
         deals = (_fetch_json(s3, "deals.json") or {}).get("deals", []) or []
         deal = next((d for d in deals if _normalize_id(d.get("id")) == did), None)
         if not deal:
@@ -4439,6 +4535,7 @@ def _handle_news_send(body):
         pass
     ses = boto3.client("ses", region_name=SES_REGION)
     sent, failed, skipped = 0, 0, 0
+    new_times = {}
 
     def _flush():
         try:
@@ -4447,6 +4544,8 @@ def _handle_news_send(body):
                           ContentType="application/json")
         except Exception as e:
             print(f"news send progress write failed: {e}")
+        _merge_send_times(s3, new_times)
+        new_times.clear()
 
     for first, email, pid in rows:
         key = email.lower()
@@ -4467,6 +4566,7 @@ def _handle_news_send(body):
                          "Body": {"Html": {"Data": html, "Charset": "UTF-8"}}},
             )
             already.add(key)
+            new_times[str(npid)] = datetime.now(timezone.utc).timestamp()
             sent += 1
         except Exception as e:
             failed += 1
@@ -4664,6 +4764,7 @@ def _handle_mailer_send(body):
         pass
     ses = boto3.client("ses", region_name=SES_REGION)
     sent, failed, skipped = 0, 0, 0
+    new_times = {}
 
     def _flush():
         try:
@@ -4672,6 +4773,8 @@ def _handle_mailer_send(body):
                           ContentType="application/json")
         except Exception as e:
             print(f"mailer send progress write failed: {e}")
+        _merge_send_times(s3, new_times)
+        new_times.clear()
 
     for first, email, pid in rows:
         key = email.lower()
@@ -4692,6 +4795,7 @@ def _handle_mailer_send(body):
                          "Body": {"Html": {"Data": html, "Charset": "UTF-8"}}},
             )
             already.add(key)
+            new_times[str(npid)] = datetime.now(timezone.utc).timestamp()
             sent += 1
         except Exception as e:
             failed += 1
@@ -4735,6 +4839,7 @@ def _handle_mailer_test(body):
         Message={"Subject": {"Data": "[TEST] Live orders this week — Gracia Group", "Charset": "UTF-8"},
                  "Body": {"Html": {"Data": email_html, "Charset": "UTF-8"}}},
     )
+    _merge_send_times(s3, {str(pid): datetime.now(timezone.utc).timestamp()})
     return {"statusCode": 200,
             "headers": {"Content-Type": "application/json"},
             "body": json.dumps({"ok": True, "sells": len(sells), "buys": len(buys)})}
