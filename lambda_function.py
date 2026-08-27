@@ -4068,7 +4068,8 @@ def _handle_mailer_click(params, method="GET", meta=None):
                                    else f"Buy Interest write FAILED ({res.get('status')})")
             else:
                 interest_status = "Buy Interest NOT added — no security entry for '" + co_name + "' in agent-data.json"
-        note = ("Clicked " + co_name + " " + side.lower() + " order via weekly newsletter "
+        src_label = "news mailer" if str(params.get("src") or "") == "news" else "weekly newsletter"
+        note = ("Clicked " + co_name + " " + side.lower() + " order via " + src_label + " "
                 + today + " — " + interest_status
                 + (" (automated scan — not counted)" if cls != "human" else ""))
         call_pipeline_api("POST", "/notes.json",
@@ -4218,6 +4219,240 @@ MAILER_COMPOSER_SCRIPT = """
 })();
 </script>
 """
+
+NEWS_MAILER_KEY = "news-mailer.json"
+
+NEWS_MAILER_DEFAULT = {
+    "intro": "Ten opportunities worth a look this week, each with a recent news item and a live sell order in our book. Click any company for full details. If you are looking for something that isn't listed, just let me know.",
+    "items": [
+        {"company": "D-Orbit", "headline": "$10M Sell (SPV)", "deal_id": 55447563,
+         "paras": ["D-Orbit is the European leader in space logistics and orbital transportation, with 24 completed missions and 250+ payloads deployed for customers including ESA, Airbus, Lockheed Martin, Eutelsat, and Planet.",
+                   "Recent news: The company closed a $53M Series D in January led by Azimut Group to fund acquisitions and expand its in-space computing infrastructure, and holds a €119M ESA contract (RISE) for Europe's first commercial in-orbit servicing mission."],
+         "sources": "SatNews 1/22/26; ESA/Eutelsat RISE announcements"},
+        {"company": "Panthalassa", "headline": "$500K Sell (SPV)", "deal_id": 55407726,
+         "paras": ["Panthalassa builds ocean-based energy platforms that generate clean power offshore at scale, targeting the exploding energy demand from AI compute.",
+                   "Catalyst: Reportedly targeting a $225M raise at a ~$2B valuation, and Korean tech giant Naver was reported this month as a backer."],
+         "sources": "Biztoc/Naver 8/13/26"},
+        {"company": "Together AI", "headline": "$5M Sell (SPV) — common shares at last-round price ($8.3B)", "deal_id": 55207276,
+         "paras": ["Together AI is the AI \"neocloud\" that lets enterprises run open-source models like DeepSeek and Kimi at a fraction of the cost of closed systems, with annual bookings past $1.15B.",
+                   "Recent news: In July the company raised an $800M Series C at an $8.3B post-money valuation led by Aramco Ventures, with Nvidia, Vista, and General Catalyst participating — up from $3.3B sixteen months earlier.",
+                   "Data room available. 3(c)(7) — Qualified Purchasers only."],
+         "sources": "TechCrunch, BusinessWire 7/1/26"},
+        {"company": "Erebor", "headline": "$50M Sell (SPV) — Palmer Luckey's bank, reportedly raising at $8B+", "deal_id": 55444851,
+         "paras": ["Erebor is the national-chartered digital bank founded by Palmer Luckey with backing from Peter Thiel and Joe Lonsdale, serving crypto, AI, defense, and hard-tech companies.",
+                   "Catalyst: Per the Financial Times, Erebor is in advanced talks to raise ~$1.5B at an $8B+ pre-money valuation — roughly double its December mark — with deposits up from $1.1B in March to $4.6B by end of July and annualized recurring revenue past $100M."],
+         "sources": "FT via Axios/Bloomberg/Benzinga, 8/10/26"},
+        {"company": "OpenEvidence", "headline": "$20M Sell (SPV) — at $12B round valuation (AI for doctors)", "deal_id": 55411913,
+         "paras": ["We have an allocation in OpenEvidence, the \"ChatGPT for doctors\" priced at its last round ($12B, January, led by Thrive and DST).",
+                   "Since that round: reported annualized revenue has roughly tripled to ~$300M. OpenEvidence is the most widely used AI platform among US physicians — a citation-linked medical search engine reportedly used by over 40% of American doctors.",
+                   "Background (CNBC): https://www.cnbc.com/2026/01/21/openevidence-chatgpt-for-doctors-doubles-valuation-to-12-billion.html"],
+         "sources": "CNBC, STAT, Crunchbase 1/21/26"},
+        {"company": "Redwood Materials", "headline": "$10M Sell — JB Straubel's battery platform rides the AI power boom", "deal_id": 55404686,
+         "paras": ["Redwood Materials, founded by Tesla co-founder JB Straubel, runs a closed-loop battery recycling and materials platform recovering lithium, cobalt, and nickel at scale.",
+                   "Recent news: Its new energy-storage unit has become the company's fastest-growing business on AI data center demand, with a GM full-battery-lifecycle partnership signed in June and a $425M Series E (with Google participating) closed in January at a $6B+ valuation."],
+         "sources": "TechCrunch 2/19/26; Sacra; Redwood/GM 6/9/26"},
+        {"company": "Helsing", "headline": "$5M Sell (2-Layer SPV) — Europe's $18B defense AI champion", "deal_id": 55392730,
+         "paras": ["Helsing is Europe's leading AI defense company, building strike drones, electronic warfare systems, and the AI backbone for Europe's next-generation fighter program.",
+                   "Recent news: In July the company raised $1.8B at an $18B valuation — among the largest private defense raises in European history — and this month Japan's Ground Self-Defense Force began field-testing Helsing drones in a partnership brokered by Rakuten."],
+         "sources": "CNBC 7/13/26; Bloomberg/Japan Times 8/17/26"},
+        {"company": "Senra Systems", "headline": "Sell (SPV) — automating the wire harness industry", "deal_id": 55411921,
+         "paras": ["Senra Systems is modernizing wire harness manufacturing — a critical, largely manual supply-chain chokepoint for aerospace and defense hardware.",
+                   "Catalyst: Closed a $65M round in July 2026."],
+         "sources": ""},
+        {"company": "1X (Norwegian HoldCo)", "headline": "$4M Sell (Direct Transfer) — humanoid robots now in production", "deal_id": 54630298,
+         "paras": ["1X is the OpenAI- and Nvidia-backed humanoid robotics company whose NEO home robot took 10,000 pre-orders in five days and entered full-scale production this spring at its Hayward, California factory.",
+                   "Catalyst: Reportedly in talks to raise up to $1B at a $10B+ valuation, with first customer deliveries targeted before end of 2026."],
+         "sources": "Forbes 4/30/26 and 6/4/26; Sifted"},
+        {"company": "Blackbox AI", "headline": "$5M Sell — the inference layer behind 300+ models", "deal_id": 55411922,
+         "paras": ["Blackbox AI (blackbox.ai) is a San Francisco-based AI infrastructure company whose platform routes 300+ open and closed models through a single encrypted endpoint, alongside its widely used AI coding tools.",
+                   "Recent news: The company is a Microsoft AI partner for enterprise deployments on Azure, and in July 2026 was independently verified by Artificial Analysis as the #1 provider of Nvidia's Nemotron 3 Ultra model — 30% faster than the next provider at 2.7x lower cost."],
+         "sources": ""},
+    ],
+}
+
+
+def _load_news_mailer(s3):
+    try:
+        obj = s3.get_object(Bucket=S3_BUCKET, Key=NEWS_MAILER_KEY)
+        data = json.loads(obj["Body"].read())
+        if isinstance(data, dict) and isinstance(data.get("items"), list):
+            return data
+    except Exception:
+        pass
+    return NEWS_MAILER_DEFAULT
+
+
+def _save_news_mailer(data):
+    s3 = boto3.client("s3", region_name=S3_REGION)
+    s3.put_object(Bucket=S3_BUCKET, Key=NEWS_MAILER_KEY,
+                  Body=json.dumps(data, ensure_ascii=False, indent=2).encode("utf-8"),
+                  ContentType="application/json")
+
+
+def _news_click_url(person_id, deal_id):
+    return _mailer_click_url(person_id, deal_id) + "&src=news"
+
+
+def _news_para_html(text):
+    t = escape(str(text or ""))
+    t = re.sub(r"(https?://[^\s<]+)",
+               r'<a href="\1" style="color:#1d4ed8;">\1</a>', t)
+    return '<p style="font-size:14px;line-height:1.5;margin:0 0 10px 0;">' + t + "</p>"
+
+
+def _render_news_email(first_name, person_id, content):
+    greet = "Hello " + escape(first_name) + "," if first_name else "Hello,"
+    daily_url = (MAILER_BASE_URL + "?view=daily&amp;pid=" + str(person_id)
+                 + "&amp;t=" + _mailer_token(person_id, "daily"))
+    out = [
+        '<div style="font-family:-apple-system,BlinkMacSystemFont,\'Segoe UI\',Roboto,'
+        'Helvetica,Arial,sans-serif;max-width:680px;margin:0 auto;padding:24px;color:#1f2937;">',
+        '<a href="' + MAILER_BASE_URL + '?view=click&pid=' + str(person_id)
+        + '&hp=1&t=' + _mailer_token(person_id, "hp") + '" '
+        'style="display:none;visibility:hidden;color:#ffffff;font-size:1px;">&#8203;</a>',
+        '<h1 style="font-size:18px;margin:0 0 18px 0;color:#111827;">Pre-IPO Secondary '
+        "Opportunities from the Gracia Group</h1>",
+        '<div style="border:1px solid #cdc9c0;border-left:4px solid #3d5a73;background:#f7f6f3;'
+        'border-radius:6px;padding:16px 20px;margin:0 0 22px 0;">',
+        '<p style="font-size:11px;letter-spacing:.08em;text-transform:uppercase;'
+        'color:#3d5a73;font-weight:700;margin:0 0 6px 0;">New &mdash; Daily Highlight</p>',
+        '<p style="font-size:14px;margin:0 0 12px 0;">One trade that stands out, in your inbox '
+        "each day: a recent news item, a distressed seller, limited supply &mdash; or a deal that "
+        "for various reasons is not published in our main books. Be among the first to see these "
+        "opportunities. Stop any time.</p>",
+        '<a href="' + daily_url + '" style="display:inline-block;background:#3d5a73;color:#ffffff;'
+        'font-size:14px;font-weight:600;padding:10px 18px;border-radius:6px;text-decoration:none;">'
+        "Get the Daily Highlight</a></div>",
+        '<p style="font-size:15px;margin:0 0 12px 0;">' + greet + "</p>",
+        _news_para_html(content.get("intro") or ""),
+    ]
+    for i, it in enumerate(content.get("items") or [], start=1):
+        did = _normalize_id(it.get("deal_id"))
+        co = escape(str(it.get("company") or ""))
+        head = escape(str(it.get("headline") or ""))
+        link = _news_click_url(person_id, did) if did else "https://trades.graciagroup.com/"
+        out.append('<hr style="border:none;border-top:1px solid #e5e7eb;margin:18px 0;">')
+        out.append('<p style="font-size:16px;font-weight:700;margin:0 0 8px 0;color:#111827;">'
+                   + str(i) + '. <a href="' + link + '" style="color:#111827;text-decoration:none;">'
+                   + co + "</a>"
+                   + (' <span style="font-weight:400;color:#4b5563;">&mdash; ' + head + "</span>" if head else "")
+                   + "</p>")
+        for p in it.get("paras") or []:
+            out.append(_news_para_html(p))
+        out.append('<p style="margin:0 0 6px 0;"><a href="' + link + '" style="display:inline-block;'
+                   'background:#3d5a73;color:#ffffff;font-size:13px;font-weight:600;padding:7px 14px;'
+                   'border-radius:6px;text-decoration:none;">Details and bidding &rarr;</a></p>')
+        src = str(it.get("sources") or "").strip()
+        if src:
+            out.append('<p style="font-size:12px;color:#6b7280;margin:0;">News sources: ' + escape(src) + "</p>")
+    out.append(MAILER_SIGNATURE_HTML)
+    out.append("</div>")
+    return "".join(out)
+
+
+def _handle_news_save(body):
+    raw = str(body.get("content") or "")
+    try:
+        data = json.loads(raw)
+        assert isinstance(data, dict) and isinstance(data.get("items"), list)
+        for it in data["items"]:
+            assert isinstance(it, dict) and str(it.get("deal_id") or "").isdigit()
+    except Exception as e:
+        return {"statusCode": 400, "headers": {"Content-Type": "application/json"},
+                "body": json.dumps({"ok": False, "error": "Invalid JSON: " + str(e)})}
+    _save_news_mailer(data)
+    return {"statusCode": 200, "headers": {"Content-Type": "application/json"},
+            "body": json.dumps({"ok": True, "count": len(data["items"])})}
+
+
+def _handle_news_test(body):
+    s3 = boto3.client("s3", region_name=S3_REGION)
+    content = _load_news_mailer(s3)
+    subject = str(body.get("subject") or "").strip() or "TEST — news mailer"
+    html = _render_news_email("Chad", MAILER_PREVIEW_PID, content)
+    boto3.client("ses", region_name=SES_REGION).send_email(
+        Source=MAILER_FROM,
+        Destination={"ToAddresses": ["cgracia@rainmakersecurities.com"]},
+        ReplyToAddresses=["cgracia@rainmakersecurities.com"],
+        Message={"Subject": {"Data": "[TEST] " + subject, "Charset": "UTF-8"},
+                 "Body": {"Html": {"Data": html, "Charset": "UTF-8"}}},
+    )
+    return {"statusCode": 200, "headers": {"Content-Type": "application/json"},
+            "body": json.dumps({"ok": True})}
+
+
+NEWS_COMPOSER_SCRIPT = """
+<script>
+(function () {
+  var sv = document.getElementById('news-save');
+  var ta = document.getElementById('news-json');
+  if (sv) sv.addEventListener('click', function () {
+    sv.disabled = true; sv.textContent = 'Saving…';
+    fetch(window.location.href, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({action: 'news_save', content: ta.value})
+    }).then(function (r) { return r.json(); }).then(function (j) {
+      if (j.ok) { window.location.reload(); }
+      else { alert(j.error || 'Save failed'); sv.disabled = false; sv.textContent = 'Save & update preview'; }
+    }).catch(function () { alert('Save failed'); sv.disabled = false; sv.textContent = 'Save & update preview'; });
+  });
+  var tst = document.getElementById('news-test');
+  if (tst) tst.addEventListener('click', function () {
+    var subj = (document.getElementById('news-subject').value || '').trim();
+    tst.disabled = true; tst.textContent = 'Sending…';
+    fetch(window.location.href, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({action: 'news_test', subject: subj})
+    }).then(function (r) { return r.json(); }).then(function (j) {
+      tst.textContent = j.ok ? 'Test sent ✓' : 'Failed — try again';
+      tst.disabled = false;
+    }).catch(function () { tst.textContent = 'Failed — try again'; tst.disabled = false; });
+  });
+})();
+</script>
+"""
+
+
+def _render_news_composer(pid):
+    s3 = boto3.client("s3", region_name=S3_REGION)
+    content = _load_news_mailer(s3)
+    email_html = _render_news_email("Chad", pid, content)
+    raw = json.dumps(content, ensure_ascii=False, indent=2)
+    html = (
+        '<!doctype html><html lang="en"><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width, initial-scale=1">'
+        "<title>News mailer</title></head>"
+        '<body style="margin:0;background:#f3f4f6;font-family:-apple-system,BlinkMacSystemFont,'
+        "'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#1f2937;\">"
+        '<div style="max-width:960px;margin:0 auto;padding:24px;">'
+        '<h1 style="font-size:20px;margin:0 0 4px 0;">News mailer</h1>'
+        '<p style="color:#6b7280;font-size:13px;margin:0 0 12px 0;">Edit the content JSON, save, and the '
+        "preview updates. Step 1: nothing is sent to the list from this page.</p>"
+        '<textarea id="news-json" spellcheck="false" style="width:100%;height:320px;padding:10px;'
+        "border:1px solid #d1d5db;border-radius:6px;font-family:Menlo,Consolas,monospace;font-size:12px;"
+        'box-sizing:border-box;">' + escape(raw) + "</textarea>"
+        '<div style="margin:10px 0 16px 0;">'
+        '<button type="button" id="news-save" style="padding:8px 18px;border:1px solid #d1d5db;'
+        "background:#ffffff;color:#374151;font-size:14px;font-weight:500;border-radius:6px;"
+        'cursor:pointer;font-family:inherit;">Save &amp; update preview</button>'
+        '<input type="text" id="news-subject" value="Recent news and deal updates for ten pre-IPO opportunities" '
+        'style="margin-left:10px;padding:8px 10px;border:1px solid #d1d5db;border-radius:6px;font-size:14px;'
+        'font-family:inherit;width:420px;max-width:100%;">'
+        '<button type="button" id="news-test" style="margin-left:8px;padding:8px 18px;border:1px solid #3d5a73;'
+        "background:#3d5a73;color:#ffffff;font-size:14px;font-weight:600;border-radius:6px;cursor:pointer;"
+        'font-family:inherit;">Send test to cgracia@rainmakersecurities.com</button>'
+        "</div>"
+        '<p style="color:#6b7280;font-size:13px;margin:0 0 8px 0;">Preview as recipient</p>'
+        '<div style="background:#ffffff;border:1px solid #e5e7eb;border-radius:6px;">'
+        + email_html + "</div></div>"
+        + NEWS_COMPOSER_SCRIPT
+        + "</body></html>"
+    )
+    return {"statusCode": 200,
+            "headers": {"Content-Type": "text/html; charset=utf-8"},
+            "body": html}
 
 
 MAILER_FROM = "Chad Gracia <cgracia@graciagroup.com>"
@@ -4462,6 +4697,10 @@ def handle_http_request(event):
             return _handle_mailer_test(body)
         if body.get("action") == "mailer_send":
             return _handle_mailer_send(body)
+        if body.get("action") == "news_save":
+            return _handle_news_save(body)
+        if body.get("action") == "news_test":
+            return _handle_news_test(body)
         if body.get("action") == "mailer_select":
             ids = {str(x) for x in (body.get("deal_ids") or [])
                    if str(x).isdigit() or str(x).startswith("c:")}
@@ -4510,6 +4749,11 @@ def handle_http_request(event):
             return {"statusCode": 500,
                     "headers": {"Content-Type": "text/plain"},
                     "body": f"Seed failed: {e}"}
+
+    if params.get("view") == "news":
+        pid_raw = str(params.get("pid") or "").strip()
+        pid = int(pid_raw) if pid_raw.isdigit() else MAILER_PREVIEW_PID
+        return _render_news_composer(pid)
 
     if params.get("view") == "mailer" and not params.get("list"):
         pid_raw = str(params.get("pid") or "").strip()
