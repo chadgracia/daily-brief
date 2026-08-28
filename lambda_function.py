@@ -3762,11 +3762,12 @@ def _flag_scanner(s3, pid, reason, meta=None, alert=True):
 _SEND_TIMES_KEY = "mailer-send-times.json"
 _IP_CACHE_PREFIX = "ip-cache/"
 _CLICK_LOG_PREFIX = "click-log/"
-_DC_ORG_MARKERS = ("amazon", "aws", "microsoft", "azure", "google", "oracle", "digitalocean",
+_DC_ORG_MARKERS = ("amazon", "aws", "microsoft", "azure", "google", "oracle cloud", "digitalocean",
                    "hetzner", "ovh", "linode", "akamai", "vultr", "proofpoint", "mimecast",
-                   "barracuda", "zscaler", "palo alto", "fortinet", "cisco", "sophos",
-                   "trend micro", "broadcom", "symantec", "cloudflare", "fastly", "hosting",
-                   "data center", "datacenter", "cloud")
+                   "barracuda", "zscaler", "palo alto", "fortinet", "sophos", "trend micro",
+                   "broadcom", "symantec", "cloudflare", "fastly", "hosting", "datacenter",
+                   "data center", "servers", "vps")
+_MOBILE_UA_MARKERS = ("iphone", "ipad", "android", "mobile")
 
 
 def _load_send_times(s3):
@@ -3791,39 +3792,47 @@ def _merge_send_times(s3, new_times):
         print(f"send-times merge failed: {e}")
 
 
-def _ip_is_datacenter(s3, ip):
-    """Return (is_dc, org). Uses ip-api.com with a 7-day per-IP cache in S3.
-    Unknown/failed lookups return (False, '') — never blocks on lookup failure."""
+def _ip_is_datacenter(s3, ip, ua=""):
+    """Return (is_dc, org). Data-center verdict requires either a known cloud/security
+    vendor in the network name, or the lookup's hosting flag combined with a desktop
+    browser. Hosting flag alone is NOT enough — residential ISPs in some regions are
+    mislabelled as hosting. Unknown/failed lookups return (False, '')."""
     ip = str(ip or "").strip()
     if not ip:
         return False, ""
     ckey = _IP_CACHE_PREFIX + ip.replace(":", "_") + ".json"
     now = datetime.now(timezone.utc).timestamp()
+    kw, host, org = False, False, ""
+    cached = False
     try:
         c = json.loads(s3.get_object(Bucket=S3_BUCKET, Key=ckey)["Body"].read())
-        if now - float(c.get("at", 0)) < 7 * 86400:
-            return bool(c.get("dc")), str(c.get("org") or "")
+        if "host" in c and now - float(c.get("at", 0)) < 7 * 86400:
+            kw, host, org = bool(c.get("kw")), bool(c.get("host")), str(c.get("org") or "")
+            cached = True
     except Exception:
         pass
-    dc, org = False, ""
-    try:
-        req = urllib.request.Request(
-            "http://ip-api.com/json/" + ip + "?fields=status,hosting,org,as,isp",
-            headers={"User-Agent": "gracia-mailer/1.0"})
-        with urllib.request.urlopen(req, timeout=3) as r:
-            j = json.loads(r.read().decode("utf-8"))
-        if j.get("status") == "success":
-            org = " | ".join(str(j.get(k) or "") for k in ("org", "as", "isp"))
-            low = org.lower()
-            dc = bool(j.get("hosting")) or any(m in low for m in _DC_ORG_MARKERS)
-            try:
-                s3.put_object(Bucket=S3_BUCKET, Key=ckey,
-                              Body=json.dumps({"at": now, "dc": dc, "org": org}).encode("utf-8"),
-                              ContentType="application/json")
-            except Exception:
-                pass
-    except Exception as e:
-        print(f"ip lookup failed {ip}: {e}")
+    if not cached:
+        try:
+            req = urllib.request.Request(
+                "http://ip-api.com/json/" + ip + "?fields=status,hosting,org,as,isp",
+                headers={"User-Agent": "gracia-mailer/1.0"})
+            with urllib.request.urlopen(req, timeout=3) as r:
+                j = json.loads(r.read().decode("utf-8"))
+            if j.get("status") == "success":
+                org = " | ".join(str(j.get(k) or "") for k in ("org", "as", "isp"))
+                low = org.lower()
+                kw = any(m in low for m in _DC_ORG_MARKERS)
+                host = bool(j.get("hosting"))
+                try:
+                    s3.put_object(Bucket=S3_BUCKET, Key=ckey,
+                                  Body=json.dumps({"at": now, "kw": kw, "host": host, "org": org}).encode("utf-8"),
+                                  ContentType="application/json")
+                except Exception:
+                    pass
+        except Exception as e:
+            print(f"ip lookup failed {ip}: {e}")
+    mobile = any(m in (ua or "").lower() for m in _MOBILE_UA_MARKERS)
+    dc = kw or (host and not mobile)
     return dc, org
 
 
@@ -3860,7 +3869,7 @@ def _classify_click(s3, meta, pid, did=None):
             verdict, reason = "scanner", "scanner user-agent"
             _flag_scanner(s3, pid, reason, meta, alert=False)
         else:
-            dc, org = _ip_is_datacenter(s3, ip)
+            dc, org = _ip_is_datacenter(s3, ip, ua)
             if dc:
                 verdict, reason = "scanner", "data-center IP (" + org + ")"
                 _flag_scanner(s3, pid, reason, meta, alert=False)
@@ -4996,6 +5005,28 @@ def handle_http_request(event):
             return {"statusCode": 500,
                     "headers": {"Content-Type": "text/plain"},
                     "body": f"Seed failed: {e}"}
+
+    if params.get("view") == "unflag":
+        pid_raw = str(params.get("pid") or "").strip()
+        if not pid_raw.isdigit():
+            return {"statusCode": 400, "body": "pid required"}
+        _s3u = boto3.client("s3", region_name=S3_REGION)
+        try:
+            _obj = _s3u.get_object(Bucket=S3_BUCKET, Key=_SCANNER_SET_KEY)
+            _data = json.loads(_obj["Body"].read())
+        except Exception:
+            _data = {}
+        _day = _scanner_day_key()
+        _pids = [p for p in _data.get(_day, []) if str(p) != pid_raw]
+        _data[_day] = _pids
+        _s3u.put_object(Bucket=S3_BUCKET, Key=_SCANNER_SET_KEY,
+                        Body=json.dumps(_data).encode("utf-8"), ContentType="application/json")
+        try:
+            _s3u.delete_object(Bucket=S3_BUCKET, Key="ip-velocity/" + str(params.get("ip") or "").replace(":", "_") + ".json")
+        except Exception:
+            pass
+        return {"statusCode": 200, "headers": {"Content-Type": "text/plain; charset=utf-8"},
+                "body": "Person " + pid_raw + " removed from today's scanner list. Remaining flagged today: " + str(len(_pids))}
 
     if params.get("view") == "news":
         pid_raw = str(params.get("pid") or "").strip()
