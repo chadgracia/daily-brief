@@ -4323,13 +4323,15 @@ MAILER_COMPOSER_SCRIPT = """
     var sid = (new URLSearchParams(window.location.search).get('search') || '').trim();
     if (!/^[0-9]+$/.test(sid)) sid = '';
     if (!subj) { alert('Enter a subject line first.'); return; }
-    var ok = prompt('This emails ' + (sid ? 'saved search ' + sid : 'the entire Weekly Mailer Leads list') + '.\\nType SEND to confirm.');
+    var lim = (document.getElementById('send-limit').value || '').trim();
+    if (lim && !/^[0-9]+$/.test(lim)) { alert('Limit must be a whole number, or blank for all.'); return; }
+    var ok = prompt('This emails ' + (lim ? 'the FIRST ' + lim + ' people of ' : '') + (sid ? 'saved search ' + sid : 'the entire Weekly Mailer Leads list') + '.\\nType SEND to confirm.');
     if (ok !== 'SEND') return;
     snd.disabled = true; snd.textContent = 'Sending… (takes a few minutes)';
     fetch(window.location.href, {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({action: 'mailer_send', subject: subj, search_id: sid})
+      body: JSON.stringify({action: 'mailer_send', subject: subj, search_id: sid, limit: lim})
     }).then(function (r) { return r.json(); }).then(function (j) {
       snd.textContent = j.ok ? ('Sent to ' + j.sent + ' ✓') : ('Failed: ' + (j.error || 'try again'));
       snd.disabled = false;
@@ -4768,6 +4770,9 @@ def _handle_mailer_send(body):
         return {"statusCode": 400, "headers": {"Content-Type": "application/json"},
                 "body": json.dumps({"ok": False, "error": "nothing selected"})}
     rows, missing = _fetch_mailer_rows(search_id)
+    lim_raw = str(body.get("limit") or "").strip()
+    if lim_raw.isdigit() and int(lim_raw) > 0:
+        rows = rows[:int(lim_raw)]
     progress_key = "mailer-send-" + datetime.now(timezone.utc).strftime("%Y-%m-%d") + ".json"
     already = set()
     try:
@@ -4892,6 +4897,9 @@ def _render_mailer_composer(pid):
         '<input type="text" id="send-subject" value="Weekly Pre-IPO secondary transactions: " '
         'style="padding:8px 10px;border:1px solid #d1d5db;border-radius:6px;font-size:14px;'
         'font-family:inherit;width:420px;max-width:100%;">'
+        '<input type="text" id="send-limit" inputmode="numeric" placeholder="Limit (blank = all)" '
+        'style="margin-left:8px;padding:8px 10px;border:1px solid #d1d5db;border-radius:6px;'
+        'font-size:14px;font-family:inherit;width:140px;">'
         '<button type="button" id="send-all" style="margin-left:8px;padding:8px 18px;'
         "border:1px solid #b91c1c;background:#b91c1c;color:#ffffff;font-size:14px;font-weight:700;"
         'border-radius:6px;cursor:pointer;font-family:inherit;">Send to all recipients</button>'
