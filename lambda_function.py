@@ -4320,14 +4320,16 @@ MAILER_COMPOSER_SCRIPT = """
   var snd = document.getElementById('send-all');
   if (snd) snd.addEventListener('click', function () {
     var subj = (document.getElementById('send-subject').value || '').trim();
+    var sid = (new URLSearchParams(window.location.search).get('search') || '').trim();
+    if (!/^[0-9]+$/.test(sid)) sid = '';
     if (!subj) { alert('Enter a subject line first.'); return; }
-    var ok = prompt('This emails the entire Weekly Mailer Leads list.\\nType SEND to confirm.');
+    var ok = prompt('This emails ' + (sid ? 'saved search ' + sid : 'the entire Weekly Mailer Leads list') + '.\\nType SEND to confirm.');
     if (ok !== 'SEND') return;
     snd.disabled = true; snd.textContent = 'Sending… (takes a few minutes)';
     fetch(window.location.href, {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({action: 'mailer_send', subject: subj})
+      body: JSON.stringify({action: 'mailer_send', subject: subj, search_id: sid})
     }).then(function (r) { return r.json(); }).then(function (j) {
       snd.textContent = j.ok ? ('Sent to ' + j.sent + ' ✓') : ('Failed: ' + (j.error || 'try again'));
       snd.disabled = false;
@@ -4749,6 +4751,8 @@ MAILER_SIGNATURE_HTML = (
 
 
 def _handle_mailer_send(body):
+    sid_raw = str(body.get("search_id") or "").strip()
+    search_id = int(sid_raw) if sid_raw.isdigit() else MAILER_SEARCH_ID
     subject = str(body.get("subject") or "").strip()
     if not subject:
         return {"statusCode": 400, "headers": {"Content-Type": "application/json"},
@@ -4763,7 +4767,7 @@ def _handle_mailer_send(body):
     if not sells and not buys:
         return {"statusCode": 400, "headers": {"Content-Type": "application/json"},
                 "body": json.dumps({"ok": False, "error": "nothing selected"})}
-    rows, missing = _fetch_mailer_rows()
+    rows, missing = _fetch_mailer_rows(search_id)
     progress_key = "mailer-send-" + datetime.now(timezone.utc).strftime("%Y-%m-%d") + ".json"
     already = set()
     try:
