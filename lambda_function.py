@@ -4089,22 +4089,64 @@ def _handle_mailer_click_co(params, method="GET", meta=None):
         person = cur["data"] if cur.get("status") == 200 and isinstance(cur.get("data"), dict) else {}
         who = _person_full_name(person) or "Person " + str(pid)
         who_email = _person_email(person) or ""
+        interest_status = "note only"
+        if cls == "human":
+            agent_obj = s3.get_object(Bucket="pipeline-token", Key="agent-data.json")
+            agent_data = json.loads(agent_obj["Body"].read())
+            sec_ids = agent_data.get("security_ids", {}) or {}
+            entry = (sec_ids.get(co_name) or {}).get("b")
+            if not entry:
+                # Stale lookup file — refresh Buy Interest entries from the live field API
+                try:
+                    labels_res = call_pipeline_api(
+                        "GET", "/admin/custom_field_labels.json?conditions[entity_type]=person",
+                        jwt=jwt)
+                    body_l = labels_res.get("data") or {}
+                    labels = (body_l.get("custom_field_labels") or body_l.get("entries")
+                              or body_l.get("data") or []) if isinstance(body_l, dict) else body_l
+                    for label in labels:
+                        if isinstance(label, dict) and label.get("id") == 3322093:
+                            for ent in (label.get("custom_field_label_dropdown_entries") or []):
+                                nm, eid = ent.get("name"), ent.get("id")
+                                if nm and eid:
+                                    sec_ids.setdefault(nm, {"h": None, "b": None, "s": None})["b"] = int(eid)
+                            break
+                    agent_data["security_ids"] = sec_ids
+                    try:
+                        s3.put_object(Bucket="pipeline-token", Key="agent-data.json",
+                                      ContentType="application/json",
+                                      Body=json.dumps(agent_data).encode("utf-8"))
+                    except Exception as we:
+                        print(f"agent-data write-back failed (non-fatal): {we}")
+                    entry = (sec_ids.get(co_name) or {}).get("b")
+                except Exception as re:
+                    print(f"security_ids refresh failed: {re}")
+            if entry:
+                existing = _cf_option_ids(person, CF_PERSON_BUY_INTERESTS)
+                new_ids = sorted(existing | {int(entry)})
+                res = call_pipeline_api("PUT", f"/people/{pid}.json",
+                                        {"person": {"custom_fields": {CF_PERSON_BUY_INTERESTS: new_ids}}},
+                                        jwt=jwt)
+                interest_status = ("Buy Interest added" if res.get("status") == 200
+                                   else f"Buy Interest write FAILED ({res.get('status')})")
+            else:
+                interest_status = "Buy Interest NOT added — no security entry for '" + co_name + "' in agent-data.json"
         call_pipeline_api("POST", "/notes.json",
                           {"note": {"content": "Clicked " + co_name + " buy order via weekly newsletter "
-                                    + today + " — note only"
+                                    + today + " — " + interest_status
                                     + (" (automated scan — not counted)" if cls != "human" else ""),
                                     "note_category_id": 69759,
                                     "person_id": pid}},
                           jwt=jwt)
         if cls == "human":
+            alert = (who + " (" + who_email + ") clicked " + co_name + " buy order in the weekly mailer.\n\n"
+                     + interest_status + "\n\n"
+                     + "Person: https://app.pipelinecrm.com/people/" + str(pid) + "\n")
             boto3.client("ses", region_name=SES_REGION).send_email(
                 Source=FROM_ADDR,
                 Destination={"ToAddresses": TO_ADDRS},
                 Message={"Subject": {"Data": "Mailer click: " + who + " — " + co_name + " (buy)", "Charset": "UTF-8"},
-                         "Body": {"Text": {"Data": who + " (" + who_email + ") clicked " + co_name
-                                           + " buy order in the weekly mailer.\n\nPerson: "
-                                           "https://app.pipelinecrm.com/people/" + str(pid) + "\n",
-                                           "Charset": "UTF-8"}}},
+                         "Body": {"Text": {"Data": alert, "Charset": "UTF-8"}}},
             )
     except Exception as e:
         print(f"mailer co click failed pid={pid_raw} co={co_name}: {e}")
