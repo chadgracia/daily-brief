@@ -372,6 +372,12 @@ def _iqf_cell(person, deal):
     return _colorize_symbol(_person_iqf(person))
 
 
+def _cef_cell(person, deal):
+    if _person_role(deal, person) == "buyer":
+        return '<span style="color:#6b7280;">—</span>'
+    return _colorize_symbol(_person_cef(person))
+
+
 def _split_contacts_by_role(people, deal):
     people = [p for p in people if isinstance(p, dict)]
     if not people:
@@ -457,7 +463,7 @@ def _stacked_iqf_cell(buyer, seller, deal):
 
 
 def _stacked_cef_cell(buyer, seller):
-    top = _colorize_symbol(_person_cef(buyer)) if buyer else ""
+    top = '<span style="color:#6b7280;">—</span>' if buyer else ""
     bottom = _colorize_symbol(_person_cef(seller)) if seller else ""
     return _stack2(top, bottom)
 
@@ -1336,7 +1342,7 @@ def _people_cells(people, deal=None, company=None, interactive=False):
         entries.append((
             cell,
             _iqf_cell(p, deal),
-            _colorize_symbol(_person_cef(p)),
+            _cef_cell(p, deal),
         ))
     if not entries:
         return "", "", ""
@@ -2670,7 +2676,7 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
                 pc = r["primary"]
                 n, e = _person_name_email(pc)
                 iqf_html = _iqf_cell(pc, r["deal"])
-                cef_html = _colorize_symbol(_person_cef(pc))
+                cef_html = _cef_cell(pc, r["deal"])
                 co = companies_by_id.get(_normalize_id(_company_id(r["deal"])))
                 contact_html = _contact_cell(n, email=e, person_id=pc.get("id"),
                                               interactive=interactive)
