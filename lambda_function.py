@@ -4520,17 +4520,22 @@ def _render_news_email(first_name, person_id, content):
         'style="display:none;visibility:hidden;color:#ffffff;font-size:1px;">&#8203;</a>',
         '<h1 style="font-size:18px;margin:0 0 18px 0;color:#111827;">Pre-IPO Secondary '
         "Opportunities from the Gracia Group</h1>",
-        '<div style="border:1px solid #cdc9c0;border-left:4px solid #3d5a73;background:#f7f6f3;'
-        'border-radius:6px;padding:16px 20px;margin:0 0 22px 0;">',
-        '<p style="font-size:11px;letter-spacing:.08em;text-transform:uppercase;'
-        'color:#3d5a73;font-weight:700;margin:0 0 6px 0;">New &mdash; Daily Highlight</p>',
-        '<p style="font-size:14px;margin:0 0 12px 0;">One trade that stands out, in your inbox '
-        "each day: a recent news item, a distressed seller, limited supply &mdash; or a deal that "
-        "for various reasons is not published in our main books. Be among the first to see these "
-        "opportunities. Stop any time.</p>",
-        '<a href="' + daily_url + '" style="display:inline-block;background:#3d5a73;color:#ffffff;'
-        'font-size:14px;font-weight:600;padding:10px 18px;border-radius:6px;text-decoration:none;">'
-        "Get the Daily Highlight</a></div>",
+    ]
+    if not content.get("hide_daily"):
+        out += [
+            '<div style="border:1px solid #cdc9c0;border-left:4px solid #3d5a73;background:#f7f6f3;'
+            'border-radius:6px;padding:16px 20px;margin:0 0 22px 0;">',
+            '<p style="font-size:11px;letter-spacing:.08em;text-transform:uppercase;'
+            'color:#3d5a73;font-weight:700;margin:0 0 6px 0;">New &mdash; Daily Highlight</p>',
+            '<p style="font-size:14px;margin:0 0 12px 0;">One trade that stands out, in your inbox '
+            "each day: a recent news item, a distressed seller, limited supply &mdash; or a deal that "
+            "for various reasons is not published in our main books. Be among the first to see these "
+            "opportunities. Stop any time.</p>",
+            '<a href="' + daily_url + '" style="display:inline-block;background:#3d5a73;color:#ffffff;'
+            'font-size:14px;font-weight:600;padding:10px 18px;border-radius:6px;text-decoration:none;">'
+            "Get the Daily Highlight</a></div>",
+        ]
+    out += [
         '<p style="font-size:15px;margin:0 0 12px 0;">' + greet + "</p>",
         _news_para_html(content.get("intro") or ""),
     ]
@@ -4540,8 +4545,9 @@ def _render_news_email(first_name, person_id, content):
         head = escape(str(it.get("headline") or ""))
         link = _news_click_url(person_id, did) if did else "https://trades.graciagroup.com/"
         out.append('<hr style="border:none;border-top:1px solid #e5e7eb;margin:18px 0;">')
+        num = (str(i) + ". ") if len(content.get("items") or []) > 1 else ""
         out.append('<p style="font-size:16px;font-weight:700;margin:0 0 8px 0;color:#111827;">'
-                   + str(i) + '. <a href="' + link + '" style="color:#111827;text-decoration:none;">'
+                   + num + '<a href="' + link + '" style="color:#111827;text-decoration:none;">'
                    + co + "</a>"
                    + (' <span style="font-weight:400;color:#4b5563;">&mdash; ' + head + "</span>" if head else "")
                    + "</p>")
