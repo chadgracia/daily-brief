@@ -134,10 +134,13 @@ STRUCTURE_LABELS = {
     OPT_STRUCT_FUND: "Fund",
 }
 
+OPT_IQF_UNNECESSARY = 6596073
+
 IQF_LABELS = {
     OPT_IQF_YES: "✓",
     OPT_IQF_PENDING: "…",
     OPT_IQF_NO: "✗",
+    OPT_IQF_UNNECESSARY: "✓",
 }
 
 CEF_LABELS = {
@@ -457,9 +460,23 @@ def _stacked_contact_cell(buyer, seller, deal, company, interactive=False):
 
 
 def _stacked_iqf_cell(buyer, seller, deal):
-    top = _iqf_cell(buyer, deal) if buyer else ""
+    if buyer:
+        top = _iqf_cell(buyer, deal)
+        if not top:
+            top = _colorize_symbol("✗")
+    else:
+        top = ""
     bottom = '<span style="color:#6b7280;">—</span>' if seller else ""
     return _stack2(top, bottom)
+
+
+def _stacked_agreement_cell(deal, buyer, seller):
+    opt = _cf_option_id(deal, CF_AGENT_AGREEMENT)
+    if opt == OPT_AGENT_YES_SELLSIDE:
+        return _stack2("", _colorize_symbol("✓"))
+    if opt == OPT_AGENT_YES_BUYSIDE:
+        return _stack2(_colorize_symbol("✓"), "")
+    return ""
 
 
 def _stacked_cef_cell(buyer, seller):
@@ -2565,6 +2582,7 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
                                                  interactive=interactive)
             iqf_html = _stacked_iqf_cell(buyer, seller, r["deal"])
             cef_html = _stacked_cef_cell(buyer, seller)
+            agreement_html = _stacked_agreement_cell(r["deal"], buyer, seller)
             did = r["deal"].get("id")
             out.append(
                 _row_open("B", did, interactive)
@@ -2575,7 +2593,7 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
                 + _td(contact_html, interactive=interactive)
                 + _td(iqf_html, interactive=interactive)
                 + _td(cef_html, interactive=interactive)
-                + _td(_commission_cell(r["deal"]), interactive=interactive)
+                + _td(agreement_html, interactive=interactive)
                 + _td(_latest_activity_cell(r.get("latest_notes") or []),
                       interactive=interactive)
                 + "</tr>"
