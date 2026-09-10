@@ -4505,7 +4505,7 @@ def _news_para_html(text):
     t = escape(str(text or ""))
     t = re.sub(r"(https?://[^\s<]+)",
                r'<a href="\1" style="color:#1d4ed8;">\1</a>', t)
-    return '<p style="font-size:14px;line-height:1.5;margin:0 0 10px 0;">' + t + "</p>"
+    return '<p style="font-size:15px;line-height:1.6;margin:0 0 10px 0;">' + t + "</p>"
 
 
 def _render_news_email(first_name, person_id, content):
@@ -4518,9 +4518,10 @@ def _render_news_email(first_name, person_id, content):
         '<a href="' + MAILER_BASE_URL + '?view=click&pid=' + str(person_id)
         + '&hp=1&t=' + _mailer_token(person_id, "hp") + '" '
         'style="display:none;visibility:hidden;color:#ffffff;font-size:1px;">&#8203;</a>',
-        '<h1 style="font-size:18px;margin:0 0 18px 0;color:#111827;">Pre-IPO Secondary '
-        "Opportunities from the Gracia Group</h1>",
     ]
+    if not content.get("hide_title"):
+        out.append('<h1 style="font-size:18px;margin:0 0 18px 0;color:#111827;">Pre-IPO Secondary '
+                   "Opportunities from the Gracia Group</h1>")
     if not content.get("hide_daily"):
         out += [
             '<div style="border:1px solid #cdc9c0;border-left:4px solid #3d5a73;background:#f7f6f3;'
@@ -4535,16 +4536,16 @@ def _render_news_email(first_name, person_id, content):
             'font-size:14px;font-weight:600;padding:10px 18px;border-radius:6px;text-decoration:none;">'
             "Get the Daily Highlight</a></div>",
         ]
-    out += [
-        '<p style="font-size:15px;margin:0 0 12px 0;">' + greet + "</p>",
-        _news_para_html(content.get("intro") or ""),
-    ]
+    out.append('<p style="font-size:15px;margin:0 0 12px 0;">' + greet + "</p>")
+    if (content.get("intro") or "").strip():
+        out.append(_news_para_html(content.get("intro")))
     for i, it in enumerate(content.get("items") or [], start=1):
         did = _normalize_id(it.get("deal_id"))
         co = escape(str(it.get("company") or ""))
         head = escape(str(it.get("headline") or ""))
         link = _news_click_url(person_id, did) if did else "https://trades.graciagroup.com/"
-        out.append('<hr style="border:none;border-top:1px solid #e5e7eb;margin:18px 0;">')
+        if i > 1:
+            out.append('<hr style="border:none;border-top:1px solid #e5e7eb;margin:18px 0;">')
         num = (str(i) + ". ") if len(content.get("items") or []) > 1 else ""
         out.append('<p style="font-size:16px;font-weight:700;margin:0 0 8px 0;color:#111827;">'
                    + num + '<a href="' + link + '" style="color:#111827;text-decoration:none;">'
