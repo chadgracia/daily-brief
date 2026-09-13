@@ -4505,7 +4505,7 @@ def _news_para_html(text):
     t = escape(str(text or ""))
     t = re.sub(r"(https?://[^\s<]+)",
                r'<a href="\1" style="color:#1d4ed8;">\1</a>', t)
-    return '<p style="font-size:15px;line-height:1.6;margin:0 0 10px 0;">' + t + "</p>"
+    return '<p style="font-size:14px;line-height:1.6;margin:0 0 10px 0;">' + t + "</p>"
 
 
 def _render_news_email(first_name, person_id, content):
@@ -4536,7 +4536,7 @@ def _render_news_email(first_name, person_id, content):
             'font-size:14px;font-weight:600;padding:10px 18px;border-radius:6px;text-decoration:none;">'
             "Get the Daily Highlight</a></div>",
         ]
-    out.append('<p style="font-size:15px;margin:0 0 12px 0;">' + greet + "</p>")
+    out.append('<p style="font-size:14px;margin:0 0 12px 0;">' + greet + "</p>")
     if (content.get("intro") or "").strip():
         out.append(_news_para_html(content.get("intro")))
     for i, it in enumerate(content.get("items") or [], start=1):
