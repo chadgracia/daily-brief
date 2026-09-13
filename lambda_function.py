@@ -4575,6 +4575,12 @@ def _handle_news_save(body):
     except Exception as e:
         return {"statusCode": 400, "headers": {"Content-Type": "application/json"},
                 "body": json.dumps({"ok": False, "error": "Invalid JSON: " + str(e)})}
+    subj = str(body.get("subject") or "").strip()
+    sid = str(body.get("search_id") or "").strip()
+    if subj:
+        data["_subject"] = subj
+    if sid.isdigit():
+        data["_search_id"] = sid
     _save_news_mailer(data)
     return {"statusCode": 200, "headers": {"Content-Type": "application/json"},
             "body": json.dumps({"ok": True, "count": len(data["items"])})}
@@ -4584,6 +4590,16 @@ def _handle_news_test(body):
     s3 = boto3.client("s3", region_name=S3_REGION)
     content = _load_news_mailer(s3)
     subject = str(body.get("subject") or "").strip() or "TEST — news mailer"
+    _sid = str(body.get("search_id") or "").strip()
+    _changed = False
+    if str(body.get("subject") or "").strip() and content.get("_subject") != subject:
+        content["_subject"] = subject
+        _changed = True
+    if _sid.isdigit() and content.get("_search_id") != _sid:
+        content["_search_id"] = _sid
+        _changed = True
+    if _changed:
+        _save_news_mailer(content)
     html = _render_news_email("Chad", MAILER_PREVIEW_PID, content)
     boto3.client("ses", region_name=SES_REGION).send_email(
         Source=MAILER_FROM,
@@ -4687,7 +4703,9 @@ NEWS_COMPOSER_SCRIPT = """
     fetch(window.location.href, {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({action: 'news_save', content: ta.value})
+      body: JSON.stringify({action: 'news_save', content: ta.value,
+        subject: (document.getElementById('news-subject').value || '').trim(),
+        search_id: (document.getElementById('news-search').value || '').trim()})
     }).then(function (r) { return r.json(); }).then(function (j) {
       if (j.ok) { window.location.reload(); }
       else { alert(j.error || 'Save failed'); sv.disabled = false; sv.textContent = 'Save & update preview'; }
@@ -4718,7 +4736,8 @@ NEWS_COMPOSER_SCRIPT = """
     fetch(window.location.href, {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({action: 'news_test', subject: subj})
+      body: JSON.stringify({action: 'news_test', subject: subj,
+        search_id: (document.getElementById('news-search').value || '').trim()})
     }).then(function (r) { return r.json(); }).then(function (j) {
       tst.textContent = j.ok ? 'Test sent ✓' : 'Failed — try again';
       tst.disabled = false;
@@ -4733,7 +4752,10 @@ def _render_news_composer(pid):
     s3 = boto3.client("s3", region_name=S3_REGION)
     content = _load_news_mailer(s3)
     email_html = _render_news_email("Chad", pid, content)
-    raw = json.dumps(content, ensure_ascii=False, indent=2)
+    saved_subject = str(content.get("_subject") or "Recent news and deal updates for ten pre-IPO opportunities")
+    saved_search = str(content.get("_search_id") or "19530439")
+    raw = json.dumps({k: v for k, v in content.items() if not str(k).startswith("_")},
+                     ensure_ascii=False, indent=2)
     html = (
         '<!doctype html><html lang="en"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width, initial-scale=1">'
@@ -4751,7 +4773,7 @@ def _render_news_composer(pid):
         '<button type="button" id="news-save" style="padding:8px 18px;border:1px solid #d1d5db;'
         "background:#ffffff;color:#374151;font-size:14px;font-weight:500;border-radius:6px;"
         'cursor:pointer;font-family:inherit;">Save &amp; update preview</button>'
-        '<input type="text" id="news-subject" value="Recent news and deal updates for ten pre-IPO opportunities" '
+        '<input type="text" id="news-subject" value="' + escape(saved_subject) + '" '
         'style="margin-left:10px;padding:8px 10px;border:1px solid #d1d5db;border-radius:6px;font-size:14px;'
         'font-family:inherit;width:420px;max-width:100%;">'
         '<button type="button" id="news-test" style="margin-left:8px;padding:8px 18px;border:1px solid #3d5a73;'
@@ -4759,7 +4781,7 @@ def _render_news_composer(pid):
         'font-family:inherit;">Send test to cgracia@rainmakersecurities.com</button>'
         "</div>"
         '<div style="margin:0 0 16px 0;">'
-        '<input type="text" id="news-search" inputmode="numeric" value="19530439" '
+        '<input type="text" id="news-search" inputmode="numeric" value="' + escape(saved_search) + '" '
         'style="padding:8px 10px;border:1px solid #d1d5db;border-radius:6px;font-size:14px;'
         'font-family:inherit;width:160px;">'
         '<span style="font-size:13px;color:#6b7280;margin-left:8px;">Pipeline saved search ID (19530439 = Weekly Mailer Leads)</span>'
