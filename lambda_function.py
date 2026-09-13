@@ -4560,7 +4560,16 @@ def _render_news_email(first_name, person_id, content):
         src = str(it.get("sources") or "").strip()
         if src:
             out.append('<p style="font-size:12px;color:#6b7280;margin:0;">News sources: ' + escape(src) + "</p>")
-    out.append(MAILER_SIGNATURE_HTML)
+    out.append('<p style="font-size:11pt;margin:0 0 1em 0;">Chad Gracia<br>'
+               "Registered Representative, Rainmaker Securities<br>"
+               "WhatsApp: +380 99 346 4098</p>")
+    _ps = str(content.get("ps") or "").strip()
+    if _ps:
+        out.append(_news_para_html(_ps))
+    out.append('<p style="font-size:11pt;margin:0 0 1em 0;">Indications for Accredited Investors: '
+               '<a href="https://trades.graciagroup.com/" style="color:#0563C1;">'
+               "https://trades.graciagroup.com/</a></p>")
+    out.append(MAILER_DISCLOSURE_HTML)
     out.append("</div>")
     return "".join(out)
 
@@ -4802,12 +4811,7 @@ def _render_news_composer(pid):
 
 MAILER_FROM = "Chad Gracia <cgracia@graciagroup.com>"
 
-MAILER_SIGNATURE_HTML = (
-    '<p style="font-size:14px;margin:28px 0 0 0;color:#1f2937;">Chad Gracia<br>'
-    "Registered Representative, Rainmaker Securities<br>"
-    "WhatsApp: +380 99 346 4098</p>"
-    '<p style="font-size:14px;margin:10px 0 0 0;">Indications for Accredited Investors: '
-    '<a href="https://trades.graciagroup.com/" style="color:#1d4ed8;">https://trades.graciagroup.com/</a></p>'
+MAILER_DISCLOSURE_HTML = (
     '<hr style="border:none;border-top:1px solid #e5e7eb;margin:20px 0;">'
     '<div style="font-size:11px;color:#6b7280;line-height:1.5;">'
     "<p style=\"margin:0 0 8px 0;\">DISCLOSURE: Rainmaker Securities, LLC (&ldquo;RMS&rdquo;) is a "
@@ -4842,6 +4846,15 @@ MAILER_SIGNATURE_HTML = (
     "that may help you determine whether the price asked for the investment is a fair price. Potential buyers or "
     "sellers of the Securities should seek professional counsel prior to entering into any transaction.</p></div>"
 )
+
+
+MAILER_SIGNATURE_HTML = (
+    '<p style="font-size:14px;margin:28px 0 0 0;color:#1f2937;">Chad Gracia<br>'
+    "Registered Representative, Rainmaker Securities<br>"
+    "WhatsApp: +380 99 346 4098</p>"
+    '<p style="font-size:14px;margin:10px 0 0 0;">Indications for Accredited Investors: '
+    '<a href="https://trades.graciagroup.com/" style="color:#1d4ed8;">https://trades.graciagroup.com/</a></p>'
+) + MAILER_DISCLOSURE_HTML
 
 
 def _handle_mailer_send(body):
