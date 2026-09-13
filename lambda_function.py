@@ -4621,9 +4621,9 @@ def _handle_news_send(body):
     search_id = int(sid_raw) if sid_raw.isdigit() else MAILER_SEARCH_ID
     s3 = boto3.client("s3", region_name=S3_REGION)
     content = _load_news_mailer(s3)
-    if not content.get("items"):
+    if not content.get("items") and not str(content.get("intro") or "").strip():
         return {"statusCode": 400, "headers": {"Content-Type": "application/json"},
-                "body": json.dumps({"ok": False, "error": "no items in news mailer"})}
+                "body": json.dumps({"ok": False, "error": "nothing to send: no intro and no items"})}
     rows, missing = _fetch_mailer_rows(search_id)
     progress_key = "news-send-" + datetime.now(timezone.utc).strftime("%Y-%m-%d") + ".json"
     already = set()
