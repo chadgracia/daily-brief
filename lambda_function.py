@@ -4504,8 +4504,8 @@ def _news_click_url(person_id, deal_id):
 def _news_para_html(text):
     t = escape(str(text or ""))
     t = re.sub(r"(https?://[^\s<]+)",
-               r'<a href="\1" style="color:#1d4ed8;">\1</a>', t)
-    return '<p style="font-size:14px;line-height:1.6;margin:0 0 10px 0;">' + t + "</p>"
+               r'<a href="\1" style="color:#0563C1;">\1</a>', t)
+    return '<p style="font-size:11pt;margin:0 0 1em 0;">' + t + "</p>"
 
 
 def _render_news_email(first_name, person_id, content):
@@ -4513,8 +4513,8 @@ def _render_news_email(first_name, person_id, content):
     daily_url = (MAILER_BASE_URL + "?view=daily&amp;pid=" + str(person_id)
                  + "&amp;t=" + _mailer_token(person_id, "daily"))
     out = [
-        '<div style="font-family:-apple-system,BlinkMacSystemFont,\'Segoe UI\',Roboto,'
-        'Helvetica,Arial,sans-serif;max-width:680px;margin:0 auto;padding:24px;color:#1f2937;">',
+        '<div style="font-family:Aptos,Calibri,\'Segoe UI\',Helvetica,Arial,sans-serif;'
+        'font-size:11pt;color:#000000;">',
         '<a href="' + MAILER_BASE_URL + '?view=click&pid=' + str(person_id)
         + '&hp=1&t=' + _mailer_token(person_id, "hp") + '" '
         'style="display:none;visibility:hidden;color:#ffffff;font-size:1px;">&#8203;</a>',
@@ -4536,7 +4536,7 @@ def _render_news_email(first_name, person_id, content):
             'font-size:14px;font-weight:600;padding:10px 18px;border-radius:6px;text-decoration:none;">'
             "Get the Daily Highlight</a></div>",
         ]
-    out.append('<p style="font-size:14px;margin:0 0 12px 0;">' + greet + "</p>")
+    out.append('<p style="font-size:11pt;margin:0 0 1em 0;">' + greet + "</p>")
     if (content.get("intro") or "").strip():
         out.append(_news_para_html(content.get("intro")))
     for i, it in enumerate(content.get("items") or [], start=1):
