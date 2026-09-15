@@ -3539,7 +3539,9 @@ def _mailer_eligible(deals, buyer_counts=None):
             buys.append(d)
 
     def _key(d):
-        return _cf_number(d, CF_TICKET_MAX) or 0
+        name = (_company_name(d) or _deal_title(d) or "").strip().lower()
+        n_buyers = (buyer_counts or {}).get(name, 0)
+        return (n_buyers, _cf_number(d, CF_TICKET_MAX) or 0)
 
     sells.sort(key=_key, reverse=True)
     buys.sort(key=lambda d: (_company_name(d) or _deal_title(d)).strip().lower())
