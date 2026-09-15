@@ -4716,7 +4716,11 @@ NEWS_COMPOSER_SCRIPT = """
         subject: (document.getElementById('news-subject').value || '').trim(),
         search_id: (document.getElementById('news-search').value || '').trim()})
     }).then(function (r) { return r.json(); }).then(function (j) {
-      if (j.ok) { window.location.reload(); }
+      if (j.ok) {
+        var u = new URL(window.location.href);
+        u.searchParams.set('r', Date.now().toString());
+        window.location.href = u.toString();
+      }
       else { alert(j.error || 'Save failed'); sv.disabled = false; sv.textContent = 'Save & update preview'; }
     }).catch(function () { alert('Save failed'); sv.disabled = false; sv.textContent = 'Save & update preview'; });
   });
@@ -4805,7 +4809,7 @@ def _render_news_composer(pid):
         + "</body></html>"
     )
     return {"statusCode": 200,
-            "headers": {"Content-Type": "text/html; charset=utf-8"},
+            "headers": {"Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store"},
             "body": html}
 
 
