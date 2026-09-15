@@ -4124,7 +4124,9 @@ def _handle_mailer_click_co(params, method="GET", meta=None):
             agent_obj = s3.get_object(Bucket="pipeline-token", Key="agent-data.json")
             agent_data = json.loads(agent_obj["Body"].read())
             sec_ids = agent_data.get("security_ids", {}) or {}
-            entry = (sec_ids.get(co_name) or {}).get("b")
+            entry = next((v.get("b") for k, v in sec_ids.items()
+                          if isinstance(v, dict) and k.strip().lower() == co_name.strip().lower()
+                          and v.get("b")), None)
             if not entry:
                 # Stale lookup file — refresh Buy Interest entries from the live field API
                 try:
@@ -4148,7 +4150,9 @@ def _handle_mailer_click_co(params, method="GET", meta=None):
                                       Body=json.dumps(agent_data).encode("utf-8"))
                     except Exception as we:
                         print(f"agent-data write-back failed (non-fatal): {we}")
-                    entry = (sec_ids.get(co_name) or {}).get("b")
+                    entry = next((v.get("b") for k, v in sec_ids.items()
+                                  if isinstance(v, dict) and k.strip().lower() == co_name.strip().lower()
+                                  and v.get("b")), None)
                 except Exception as re:
                     print(f"security_ids refresh failed: {re}")
             if entry:
@@ -4237,7 +4241,9 @@ def _handle_mailer_click(params, method="GET", meta=None):
             agent_obj = s3.get_object(Bucket="pipeline-token", Key="agent-data.json")
             agent_data = json.loads(agent_obj["Body"].read())
             sec_ids = agent_data.get("security_ids", {}) or {}
-            entry = (sec_ids.get(co_name) or {}).get("b")
+            entry = next((v.get("b") for k, v in sec_ids.items()
+                          if isinstance(v, dict) and k.strip().lower() == co_name.strip().lower()
+                          and v.get("b")), None)
             if not entry:
                 # Stale lookup file — refresh Buy Interest entries from the live field API
                 try:
@@ -4261,7 +4267,9 @@ def _handle_mailer_click(params, method="GET", meta=None):
                                       Body=json.dumps(agent_data).encode("utf-8"))
                     except Exception as we:
                         print(f"agent-data write-back failed (non-fatal): {we}")
-                    entry = (sec_ids.get(co_name) or {}).get("b")
+                    entry = next((v.get("b") for k, v in sec_ids.items()
+                                  if isinstance(v, dict) and k.strip().lower() == co_name.strip().lower()
+                                  and v.get("b")), None)
                 except Exception as re:
                     print(f"security_ids refresh failed: {re}")
             if entry:
