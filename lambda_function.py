@@ -3706,8 +3706,8 @@ def _render_mailer_email(first_name, person_id, sells, buys, buyer_counts=None, 
         'font-weight:600;padding:8px 14px;border-radius:6px;text-decoration:none;">'
         "Get the Daily Highlight</a></div></td>"
         "</tr></table>"
-        + _mailer_table("Sell orders — shares available", sells, person_id, None, logos)
-        + _mailer_buy_table("Buy orders — buyers seeking shares", buys, person_id, buyer_counts, logos)
+        + _mailer_table("Sell orders — current availability", sells, person_id, None, logos)
+        + _mailer_buy_table("Buy orders — active demand", buys, person_id, buyer_counts, logos)
         + MAILER_SIGNATURE_HTML
         + "</div>"
     )
