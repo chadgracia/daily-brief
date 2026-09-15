@@ -3596,6 +3596,13 @@ def _mailer_logo_img(logos, deal):
 def _mailer_buy_companies(s3, counts):
     display = {}
     try:
+        for k in ((_fetch_json(s3, "interest_people.json") or {}).get("buy") or {}):
+            nm = (str(k) or "").strip()
+            if nm:
+                display[nm.lower()] = nm
+    except Exception:
+        pass
+    try:
         for c in (_fetch_json(s3, "companies.json") or {}).get("companies", []) or []:
             nm = (c.get("name") or "").strip()
             if nm:
@@ -4298,9 +4305,10 @@ AGENT_AGREEMENT_SELLSIDE = 6354277
 def _mailer_buy_co_column(title, companies, selected):
     out = ['<div style="flex:1;min-width:280px;">'
            '<h3 style="font-size:14px;margin:0 0 8px 0;">' + escape(title) + "</h3>"]
+    selected_lc = {str(x).lower() for x in selected}
     for name, n in companies:
         val = "c:" + name
-        checked = " checked" if val in selected else ""
+        checked = " checked" if val.lower() in selected_lc else ""
         out.append(
             '<label style="display:block;padding:4px 0;font-size:13px;">'
             '<input type="checkbox" name="deal" value="' + escape(val, quote=True) + '"' + checked + "> "
@@ -4876,7 +4884,8 @@ def _handle_mailer_send(body):
     sells_all, buys_all = _mailer_eligible(deals, counts)
     selected = _load_mailer_selection(s3)
     sells = [d for d in sells_all if str(d.get("id")) in selected]
-    buys = [(nm, n) for nm, n in _mailer_buy_companies(s3, counts) if "c:" + nm in selected]
+    selected_lc = {str(x).lower() for x in selected}
+    buys = [(nm, n) for nm, n in _mailer_buy_companies(s3, counts) if ("c:" + nm).lower() in selected_lc]
     if not sells and not buys:
         return {"statusCode": 400, "headers": {"Content-Type": "application/json"},
                 "body": json.dumps({"ok": False, "error": "nothing selected"})}
@@ -4959,7 +4968,8 @@ def _handle_mailer_test(body):
     sells_all, buys_all = _mailer_eligible(deals, counts)
     selected = _load_mailer_selection(s3)
     sells = [d for d in sells_all if str(d.get("id")) in selected]
-    buys = [(nm, n) for nm, n in _mailer_buy_companies(s3, counts) if "c:" + nm in selected]
+    selected_lc = {str(x).lower() for x in selected}
+    buys = [(nm, n) for nm, n in _mailer_buy_companies(s3, counts) if ("c:" + nm).lower() in selected_lc]
     email_html = _render_mailer_email("Chad", pid, sells, buys, counts, True)
     boto3.client("ses", region_name=SES_REGION).send_email(
         Source=MAILER_FROM,
@@ -4982,7 +4992,8 @@ def _render_mailer_composer(pid):
     buy_cos = _mailer_buy_companies(s3, counts)
     selected = _load_mailer_selection(s3)
     sells = [d for d in sells_all if str(d.get("id")) in selected]
-    buys = [(nm, n) for nm, n in buy_cos if "c:" + nm in selected]
+    selected_lc = {str(x).lower() for x in selected}
+    buys = [(nm, n) for nm, n in buy_cos if ("c:" + nm).lower() in selected_lc]
     email_html = _render_mailer_email("Chad", pid, sells, buys, counts, True)
 
     html = (
