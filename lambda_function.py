@@ -4581,7 +4581,7 @@ def _render_news_email(first_name, person_id, content):
         src = str(it.get("sources") or "").strip()
         if src:
             out.append('<p style="font-size:12px;color:#6b7280;margin:0;">News sources: ' + escape(src) + "</p>")
-    out.append('<p style="font-size:11pt;margin:0 0 1em 0;">Chad Gracia<br>'
+    out.append('<p style="font-size:11pt;margin:28px 0 1em 0;">Chad Gracia<br>'
                "Registered Representative, Rainmaker Securities<br>"
                "WhatsApp: +380 99 346 4098</p>")
     _ps = str(content.get("ps") or "").strip()
@@ -4590,6 +4590,9 @@ def _render_news_email(first_name, person_id, content):
     out.append('<p style="font-size:11pt;margin:0 0 1em 0;">Indications for Accredited Investors: '
                '<a href="https://trades.graciagroup.com/" style="color:#0563C1;">'
                "https://trades.graciagroup.com/</a></p>")
+    out.append('<p style="font-size:11pt;margin:0 0 1em 0;">PS: Want a daily highlight on a single '
+               'transaction? <a href="' + daily_url + '" style="color:#0563C1;">Click here to receive '
+               "the Daily Highlight</a>. Unsubscribe any time.</p>")
     out.append(MAILER_DISCLOSURE_HTML)
     out.append("</div>")
     return "".join(out)
