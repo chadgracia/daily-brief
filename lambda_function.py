@@ -2449,7 +2449,8 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
             '<meta charset="utf-8">'
             '<meta name="viewport" content="width=device-width, initial-scale=1">'
             '<base target="_blank">'
-            f'<title>Daily Brief — {escape(date_str)}</title>'
+            '<title>Daily Brief · GG Admin</title>'
+            '<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>☀️</text></svg>">'
             f'<link rel="stylesheet" href="{escape(MASTER_CSS_URL, quote=True)}">'
             '</head><body class="reset-anchor">'
             f'<div style="background:#ffffff; {CONTAINER_STYLE}">'
@@ -3399,7 +3400,9 @@ def _render_mailer_page(search_id=MAILER_SEARCH_ID):
     out.append(
         '<!doctype html><html lang="en"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width, initial-scale=1">'
-        "<title>Weekly Mailer Recipients</title></head>"
+        "<title>Daily Brief · GG Admin</title>"
+        '<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>☀️</text></svg>">'
+        "</head>"
         '<body style="font-family:-apple-system,BlinkMacSystemFont,'
         "'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#1f2937;"
         'font-size:14px;max-width:820px;margin:0 auto;padding:24px;">'
@@ -4790,7 +4793,9 @@ def _render_news_composer(pid):
     html = (
         '<!doctype html><html lang="en"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width, initial-scale=1">'
-        "<title>News mailer</title></head>"
+        "<title>Daily Brief · GG Admin</title>"
+        '<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>☀️</text></svg>">'
+        "</head>"
         '<body style="margin:0;background:#f3f4f6;font-family:-apple-system,BlinkMacSystemFont,'
         "'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#1f2937;\">"
         '<div style="max-width:960px;margin:0 auto;padding:24px;">'
@@ -5007,7 +5012,9 @@ def _render_mailer_composer(pid):
     html = (
         '<!doctype html><html lang="en"><head><meta charset="utf-8">'
         '<meta name="viewport" content="width=device-width, initial-scale=1">'
-        "<title>Weekly mailer</title></head>"
+        "<title>Daily Brief · GG Admin</title>"
+        '<link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>☀️</text></svg>">'
+        "</head>"
         '<body style="margin:0;background:#f3f4f6;font-family:-apple-system,BlinkMacSystemFont,'
         "'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#1f2937;\">"
         '<div style="max-width:960px;margin:0 auto;padding:24px;">'
