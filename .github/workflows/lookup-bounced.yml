@@ -1,0 +1,49 @@
+name: lookup-bounced
+on:
+  workflow_dispatch:
+permissions:
+  id-token: write
+  contents: read
+jobs:
+  lookup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::271378210266:role/github-actions-deploy
+          aws-region: us-east-1
+      - name: Download people.json
+        run: aws s3 cp s3://full-pipeline-cache/people.json /tmp/people.json
+      - name: Find bounced contacts
+        shell: python
+        run: |
+          import json
+          emails = [
+            "david.babulak@gmail.com","shane@un-bound.com","ericr@rapyd.net",
+            "gokul.handa@kristal.ai","johnmarren@temasek.com.sg","spencer@rebellionresearch.com",
+            "sx@wpglobalpartners.com","dflath@circlewm.com","buffy@steelskyventures.com",
+            "ah@ffvc.com","azhong@gbl.be","steve@oceanic.us","mones.bazzy@bankofsharjah.com",
+            "vivek.dixit@369growth.com","steve@lonford-global.com","phil.tonachio@thoughtspot.com",
+            "mjl@lpcap.com","aj@silverstein.com.au","andrew.hong@ffvc.com","tony@gammite.com",
+            "josh@opal.co","ram@hiddentao.com",
+          ]
+          people = json.load(open("/tmp/people.json"))
+          if isinstance(people, dict):
+              people = people.get("entries", people.get("people", []))
+          found = set()
+          print("=" * 60)
+          for p in people:
+              blob = json.dumps(p).lower()
+              for e in emails:
+                  if e in blob:
+                      found.add(e)
+                      email_fields = {k: v for k, v in p.items() if v and "email" in k.lower() and isinstance(v, str)}
+                      print(f"MATCH {e}")
+                      print(f"  id: {p.get('id')}")
+                      print(f"  name: {p.get('first_name','')} {p.get('last_name','')}")
+                      print(f"  company: {p.get('company_name','')}")
+                      print(f"  emails: {email_fields}")
+                      print("-" * 60)
+          for e in emails:
+              if e not in found:
+                  print(f"NOT FOUND in people.json: {e}")
