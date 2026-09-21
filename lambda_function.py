@@ -4395,7 +4395,7 @@ MAILER_COMPOSER_SCRIPT = """
     fetch(window.location.href, {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({action: 'mailer_test'})
+      body: JSON.stringify({action: 'mailer_test', subject: (document.getElementById('send-subject').value || '').trim()})
     }).then(function (r) { return r.json(); }).then(function (j) {
       tst.textContent = j.ok ? 'Test sent ✓' : 'Failed — try again';
       tst.disabled = false;
