@@ -4978,6 +4978,7 @@ def _handle_mailer_send(body):
 
 def _handle_mailer_test(body):
     pid = 1259927678
+    subject = str(body.get("subject") or "").strip() or "Live orders this week — Gracia Group"
     s3 = boto3.client("s3", region_name=S3_REGION)
     deals = (_fetch_json(s3, "deals.json") or {}).get("deals", []) or []
     counts = _mailer_buyer_counts(s3)
@@ -4991,7 +4992,7 @@ def _handle_mailer_test(body):
         Source=MAILER_FROM,
         Destination={"ToAddresses": ["cgracia@rainmakersecurities.com"]},
         ReplyToAddresses=["cgracia@rainmakersecurities.com"],
-        Message={"Subject": {"Data": "[TEST] Live orders this week — Gracia Group", "Charset": "UTF-8"},
+        Message={"Subject": {"Data": "[TEST] " + subject, "Charset": "UTF-8"},
                  "Body": {"Html": {"Data": email_html, "Charset": "UTF-8"}}},
     )
     _merge_send_times(s3, {str(pid): datetime.now(timezone.utc).timestamp()})
