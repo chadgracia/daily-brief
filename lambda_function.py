@@ -3307,16 +3307,17 @@ def _fetch_mailer_page(page, search_id=MAILER_SEARCH_ID):
 
 def _collect_mailer_entries(data, seen, rows, missing):
     cols = [c.get("id") for c in (data.get("columns") or [])]
-    if "person_first_name" not in cols or "person_email" not in cols:
+    if ("person_first_name" not in cols or "person_email" not in cols
+            or "id" not in cols):
         raise RuntimeError(
             "Focused list columns changed; got: "
             + ", ".join(str(c) for c in cols)
         )
     i_first = cols.index("person_first_name")
     i_email = cols.index("person_email")
-    i_pid = cols.index("person_id") if "person_id" in cols else 7
+    i_pid = cols.index("id")  # "id" = Person ID primary-key column
     for entry in (data.get("entries") or []):
-        if not isinstance(entry, list) or len(entry) <= max(i_first, i_email):
+        if not isinstance(entry, list) or len(entry) <= max(i_first, i_email, i_pid):
             continue
         first = (entry[i_first] or "").strip()
         email = (entry[i_email] or "").strip()
@@ -3328,8 +3329,7 @@ def _collect_mailer_entries(data, seen, rows, missing):
         seen.add(dedupe_key)
         if not first:
             missing.append(email)
-        pid = entry[i_pid] if len(entry) > i_pid else None
-        rows.append((first, email, pid))
+        rows.append((first, email, entry[i_pid]))
 
 
 def _fetch_mailer_rows(search_id=MAILER_SEARCH_ID):
