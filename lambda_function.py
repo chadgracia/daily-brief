@@ -4559,7 +4559,9 @@ def _render_news_email(first_name, person_id, content):
         ]
     out.append('<p style="font-size:11pt;margin:0 0 1em 0;">' + greet + "</p>")
     if (content.get("intro") or "").strip():
-        out.append(_news_para_html(content.get("intro")))
+        for chunk in re.split(r"\n\s*\n", str(content.get("intro")).replace("\r\n", "\n")):
+            if chunk.strip():
+                out.append(_news_para_html(chunk.strip()).replace("\n", "<br>"))
     for i, it in enumerate(content.get("items") or [], start=1):
         did = _normalize_id(it.get("deal_id"))
         co = escape(str(it.get("company") or ""))
@@ -4581,7 +4583,7 @@ def _render_news_email(first_name, person_id, content):
         src = str(it.get("sources") or "").strip()
         if src:
             out.append('<p style="font-size:12px;color:#6b7280;margin:0;">News sources: ' + escape(src) + "</p>")
-    out.append('<p style="font-size:11pt;margin:28px 0 1em 0;">Best wishes,<br>Chad Gracia<br>'
+    out.append('<p style="font-size:11pt;margin:28px 0 1em 0;">Best wishes,<br><br>Chad Gracia<br>'
                "Registered Representative, Rainmaker Securities<br>"
                "WhatsApp: +380 99 346 4098</p>")
     _ps = str(content.get("ps") or "").strip()
