@@ -4581,7 +4581,7 @@ def _render_news_email(first_name, person_id, content):
         src = str(it.get("sources") or "").strip()
         if src:
             out.append('<p style="font-size:12px;color:#6b7280;margin:0;">News sources: ' + escape(src) + "</p>")
-    out.append('<p style="font-size:11pt;margin:28px 0 1em 0;">Chad Gracia<br>'
+    out.append('<p style="font-size:11pt;margin:28px 0 1em 0;">Best wishes,<br>Chad Gracia<br>'
                "Registered Representative, Rainmaker Securities<br>"
                "WhatsApp: +380 99 346 4098</p>")
     _ps = str(content.get("ps") or "").strip()
