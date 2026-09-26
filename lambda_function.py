@@ -2442,6 +2442,12 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
     kate_count = (len(to_post) + len(leads) + len(priority_names)
                   + len(pu_pending) + len(pu_awaiting))
     out = []
+    wa_url = os.environ.get("WA_ADMIN_URL")
+    wa_link = (
+        f'<p style="font-family:{FONT_STACK}; font-size:14px; margin:0 0 24px 0;">'
+        f'<a href="{escape(wa_url, quote=True)}" style="{LINK_STYLE_500}">'
+        'Send WhatsApp messages &rarr;</a></p>'
+    ) if wa_url else ""
     if interactive:
         out.append(
             "<!doctype html>"
@@ -2455,6 +2461,7 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
             '</head><body class="reset-anchor">'
             f'<div style="background:#ffffff; {CONTAINER_STYLE}">'
             f'<h1 class="page-title">Daily Brief — {escape(date_str)}</h1>'
+            f'{wa_link}'
             '<div class="filter-bar">'
             '<button type="button" id="refresh-btn" class="refresh-btn">'
             '↻ Refresh data</button>'
@@ -2472,6 +2479,7 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
             "<html><body style=\"" + BODY_STYLE + "\">"
             f'<div style="{CONTAINER_STYLE}">'
             f'<h1 style="{H1_STYLE}">Daily Brief — {escape(date_str)}</h1>'
+            f'{wa_link}'
         )
         out.append(
             f'<p style="font-family:{FONT_STACK}; font-size:14px; margin:0 0 24px 0;">'
