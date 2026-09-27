@@ -23,7 +23,7 @@ PIPELINE_DEAL_URL = "https://app.pipelinecrm.com/deals/{}"
 PIPELINE_PERSON_URL = "https://app.pipelinecrm.com/people/{}"
 TRADES_DEAL_URL = "trades.graciagroup.com/deals/{}"
 NUDGE_URL = "https://ak5zolfpynhrimrsuw5rbjchwu0ktexz.lambda-url.us-east-1.on.aws/"
-NUDGE_KEY = "YUARqVzldaiY4P8EZA855faT"
+NUDGE_KEY = os.environ.get("NUDGE_KEY", "")
 
 MASTER_CSS_URL = "https://s3.us-east-1.amazonaws.com/main.css/master.css"
 
@@ -1288,7 +1288,7 @@ def _envelope_link(deal, person, company, interactive=False):
 
 
 def _nudge_link(deal_id, interactive=False):
-    if deal_id in (None, ""):
+    if not NUDGE_KEY or deal_id in (None, ""):
         return ""
     href = f"{NUDGE_URL}?deal_id={quote(str(deal_id), safe='')}&key={quote(NUDGE_KEY, safe='')}"
     if interactive:
