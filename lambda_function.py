@@ -3995,6 +3995,34 @@ def _click_interstitial(dest):
                      "</body></html>")}
 
 
+def _click_email_page(co_name):
+    co = str(co_name)
+    mailto = ("mailto:cgracia@rainmakersecurities.com?subject="
+              + quote(co + " — please send details")
+              + "&body=" + quote("Hi Chad, I'd like more information on " + co + "."))
+    co_h = escape(co)
+    return {"statusCode": 200,
+            "headers": {"Content-Type": "text/html; charset=utf-8",
+                        "Cache-Control": "no-store"},
+            "body": ('<!doctype html><html lang="en"><head><meta charset="utf-8">'
+                     '<meta name="viewport" content="width=device-width, initial-scale=1">'
+                     '<meta name="robots" content="noindex">'
+                     "<title>" + co_h + "</title></head>"
+                     '<body style="font-family:-apple-system,BlinkMacSystemFont,'
+                     "'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#1f2937;"
+                     'max-width:560px;margin:80px auto;padding:0 24px;text-align:center;">'
+                     '<p style="font-size:16px;">Thanks &mdash; I&rsquo;ve noted your interest in '
+                     + co_h + ". Your email should open now; if it doesn&rsquo;t, use the button below.</p>"
+                     '<p><a href="' + escape(mailto) + '" style="display:inline-block;background:#3d5a73;'
+                     'color:#ffffff;font-size:14px;font-weight:600;padding:10px 18px;border-radius:6px;'
+                     'text-decoration:none;">Email Chad about ' + co_h + "</a></p>"
+                     '<p style="font-size:12px;color:#6b7280;margin-top:32px;">'
+                     "Chad Gracia &middot; Gracia Group &middot; Rainmaker Securities</p>"
+                     "<script>try{navigator.sendBeacon(window.location.href);}catch(e){}"
+                     "window.location.href = " + json.dumps(mailto) + ";</script>"
+                     "</body></html>")}
+
+
 def _daily_signup_confirm_page():
     return {"statusCode": 200,
             "headers": {"Content-Type": "text/html; charset=utf-8",
@@ -4121,7 +4149,10 @@ def _handle_mailer_click_co(params, method="GET", meta=None):
     if not hmac.compare_digest(token, _mailer_token(pid_raw, "c:" + co_name)):
         return {"statusCode": 403, "body": "Invalid link"}
     pid = int(pid_raw)
+    email_mode = str(params.get("m") or "").strip() == "1"
     if method != "POST":
+        if email_mode:
+            return _click_email_page(co_name)
         return _click_interstitial(
             "https://7u6sphgup5gjuywcvpuwzhruiq0asgdz.lambda-url.us-east-1.on.aws/"
             "?name=" + urllib.parse.quote(co_name) + "&side=sell")
@@ -4184,7 +4215,9 @@ def _handle_mailer_click_co(params, method="GET", meta=None):
             else:
                 interest_status = "Buy Interest NOT added — no security entry for '" + co_name + "' in agent-data.json"
         call_pipeline_api("POST", "/notes.json",
-                          {"note": {"content": "Clicked " + co_name + " buy order via weekly newsletter "
+                          {"note": {"content": (("Requested info on " + co_name + " via news mailer ")
+                                                if email_mode else
+                                                ("Clicked " + co_name + " buy order via weekly newsletter "))
                                     + today + " — " + interest_status
                                     + (" (automated scan — not counted)" if cls != "human" else ""),
                                     "note_category_id": 69759,
@@ -4197,7 +4230,9 @@ def _handle_mailer_click_co(params, method="GET", meta=None):
             boto3.client("ses", region_name=SES_REGION).send_email(
                 Source=FROM_ADDR,
                 Destination={"ToAddresses": TO_ADDRS},
-                Message={"Subject": {"Data": "Mailer click: " + who + " — " + co_name + " (buy)", "Charset": "UTF-8"},
+                Message={"Subject": {"Data": ("Info request: " + who + " — " + co_name) if email_mode
+                                     else ("Mailer click: " + who + " — " + co_name + " (buy)"),
+                                     "Charset": "UTF-8"},
                          "Body": {"Text": {"Data": alert, "Charset": "UTF-8"}}},
             )
     except Exception as e:
@@ -4581,7 +4616,18 @@ def _render_news_email(first_name, person_id, content):
         did = _normalize_id(it.get("deal_id"))
         co = escape(str(it.get("company") or ""))
         head = escape(str(it.get("headline") or ""))
-        link = _news_click_url(person_id, did) if did else "https://trades.graciagroup.com/"
+        email_co = str(it.get("email_co") or "").strip()
+        if did:
+            link = _news_click_url(person_id, did)
+            btn = "Details and bidding &rarr;"
+        elif email_co:
+            link = _mailer_click_url_co(person_id, email_co) + "&m=1"
+            btn = "Click to learn more &rarr;"
+        else:
+            link = "https://trades.graciagroup.com/"
+            btn = "Details and bidding &rarr;"
+        if str(it.get("button_label") or "").strip():
+            btn = escape(str(it.get("button_label")).strip())
         if i > 1:
             out.append('<hr style="border:none;border-top:1px solid #e5e7eb;margin:18px 0;">')
         num = (str(i) + ". ") if len(content.get("items") or []) > 1 else ""
@@ -4594,7 +4640,7 @@ def _render_news_email(first_name, person_id, content):
             out.append(_news_para_html(p))
         out.append('<p style="margin:0 0 6px 0;"><a href="' + link + '" style="display:inline-block;'
                    'background:#3d5a73;color:#ffffff;font-size:13px;font-weight:600;padding:7px 14px;'
-                   'border-radius:6px;text-decoration:none;">Details and bidding &rarr;</a></p>')
+                   'border-radius:6px;text-decoration:none;">' + btn + '</a></p>')
         src = str(it.get("sources") or "").strip()
         if src:
             out.append('<p style="font-size:12px;color:#6b7280;margin:0;">News sources: ' + escape(src) + "</p>")
@@ -4621,7 +4667,9 @@ def _handle_news_save(body):
         data = json.loads(raw)
         assert isinstance(data, dict) and isinstance(data.get("items"), list)
         for it in data["items"]:
-            assert isinstance(it, dict) and str(it.get("deal_id") or "").isdigit()
+            assert isinstance(it, dict) and (
+                str(it.get("deal_id") or "").isdigit()
+                or (isinstance(it.get("email_co"), str) and it["email_co"].strip()))
     except Exception as e:
         return {"statusCode": 400, "headers": {"Content-Type": "application/json"},
                 "body": json.dumps({"ok": False, "error": "Invalid JSON: " + str(e)})}
