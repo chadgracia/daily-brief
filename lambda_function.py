@@ -4011,8 +4011,8 @@ def _click_email_page(co_name):
                      '<body style="font-family:-apple-system,BlinkMacSystemFont,'
                      "'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#1f2937;"
                      'max-width:560px;margin:80px auto;padding:0 24px;text-align:center;">'
-                     '<p style="font-size:16px;">Thanks &mdash; I&rsquo;ve noted your interest in '
-                     + co_h + ". Your email should open now; if it doesn&rsquo;t, use the button below.</p>"
+                     '<p style="font-size:16px;">Opening an email to Chad about '
+                     + co_h + "&hellip; If it doesn&rsquo;t open, use the button below.</p>"
                      '<p><a href="' + escape(mailto) + '" style="display:inline-block;background:#3d5a73;'
                      'color:#ffffff;font-size:14px;font-weight:600;padding:10px 18px;border-radius:6px;'
                      'text-decoration:none;">Email Chad about ' + co_h + "</a></p>"
