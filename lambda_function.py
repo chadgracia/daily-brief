@@ -58,6 +58,17 @@ CF_CEF = "custom_label_3796440"
 CF_NEWSLETTER = "custom_label_3775335"
 CF_EMAIL_STATUS = "custom_label_2447206"
 CF_PERSON_BUY_INTERESTS = "custom_label_3322093"
+CO_NAME_ALIASES = {
+    "science corp": "Science",
+    "science corp.": "Science",
+    "science corporation": "Science",
+}
+
+
+def _co_lookup_name(name):
+    n = str(name or "").strip()
+    return CO_NAME_ALIASES.get(n.lower(), n)
+
 CF_PERSON_SELL_INTERESTS = "custom_label_3759156"
 CF_PERSON_HOLD_INTERESTS = "custom_label_3740611"
 CF_COMPANY_HIGH_PRIORITY = "custom_label_4002734"
@@ -4174,7 +4185,7 @@ def _handle_mailer_click_co(params, method="GET", meta=None):
             agent_data = json.loads(agent_obj["Body"].read())
             sec_ids = agent_data.get("security_ids", {}) or {}
             entry = next((v.get("b") for k, v in sec_ids.items()
-                          if isinstance(v, dict) and k.strip().lower() == co_name.strip().lower()
+                          if isinstance(v, dict) and k.strip().lower() == _co_lookup_name(co_name).strip().lower()
                           and v.get("b")), None)
             if not entry:
                 # Stale lookup file — refresh Buy Interest entries from the live field API
@@ -4200,7 +4211,7 @@ def _handle_mailer_click_co(params, method="GET", meta=None):
                     except Exception as we:
                         print(f"agent-data write-back failed (non-fatal): {we}")
                     entry = next((v.get("b") for k, v in sec_ids.items()
-                                  if isinstance(v, dict) and k.strip().lower() == co_name.strip().lower()
+                                  if isinstance(v, dict) and k.strip().lower() == _co_lookup_name(co_name).strip().lower()
                                   and v.get("b")), None)
                 except Exception as re:
                     print(f"security_ids refresh failed: {re}")
@@ -4295,7 +4306,7 @@ def _handle_mailer_click(params, method="GET", meta=None):
             agent_data = json.loads(agent_obj["Body"].read())
             sec_ids = agent_data.get("security_ids", {}) or {}
             entry = next((v.get("b") for k, v in sec_ids.items()
-                          if isinstance(v, dict) and k.strip().lower() == co_name.strip().lower()
+                          if isinstance(v, dict) and k.strip().lower() == _co_lookup_name(co_name).strip().lower()
                           and v.get("b")), None)
             if not entry:
                 # Stale lookup file — refresh Buy Interest entries from the live field API
@@ -4321,7 +4332,7 @@ def _handle_mailer_click(params, method="GET", meta=None):
                     except Exception as we:
                         print(f"agent-data write-back failed (non-fatal): {we}")
                     entry = next((v.get("b") for k, v in sec_ids.items()
-                                  if isinstance(v, dict) and k.strip().lower() == co_name.strip().lower()
+                                  if isinstance(v, dict) and k.strip().lower() == _co_lookup_name(co_name).strip().lower()
                                   and v.get("b")), None)
                 except Exception as re:
                     print(f"security_ids refresh failed: {re}")
