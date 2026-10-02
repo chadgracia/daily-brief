@@ -4235,7 +4235,9 @@ def _handle_mailer_click_co(params, method="GET", meta=None):
                                     "person_id": pid}},
                           jwt=jwt)
         if cls == "human":
-            alert = (who + " (" + who_email + ") clicked " + co_name + " buy order in the weekly mailer.\n\n"
+            alert = (who + " (" + who_email + ") "
+                     + ("requested info on " + co_name + " via the news mailer.\n\n" if email_mode
+                        else "clicked " + co_name + " buy order in the weekly mailer.\n\n")
                      + interest_status + "\n\n"
                      + "Person: https://app.pipelinecrm.com/people/" + str(pid) + "\n")
             boto3.client("ses", region_name=SES_REGION).send_email(

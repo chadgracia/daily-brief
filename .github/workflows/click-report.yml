@@ -1,0 +1,127 @@
+name: click-report
+on:
+  workflow_dispatch:
+    inputs:
+      dates:
+        description: "Comma-separated UTC dates (YYYY-MM-DD)"
+        default: "2026-10-01,2026-10-02"
+permissions:
+  id-token: write
+  contents: read
+jobs:
+  report:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::271378210266:role/github-actions-deploy
+          aws-region: us-east-1
+      - name: Install boto3
+        run: pip install boto3
+      - name: Click report (read-only)
+        shell: python
+        env:
+          DATES: ${{ inputs.dates }}
+        run: |
+          import json, os, re
+          from collections import Counter, defaultdict
+          from datetime import datetime
+          import boto3
+
+          BUCKET = "full-pipeline-cache"
+          SCANNER_KEY = "mailer-scanner-pids.json"
+          dates = [d.strip() for d in os.environ.get("DATES", "").split(",") if d.strip()]
+          s3 = boto3.client("s3", region_name="us-east-1")
+
+          def bucket_reason(r):
+              r = str(r or "")
+              if r == "":
+                  return "(human)"
+              if r == "previously flagged today":
+                  return r
+              if r == "scanner user-agent":
+                  return r
+              if r.startswith("data-center IP"):
+                  return "data-center IP"
+              if re.match(r"^clicked -?\d+(\.\d+)?s after delivery$", r):
+                  return "clicked Ns after delivery"
+              if r.startswith("IP ") and " reached " in r:
+                  return "IP ... reached N recipients"
+              if r.endswith(" clicks in 10 seconds"):
+                  return "N clicks in 10 seconds"
+              return "other: " + r
+
+          def parse_ts(s):
+              try:
+                  return datetime.fromisoformat(str(s))
+              except Exception:
+                  return None
+
+          clicks = []
+          for d in dates:
+              n = 0
+              for page in s3.get_paginator("list_objects_v2").paginate(Bucket=BUCKET, Prefix="click-log/" + d + "/"):
+                  for o in page.get("Contents", []) or []:
+                      try:
+                          rec = json.loads(s3.get_object(Bucket=BUCKET, Key=o["Key"])["Body"].read())
+                          rec["_key"] = o["Key"]
+                          clicks.append(rec)
+                          n += 1
+                      except Exception as e:
+                          print("read failed", o["Key"], e)
+              print(f"{d}: {n} click-log objects")
+
+          print("=" * 70)
+          print("Total clicks:", len(clicks))
+          print("Distinct pids:", len({str(c.get('pid')) for c in clicks}))
+          print("\nBy verdict:")
+          for k, v in Counter(str(c.get("verdict")) for c in clicks).most_common():
+              print(f"  {v:6d}  {k}")
+
+          print("\nBy reason (bucketed):")
+          for k, v in Counter(bucket_reason(c.get("reason")) for c in clicks).most_common():
+              print(f"  {v:6d}  {k}")
+
+          print("\nTop 10 orgs for data-center IP:")
+          dc_orgs = Counter(str(c.get("org") or "") for c in clicks
+                            if str(c.get("reason") or "").startswith("data-center IP"))
+          for k, v in dc_orgs.most_common(10):
+              print(f"  {v:6d}  {k}")
+
+          by_pid = defaultdict(list)
+          for c in clicks:
+              by_pid[str(c.get("pid"))].append(c)
+
+          print("\nPer pid (pid | first click ts | clicks | verdicts | first non-human reason):")
+          blocked_likely_real = []
+          rows = []
+          for pid, cs in by_pid.items():
+              cs.sort(key=lambda c: str(c.get("ts") or ""))
+              first = cs[0]
+              verdicts = sorted({str(c.get("verdict")) for c in cs})
+              fnh = next((str(c.get("reason")) for c in cs if str(c.get("verdict")) != "human"), "")
+              rows.append((str(first.get("ts")), pid, len(cs), verdicts, fnh))
+              if "scanner" in verdicts:
+                  t0 = parse_ts(first.get("ts"))
+                  if t0 and any((parse_ts(c.get("ts")) or t0).timestamp() - t0.timestamp() > 600 for c in cs):
+                      blocked_likely_real.append(pid)
+          for ts, pid, n, verdicts, fnh in sorted(rows):
+              print(f"  {pid:>10} | {ts} | {n:3d} | {','.join(verdicts)} | {fnh}")
+
+          print("\nPids flagged scanner with a click >10 min after their first click:",
+                len(blocked_likely_real))
+          for pid in sorted(blocked_likely_real):
+              print("  ", pid)
+
+          print("=" * 70)
+          print(f"s3://{BUCKET}/{SCANNER_KEY} (read by _load_scanner_set):")
+          try:
+              data = json.loads(s3.get_object(Bucket=BUCKET, Key=SCANNER_KEY)["Body"].read())
+              for d in dates:
+                  pids = list(data.get(d, []) or [])
+                  print(f"  {d}: {len(pids)} pids; first 20: {pids[:20]}")
+              others = sorted(k for k in data if k not in dates)
+              if others:
+                  print("  other date keys present:", others)
+          except Exception as e:
+              print("  could not read:", e)
