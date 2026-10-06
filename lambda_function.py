@@ -3698,7 +3698,7 @@ def _mailer_buy_table(title, companies, person_id, buyer_counts=None, logos=None
     ]
     if not companies:
         out.append("<tr><td " + td + ">None this week</td></tr>")
-    for name, n in sorted(companies, key=lambda t: t[0].lower()):
+    for name, n in sorted(companies, key=lambda t: (-(t[1] or 0), t[0].lower())):
         href = _mailer_click_url_co(person_id, name)
         buyers = str(n) + " Buyer" + ("" if n == 1 else "s") if n else "Buyers waiting"
         out.append(
