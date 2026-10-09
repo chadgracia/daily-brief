@@ -69,6 +69,14 @@ def _co_lookup_name(name):
     n = str(name or "").strip()
     return CO_NAME_ALIASES.get(n.lower(), n)
 
+
+# RMS General Counsel: firm-level no-solicitation list (normalized: lowercase, no spaces).
+NO_SOLICIT_COMPANIES = {"openevidence"}
+
+
+def _is_no_solicit(name):
+    return str(name or "").strip().lower().replace(" ", "") in NO_SOLICIT_COMPANIES
+
 CF_PERSON_SELL_INTERESTS = "custom_label_3759156"
 CF_PERSON_HOLD_INTERESTS = "custom_label_3740611"
 CF_COMPANY_HIGH_PRIORITY = "custom_label_4002734"
@@ -3561,6 +3569,8 @@ def _mailer_eligible(deals, buyer_counts=None):
     for d in deals:
         if _stage_id(d) not in (STAGE_FIRM, STAGE_INQUIRY):
             continue
+        if _is_no_solicit(_company_name(d) or _deal_title(d)):
+            continue
         side = _deal_side(d)
         if side == "SELL":
             sells.append(d)
@@ -3640,7 +3650,7 @@ def _mailer_buy_companies(s3, counts):
         pass
     out = []
     for key, n in counts.items():
-        if n >= 5:
+        if n >= 5 and not _is_no_solicit(display.get(key, key)):
             out.append((display.get(key, key), n))
     out.sort(key=lambda t: (-t[1], t[0].lower()))
     return out
@@ -4006,6 +4016,23 @@ def _click_interstitial(dest):
                      "</body></html>")}
 
 
+def _click_no_solicit_page():
+    return {"statusCode": 200,
+            "headers": {"Content-Type": "text/html; charset=utf-8",
+                        "Cache-Control": "no-store"},
+            "body": ('<!doctype html><html lang="en"><head><meta charset="utf-8">'
+                     '<meta name="viewport" content="width=device-width, initial-scale=1">'
+                     '<meta name="robots" content="noindex">'
+                     "<title>Rainmaker Securities</title></head>"
+                     '<body style="font-family:-apple-system,BlinkMacSystemFont,'
+                     "'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#1f2937;"
+                     'max-width:560px;margin:80px auto;padding:0 24px;text-align:center;">'
+                     '<p style="font-size:16px;">Rainmaker Securities does not work on any '
+                     "matters involving OpenEvidence.</p>"
+                     "<script>try{navigator.sendBeacon(window.location.href);}catch(e){}</script>"
+                     "</body></html>")}
+
+
 def _click_email_page(co_name):
     co = str(co_name)
     mailto = ("mailto:cgracia@rainmakersecurities.com?subject="
@@ -4161,7 +4188,10 @@ def _handle_mailer_click_co(params, method="GET", meta=None):
         return {"statusCode": 403, "body": "Invalid link"}
     pid = int(pid_raw)
     email_mode = str(params.get("m") or "").strip() == "1"
+    blocked = _is_no_solicit(co_name)
     if method != "POST":
+        if blocked:
+            return _click_no_solicit_page()
         if email_mode:
             return _click_email_page(co_name)
         return _click_interstitial(
@@ -4173,6 +4203,8 @@ def _handle_mailer_click_co(params, method="GET", meta=None):
     try:
         s3 = boto3.client("s3", region_name=S3_REGION)
         cls = _classify_click(s3, meta, pid)
+        if blocked:
+            return redirect
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         jwt = get_jwt()
         cur = call_pipeline_api("GET", f"/people/{pid}.json", jwt=jwt)
@@ -4269,6 +4301,8 @@ def _handle_mailer_click(params, method="GET", meta=None):
             s3 = boto3.client("s3", region_name=S3_REGION)
             deals = (_fetch_json(s3, "deals.json") or {}).get("deals", []) or []
             deal = next((d for d in deals if _normalize_id(d.get("id")) == did), None)
+            if deal and _is_no_solicit(_company_name(deal) or _deal_title(deal)):
+                return _click_no_solicit_page()
             if deal and _deal_side(deal) == "BUY":
                 co_name = _company_name(deal) or _deal_title(deal)
                 dest = ("https://7u6sphgup5gjuywcvpuwzhruiq0asgdz.lambda-url.us-east-1.on.aws/"
@@ -4291,6 +4325,8 @@ def _handle_mailer_click(params, method="GET", meta=None):
         if side not in ("SELL", "BUY") or cid is None:
             return redirect
         co_name = _company_name(deal) or _deal_title(deal)
+        if _is_no_solicit(co_name):
+            return redirect
         if side == "BUY":
             redirect = {"statusCode": 302,
                         "headers": {"Location": "https://7u6sphgup5gjuywcvpuwzhruiq0asgdz.lambda-url.us-east-1.on.aws/"
@@ -4592,6 +4628,17 @@ def _news_para_html(text):
     return '<p style="font-size:11pt;margin:0 0 1em 0;">' + t + "</p>"
 
 
+def _news_item_no_solicit(it):
+    return _is_no_solicit(it.get("company")) or _is_no_solicit(it.get("email_co"))
+
+
+def _news_send_content(content):
+    """Copy of the news content with no-solicit items removed; the saved file is untouched."""
+    items = content.get("items") or []
+    kept = [it for it in items if not _news_item_no_solicit(it)]
+    return dict(content, items=kept), len(items) - len(kept)
+
+
 def _render_news_email(first_name, person_id, content):
     greet = "Hello " + escape(first_name) + "," if first_name else "Hello,"
     daily_url = (MAILER_BASE_URL + "?view=daily&amp;pid=" + str(person_id)
@@ -4711,7 +4758,7 @@ def _handle_news_test(body):
         _changed = True
     if _changed:
         _save_news_mailer(content)
-    html = _render_news_email("Chad", MAILER_PREVIEW_PID, content)
+    html = _render_news_email("Chad", MAILER_PREVIEW_PID, _news_send_content(content)[0])
     boto3.client("ses", region_name=SES_REGION).send_email(
         Source=MAILER_FROM,
         Destination={"ToAddresses": ["cgracia@rainmakersecurities.com"]},
@@ -4731,7 +4778,7 @@ def _handle_news_send(body):
     sid_raw = str(body.get("search_id") or "").strip()
     search_id = int(sid_raw) if sid_raw.isdigit() else MAILER_SEARCH_ID
     s3 = boto3.client("s3", region_name=S3_REGION)
-    content = _load_news_mailer(s3)
+    content = _news_send_content(_load_news_mailer(s3))[0]
     if not content.get("items") and not str(content.get("intro") or "").strip():
         return {"statusCode": 400, "headers": {"Content-Type": "application/json"},
                 "body": json.dumps({"ok": False, "error": "nothing to send: no intro and no items"})}
@@ -4866,7 +4913,11 @@ NEWS_COMPOSER_SCRIPT = """
 def _render_news_composer(pid):
     s3 = boto3.client("s3", region_name=S3_REGION)
     content = _load_news_mailer(s3)
-    email_html = _render_news_email("Chad", pid, content)
+    send_content, n_blocked = _news_send_content(content)
+    email_html = _render_news_email("Chad", pid, send_content)
+    blocked_html = ('<p style="color:#b91c1c;font-size:13px;font-weight:600;margin:0 0 12px 0;">'
+                    "OpenEvidence item removed &mdash; RMS no-solicitation notice.</p>"
+                    if n_blocked else "")
     saved_subject = str(content.get("_subject") or "Recent news and deal updates for ten pre-IPO opportunities")
     saved_search = str(content.get("_search_id") or "19530439")
     raw = json.dumps({k: v for k, v in content.items() if not str(k).startswith("_")},
@@ -4883,6 +4934,7 @@ def _render_news_composer(pid):
         '<h1 style="font-size:20px;margin:0 0 4px 0;">News mailer</h1>'
         '<p style="color:#6b7280;font-size:13px;margin:0 0 12px 0;">Edit the content JSON, save, and the '
         "preview updates. Step 1: nothing is sent to the list from this page.</p>"
+        + blocked_html +
         '<textarea id="news-json" spellcheck="false" style="width:100%;height:320px;padding:10px;'
         "border:1px solid #d1d5db;border-radius:6px;font-family:Menlo,Consolas,monospace;font-size:12px;"
         'box-sizing:border-box;">' + escape(raw) + "</textarea>"
