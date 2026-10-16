@@ -4706,7 +4706,7 @@ def _render_news_email(first_name, person_id, content):
             out.append('<p style="font-size:12px;color:#6b7280;margin:0;">News sources: ' + escape(src) + "</p>")
     out.append('<p style="font-size:11pt;margin:28px 0 1em 0;">Best wishes,<br><br>Chad Gracia<br>'
                "Registered Representative, Rainmaker Securities<br>"
-               "WhatsApp: +380 99 346 4098</p>")
+               "WhatsApp: +1-917-549-8969</p>")
     _ps = str(content.get("ps") or "").strip()
     if _ps:
         out.append(_news_para_html(_ps))
@@ -5011,7 +5011,7 @@ MAILER_DISCLOSURE_HTML = (
 MAILER_SIGNATURE_HTML = (
     '<p style="font-size:14px;margin:28px 0 0 0;color:#1f2937;">Chad Gracia<br>'
     "Registered Representative, Rainmaker Securities<br>"
-    "WhatsApp: +380 99 346 4098</p>"
+    "WhatsApp: +1-917-549-8969</p>"
     '<p style="font-size:14px;margin:10px 0 0 0;">Indications for Accredited Investors: '
     '<a href="https://trades.graciagroup.com/" style="color:#1d4ed8;">https://trades.graciagroup.com/</a></p>'
 ) + MAILER_DISCLOSURE_HTML
