@@ -18,6 +18,7 @@ SES_REGION = "us-east-1"
 
 FROM_ADDR = "agent@agent.graciagroup.com"
 TO_ADDRS = ["cgracia@rainmakersecurities.com"]
+WRITE_CLICK_NOTES = False  # Pipeline notes for mailer clicks disabled Oct 2026 — clicks are still logged to S3 and human clicks still email Chad
 
 PIPELINE_DEAL_URL = "https://app.pipelinecrm.com/deals/{}"
 PIPELINE_PERSON_URL = "https://app.pipelinecrm.com/people/{}"
@@ -4257,15 +4258,16 @@ def _handle_mailer_click_co(params, method="GET", meta=None):
                                    else f"Buy Interest write FAILED ({res.get('status')})")
             else:
                 interest_status = "Buy Interest NOT added — no security entry for '" + co_name + "' in agent-data.json"
-        call_pipeline_api("POST", "/notes.json",
-                          {"note": {"content": (("Requested info on " + co_name + " via news mailer ")
-                                                if email_mode else
-                                                ("Clicked " + co_name + " buy order via weekly newsletter "))
-                                    + today + " — " + interest_status
-                                    + (" (automated scan — not counted)" if cls != "human" else ""),
-                                    "note_category_id": 69759,
-                                    "person_id": pid}},
-                          jwt=jwt)
+        if WRITE_CLICK_NOTES:
+            call_pipeline_api("POST", "/notes.json",
+                              {"note": {"content": (("Requested info on " + co_name + " via news mailer ")
+                                                    if email_mode else
+                                                    ("Clicked " + co_name + " buy order via weekly newsletter "))
+                                        + today + " — " + interest_status
+                                        + (" (automated scan — not counted)" if cls != "human" else ""),
+                                        "note_category_id": 69759,
+                                        "person_id": pid}},
+                              jwt=jwt)
         if cls == "human":
             alert = (who + " (" + who_email + ") "
                      + ("requested info on " + co_name + " via the news mailer.\n\n" if email_mode
@@ -4388,10 +4390,11 @@ def _handle_mailer_click(params, method="GET", meta=None):
         note = ("Clicked " + co_name + " " + side.lower() + " order via " + src_label + " "
                 + today + " — " + interest_status
                 + (" (automated scan — not counted)" if cls != "human" else ""))
-        call_pipeline_api("POST", "/notes.json",
-                          {"note": {"content": note, "note_category_id": 69759,
-                                    "person_id": pid, "company_id": cid, "deal_id": did}},
-                          jwt=jwt)
+        if WRITE_CLICK_NOTES:
+            call_pipeline_api("POST", "/notes.json",
+                              {"note": {"content": note, "note_category_id": 69759,
+                                        "person_id": pid, "company_id": cid, "deal_id": did}},
+                              jwt=jwt)
         if cls == "human":
             alert = (who + " (" + who_email + ") clicked " + co_name + " " + side.lower()
                      + " order in the weekly mailer.\n\n" + interest_status + "\n\n"
