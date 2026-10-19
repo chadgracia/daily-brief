@@ -5,6 +5,7 @@ import hmac
 import json
 import os
 import re
+import time
 import urllib.error
 import urllib.request
 from datetime import datetime, timedelta, timezone
@@ -3582,14 +3583,16 @@ def _unsub_token(person_id, email, issued=None, nonce=None):
     if issued is None:
         issued = datetime.now(timezone.utc).timestamp()
     nonce = nonce or os.urandom(8)
-    plain = (str(person_id) + "|" + (email or "").strip().lower() + "|" + str(int(issued))).encode()
+    pid = "" if person_id is None else str(person_id)
+    plain = (pid + "|" + (email or "").strip().lower() + "|" + str(int(issued))).encode()
     ct = bytes(a ^ b for a, b in zip(plain, _unsub_keystream(enc_key, nonce, len(plain))))
     tag = hmac.new(mac_key, nonce + ct, hashlib.sha256).digest()[:16]
     return base64.urlsafe_b64encode(nonce + ct + tag).decode().rstrip("=")
 
 
 def _parse_unsub_token(token, now=None):
-    """Return (person_id, email) for a valid, unexpired token, else None."""
+    """Return (person_id, email) for a valid, unexpired token, else None.
+    person_id is None for email-only tokens (recipient has no Pipeline person)."""
     try:
         enc_key, mac_key = _unsub_keys()
         raw = base64.urlsafe_b64decode(str(token) + "=" * (-len(str(token)) % 4))
@@ -3603,16 +3606,29 @@ def _parse_unsub_token(token, now=None):
     plain = bytes(a ^ b for a, b in zip(ct, _unsub_keystream(enc_key, nonce, len(ct)))).decode("utf-8", "replace")
     pid_s, _, rest = plain.partition("|")
     email, _, issued_s = rest.rpartition("|")
-    if not pid_s.isdigit() or not issued_s.isdigit():
+    if not issued_s.isdigit() or not (pid_s.isdigit() or (pid_s == "" and email)):
         return None
     now = datetime.now(timezone.utc).timestamp() if now is None else now
     if now - int(issued_s) > UNSUB_TOKEN_TTL_DAYS * 86400:
         return None
-    return int(pid_s), email
+    return (int(pid_s) if pid_s else None), email
 
 
 def _unsub_url(person_id, email):
     return MAILER_BASE_URL + "?view=unsub&u=" + _unsub_token(person_id, email)
+
+
+# Composer previews get a link that resolves to the "invalid link" page and records nothing.
+UNSUB_PREVIEW_URL = MAILER_BASE_URL + "?view=unsub&u=preview"
+
+
+def _person_id_for_email(s3, email):
+    """Pipeline person id for an email from the people.json cache, else None."""
+    want = (email or "").strip().lower()
+    for p in (_fetch_json(s3, "people.json") or {}).get("people", []) or []:
+        if want and _person_email(p).lower() == want:
+            return _normalize_id(p.get("id"))
+    return None
 
 
 def _mailer_unsub_footer(unsub_url):
@@ -3646,6 +3662,23 @@ def _mailer_send_one(ses, to_addr, subject, html, unsub_url):
     )
 
 
+UNSUB_RETRY_ATTEMPTS = 4
+UNSUB_RETRY_BASE_DELAY = 1.0
+
+
+def _pipeline_call_retry(method, endpoint, payload=None, jwt=None, attempts=UNSUB_RETRY_ATTEMPTS):
+    """call_pipeline_api with exponential backoff (1s, 2s, 4s…) on 429 / 5xx."""
+    res = {}
+    for i in range(attempts):
+        res = call_pipeline_api(method, endpoint, payload, jwt=jwt)
+        status = res.get("status") or 0
+        if status != 429 and status < 500:
+            return res
+        if i < attempts - 1:
+            time.sleep(UNSUB_RETRY_BASE_DELAY * (2 ** i))
+    return res
+
+
 def _find_tag_id(data, name):
     if isinstance(data, dict):
         data = (data.get("entries") or data.get("predefined_contacts_tags")
@@ -3656,7 +3689,7 @@ def _find_tag_id(data, name):
     return None
 
 
-def _resolve_unsub_tag_id(jwt, create=False):
+def _resolve_unsub_tag_id(jwt, create=False, attempts=UNSUB_RETRY_ATTEMPTS):
     """Pipeline tag id for "Unsub: Weekly". UNSUB_WEEKLY_TAG_ID env var pins it;
     otherwise looked up by name (and created when create=True). Cached per container."""
     env = str(os.environ.get("UNSUB_WEEKLY_TAG_ID") or "").strip()
@@ -3664,11 +3697,13 @@ def _resolve_unsub_tag_id(jwt, create=False):
         return int(env)
     if _UNSUB_TAG_CACHE.get("id"):
         return _UNSUB_TAG_CACHE["id"]
-    res = call_pipeline_api("GET", "/admin/predefined_contacts_tags.json?per_page=200", jwt=jwt)
+    res = _pipeline_call_retry("GET", "/admin/predefined_contacts_tags.json?per_page=200", jwt=jwt,
+                               attempts=attempts)
     tag_id = _find_tag_id(res.get("data"), UNSUB_TAG_NAME) if res.get("status") == 200 else None
     if tag_id is None and create:
-        res = call_pipeline_api("POST", "/admin/predefined_contacts_tags.json",
-                                {"predefined_contacts_tag": {"name": UNSUB_TAG_NAME}}, jwt=jwt)
+        res = _pipeline_call_retry("POST", "/admin/predefined_contacts_tags.json",
+                                   {"predefined_contacts_tag": {"name": UNSUB_TAG_NAME}}, jwt=jwt,
+                                   attempts=attempts)
         if res.get("status") in (200, 201) and isinstance(res.get("data"), dict):
             tag_id = _normalize_id(res["data"].get("id"))
     if tag_id is not None:
@@ -3676,19 +3711,20 @@ def _resolve_unsub_tag_id(jwt, create=False):
     return tag_id
 
 
-def _tag_person_unsub(pid, jwt):
+def _tag_person_unsub(pid, jwt, attempts=UNSUB_RETRY_ATTEMPTS):
     """Add the "Unsub: Weekly" tag to a Pipeline person. Returns (ok, detail)."""
-    tag_id = _resolve_unsub_tag_id(jwt, create=True)
+    tag_id = _resolve_unsub_tag_id(jwt, create=True, attempts=attempts)
     if tag_id is None:
         return False, "could not find or create the '" + UNSUB_TAG_NAME + "' tag in Pipeline"
-    cur = call_pipeline_api("GET", f"/people/{pid}.json", jwt=jwt)
+    cur = _pipeline_call_retry("GET", f"/people/{pid}.json", jwt=jwt, attempts=attempts)
     if cur.get("status") != 200 or not isinstance(cur.get("data"), dict):
         return False, "person read failed (" + str(cur.get("status")) + ")"
     if _has_tag(cur["data"], tag_id):
         return True, "already tagged"
     ids = [int(t) for t in (cur["data"].get("predefined_contacts_tag_ids") or []) if str(t).isdigit()]
-    res = call_pipeline_api("PUT", f"/people/{pid}.json",
-                            {"person": {"predefined_contacts_tag_ids": ids + [tag_id]}}, jwt=jwt)
+    res = _pipeline_call_retry("PUT", f"/people/{pid}.json",
+                               {"person": {"predefined_contacts_tag_ids": ids + [tag_id]}}, jwt=jwt,
+                               attempts=attempts)
     if res.get("status") != 200:
         return False, "tag write failed (" + str(res.get("status")) + "): " + str(res.get("data"))[:300]
     data = res.get("data")
@@ -3705,13 +3741,19 @@ def _load_unsub_list(s3):
     return people
 
 
+def _unsub_list_key(pid, email):
+    return str(pid) if pid is not None else "email:" + (email or "").strip().lower()
+
+
 def _add_to_unsub_list(s3, pid, email):
     """Record the opt-out in S3 (read at send time, so it takes effect before any
-    people.json refresh). Returns True if this person was not already on the list."""
+    people.json refresh). Keyed by person id, or "email:<addr>" for email-only tokens.
+    Returns True if this entry was not already on the list."""
     people = _load_unsub_list(s3)
-    if str(pid) in people:
+    key = _unsub_list_key(pid, email)
+    if key in people:
         return False
-    people[str(pid)] = {"email": (email or "").lower(),
+    people[key] = {"email": (email or "").lower(),
                         "at": datetime.now(timezone.utc).isoformat()}
     s3.put_object(Bucket=S3_BUCKET, Key=UNSUB_LIST_KEY,
                   Body=json.dumps({"people": people}).encode("utf-8"),
@@ -3719,14 +3761,82 @@ def _add_to_unsub_list(s3, pid, email):
     return True
 
 
+UNSUB_PENDING_KEY = "mailer-unsub-pending.json"
+UNSUB_RETRY_MAX_PASSES = 20
+
+
+def _load_unsub_pending(s3):
+    try:
+        return (_fetch_json(s3, UNSUB_PENDING_KEY) or {}).get("people") or {}
+    except Exception:
+        return {}
+
+
+def _save_unsub_pending(s3, people):
+    s3.put_object(Bucket=S3_BUCKET, Key=UNSUB_PENDING_KEY,
+                  Body=json.dumps({"people": people}).encode("utf-8"),
+                  ContentType="application/json")
+
+
+def _queue_unsub_retry(s3, pid, email, detail):
+    """Queue a person whose Pipeline tag write failed; _retry_unsub_queue picks it up."""
+    pending = _load_unsub_pending(s3)
+    entry = pending.get(str(pid)) or {"email": (email or "").lower(), "passes": 0,
+                                      "queued_at": datetime.now(timezone.utc).isoformat()}
+    entry["last_error"] = detail
+    pending[str(pid)] = entry
+    _save_unsub_pending(s3, pending)
+
+
+def _retry_unsub_queue(s3, limit=25, attempts=2):
+    """Retry queued Pipeline tag writes. Runs before each weekly/news send and on the
+    scheduled daily run. Returns (tagged, still_pending); still_pending is -1 on error.
+    Never raises."""
+    try:
+        pending = _load_unsub_pending(s3)
+        if not pending:
+            return 0, 0
+        jwt = get_jwt()
+        tagged = 0
+        for pid in list(pending)[:limit]:
+            try:
+                ok, detail = _tag_person_unsub(int(pid), jwt, attempts=attempts)
+            except Exception as e:
+                ok, detail = False, "Pipeline error: " + str(e)
+            if ok:
+                pending.pop(pid)
+                tagged += 1
+                continue
+            pending[pid]["passes"] = int(pending[pid].get("passes") or 0) + 1
+            pending[pid]["last_error"] = detail
+            if pending[pid]["passes"] >= UNSUB_RETRY_MAX_PASSES:
+                print(f"unsub tag retry gave up pid={pid}: {detail}")
+                pending.pop(pid)
+        _save_unsub_pending(s3, pending)
+        return tagged, len(pending)
+    except Exception as e:
+        print(f"unsub retry queue failed: {e}")
+        return 0, -1
+
+
 def _record_unsub(pid, email):
-    """S3 opt-out list (must succeed — raises otherwise) + Pipeline tag + alert to Chad."""
+    """S3 opt-out list (must succeed — raises otherwise) + Pipeline tag + alert to Chad.
+    A failed tag write (after retries) is queued for a later pass, not dropped."""
     s3 = boto3.client("s3", region_name=S3_REGION)
     is_new = _add_to_unsub_list(s3, pid, email)
-    try:
-        ok, detail = _tag_person_unsub(pid, get_jwt())
-    except Exception as e:
-        ok, detail = False, "Pipeline error: " + str(e)
+    if pid is None:
+        ok, detail = True, "no Pipeline person in link (email-only) — S3 opt-out list only"
+    else:
+        try:
+            ok, detail = _tag_person_unsub(pid, get_jwt())
+        except Exception as e:
+            ok, detail = False, "Pipeline error: " + str(e)
+        if not ok:
+            try:
+                _queue_unsub_retry(s3, pid, email, detail)
+                detail += " — queued for retry on the next send / scheduled run"
+            except Exception as e:
+                detail += " — retry queue write failed: " + str(e)
     if is_new or not ok:
         try:
             boto3.client("ses", region_name=SES_REGION).send_email(
@@ -3736,7 +3846,8 @@ def _record_unsub(pid, email):
                          "Body": {"Text": {"Data": (email or "") + " unsubscribed from the weekly mailer.\n"
                                            "Pipeline '" + UNSUB_TAG_NAME + "' tag: " + detail + "\n"
                                            "They are on the S3 opt-out list and will be skipped at send.\n"
-                                           "Person: https://app.pipelinecrm.com/people/" + str(pid) + "\n",
+                                           + ("Person: https://app.pipelinecrm.com/people/" + str(pid) + "\n"
+                                              if pid is not None else ""),
                                            "Charset": "UTF-8"}}})
         except Exception as e:
             print(f"unsub alert failed pid={pid}: {e}")
@@ -3745,7 +3856,7 @@ def _record_unsub(pid, email):
     return ok
 
 
-def _unsub_page(message, status=200):
+def _unsub_page(message, status=200, detail=""):
     return {"statusCode": status,
             "headers": {"Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store"},
             "body": ('<!doctype html><html lang="en"><head><meta charset="utf-8">'
@@ -3755,7 +3866,8 @@ def _unsub_page(message, status=200):
                      "'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#1f2937;"
                      'max-width:560px;margin:80px auto;padding:0 24px;text-align:center;">'
                      '<h1 style="font-size:22px;">' + message + "</h1>"
-                     '<p style="color:#6b7280;font-size:14px;">Chad Gracia &middot; Gracia Group '
+                     + (('<p style="font-size:15px;">' + detail + "</p>") if detail else "")
+                     + '<p style="color:#6b7280;font-size:14px;">Chad Gracia &middot; Gracia Group '
                      "&middot; Rainmaker Securities</p></body></html>")}
 
 
@@ -3778,7 +3890,74 @@ def _handle_unsub(params, method="GET"):
                            "&ldquo;unsubscribe&rdquo; and we&rsquo;ll remove you.", 500)
     if method == "POST":
         return {"statusCode": 200, "body": ""}
-    return _unsub_page("You&rsquo;ve been unsubscribed from the weekly list.")
+    return _unsub_page("You&rsquo;ve been unsubscribed from the weekly list.",
+                       detail=("Recorded for <strong>" + escape(email) + "</strong>") if email else "")
+
+
+def _handle_unsub_undo(params):
+    """Admin (key-protected): reverse an opt-out. ?view=unsub_undo&pid=<id>&email=<addr>
+    Removes matching S3 opt-out + retry-queue entries and the Pipeline tag, and reports
+    which Pipeline people have that email."""
+    pid_raw = str(params.get("pid") or "").strip()
+    email = str(params.get("email") or "").strip().lower()
+    if not pid_raw.isdigit() and not email:
+        return {"statusCode": 400, "body": "pid or email required"}
+    pid = int(pid_raw) if pid_raw.isdigit() else None
+    s3 = boto3.client("s3", region_name=S3_REGION)
+    out = []
+
+    def _match(k, v):
+        return ((pid is not None and k == str(pid))
+                or (email and (k == "email:" + email
+                               or (isinstance(v, dict) and str(v.get("email") or "").lower() == email))))
+
+    people = _load_unsub_list(s3)
+    gone = [k for k, v in people.items() if _match(k, v)]
+    for k in gone:
+        people.pop(k)
+    s3.put_object(Bucket=S3_BUCKET, Key=UNSUB_LIST_KEY,
+                  Body=json.dumps({"people": people}).encode("utf-8"), ContentType="application/json")
+    out.append("S3 opt-out entries removed: " + (", ".join(gone) or "none"))
+    pending = _load_unsub_pending(s3)
+    gone_q = [k for k, v in pending.items() if _match(k, v)]
+    for k in gone_q:
+        pending.pop(k)
+    _save_unsub_pending(s3, pending)
+    out.append("Retry-queue entries removed: " + (", ".join(gone_q) or "none"))
+
+    jwt = get_jwt()
+    if pid is not None:
+        tag_id = _resolve_unsub_tag_id(jwt)
+        cur = _pipeline_call_retry("GET", f"/people/{pid}.json", jwt=jwt)
+        if tag_id is None:
+            out.append("Pipeline tag: '" + UNSUB_TAG_NAME + "' tag not found — nothing to remove")
+        elif cur.get("status") != 200 or not isinstance(cur.get("data"), dict):
+            out.append("Pipeline tag: person read failed (" + str(cur.get("status")) + ")")
+        elif not _has_tag(cur["data"], tag_id):
+            out.append("Pipeline tag: person " + str(pid) + " was not tagged")
+        else:
+            ids = [int(t) for t in (cur["data"].get("predefined_contacts_tag_ids") or [])
+                   if str(t).isdigit() and int(t) != tag_id]
+            res = _pipeline_call_retry("PUT", f"/people/{pid}.json",
+                                       {"person": {"predefined_contacts_tag_ids": ids}}, jwt=jwt)
+            out.append("Pipeline tag: removed from person " + str(pid) if res.get("status") == 200
+                       else "Pipeline tag: removal FAILED (" + str(res.get("status")) + "): "
+                       + str(res.get("data"))[:300])
+    if email:
+        cached = [str(_normalize_id(p.get("id")))
+                  for p in (_fetch_json(s3, "people.json") or {}).get("people", []) or []
+                  if _person_email(p).lower() == email]
+        out.append("Pipeline people with " + email + " (people.json cache): " + (", ".join(cached) or "none"))
+        res = _pipeline_call_retry("GET", "/people.json?per_page=200&conditions[person_email]="
+                                   + urllib.parse.quote(email), jwt=jwt)
+        data = res.get("data")
+        entries = (data.get("entries") or []) if isinstance(data, dict) else []
+        live = [str(p.get("id")) for p in entries
+                if isinstance(p, dict) and _person_email(p).lower() == email]
+        out.append("Pipeline people with " + email + " (live API, status " + str(res.get("status"))
+                   + "): " + (", ".join(live) or "none"))
+    return {"statusCode": 200, "headers": {"Content-Type": "text/plain; charset=utf-8"},
+            "body": "\n".join(out) + "\n"}
 
 
 def _mailer_suppressed(s3):
@@ -3788,6 +3967,8 @@ def _mailer_suppressed(s3):
     for k, v in _load_unsub_list(s3).items():
         if str(k).isdigit():
             pids.add(int(k))
+        elif str(k).startswith("email:") and len(str(k)) > 6:
+            emails.add(str(k)[6:])
         if isinstance(v, dict) and v.get("email"):
             emails.add(str(v["email"]).lower())
     tag_id = None
@@ -4045,7 +4226,7 @@ def _render_mailer_email(first_name, person_id, sells, buys, buyer_counts=None, 
         + _mailer_table("Sell orders — current availability", sells, person_id, None, logos)
         + _mailer_buy_table("Buy orders — active demand", buys, person_id, buyer_counts, logos)
         + MAILER_SIGNATURE_HTML
-        + _mailer_unsub_footer(unsub_url or _unsub_url(person_id, ""))
+        + _mailer_unsub_footer(unsub_url or UNSUB_PREVIEW_URL)
         + "</div>"
     )
 
@@ -5074,6 +5255,7 @@ def _handle_news_send(body):
         return {"statusCode": 400, "headers": {"Content-Type": "application/json"},
                 "body": json.dumps({"ok": False, "error": "nothing to send: no intro and no items"})}
     rows, missing = _fetch_mailer_rows(search_id)
+    retag_done, retag_pending = _retry_unsub_queue(s3)
     unsub_pids, unsub_emails, _tag_ok = _mailer_suppressed(s3)
     rows, unsubscribed = _drop_suppressed(rows, unsub_pids, unsub_emails)
     progress_key = "news-send-" + datetime.now(timezone.utc).strftime("%Y-%m-%d") + ".json"
@@ -5129,6 +5311,7 @@ def _handle_news_send(body):
               + "\nSent: " + str(sent)
               + "\nSkipped (already sent today / no person id): " + str(skipped)
               + "\nSkipped (" + UNSUB_TAG_NAME + "): " + str(unsubscribed)
+              + "\nPipeline tag retries: " + str(retag_done) + " tagged, " + str(retag_pending) + " still queued"
               + "\nFailed: " + str(failed)
               + "\nNo email on record: " + str(len(missing))
               + "\nItems: " + str(len(content.get("items") or [])) + "\n")
@@ -5333,6 +5516,7 @@ def _handle_mailer_send(body):
         return {"statusCode": 400, "headers": {"Content-Type": "application/json"},
                 "body": json.dumps({"ok": False, "error": "nothing selected"})}
     rows, missing = _fetch_mailer_rows(search_id)
+    retag_done, retag_pending = _retry_unsub_queue(s3)
     unsub_pids, unsub_emails, _tag_ok = _mailer_suppressed(s3)
     rows, unsubscribed = _drop_suppressed(rows, unsub_pids, unsub_emails)
     lim_raw = str(body.get("limit") or "").strip()
@@ -5385,6 +5569,7 @@ def _handle_mailer_send(body):
               + "\nSent: " + str(sent)
               + "\nSkipped (already sent today / no person id): " + str(skipped)
               + "\nSkipped (" + UNSUB_TAG_NAME + "): " + str(unsubscribed)
+              + "\nPipeline tag retries: " + str(retag_done) + " tagged, " + str(retag_pending) + " still queued"
               + "\nFailed: " + str(failed)
               + "\nNo email on record: " + str(len(missing))
               + "\nSell orders: " + str(len(sells)) + "  Buy companies: " + str(len(buys)) + "\n")
@@ -5413,7 +5598,8 @@ def _handle_mailer_test(body):
     sells = [d for d in sells_all if str(d.get("id")) in selected]
     selected_lc = {str(x).lower() for x in selected}
     buys = [(nm, n) for nm, n in _mailer_buy_companies(s3, counts) if ("c:" + nm).lower() in selected_lc]
-    unsub_url = _unsub_url(pid, MAILER_REPLY_TO)
+    # Token belongs to the actual test recipient, not the preview person.
+    unsub_url = _unsub_url(_person_id_for_email(s3, MAILER_REPLY_TO), MAILER_REPLY_TO)
     email_html = _render_mailer_email("Chad", pid, sells, buys, counts, True, unsub_url)
     try:
         _mailer_send_one(boto3.client("ses", region_name=SES_REGION), MAILER_REPLY_TO,
@@ -5589,6 +5775,9 @@ def handle_http_request(event):
                     "headers": {"Content-Type": "text/plain"},
                     "body": f"Seed failed: {e}"}
 
+    if params.get("view") == "unsub_undo":
+        return _handle_unsub_undo(params)
+
     if params.get("view") == "unflag":
         pid_raw = str(params.get("pid") or "").strip()
         if not pid_raw.isdigit():
@@ -5640,6 +5829,7 @@ def lambda_handler(event, context):
     if http:
         return handle_http_request(event)
 
+    _retry_unsub_queue(boto3.client("s3", region_name=S3_REGION))
     body_html, date_str, counts = _build_brief_html(interactive=False)
     subject = f"Daily Brief — {date_str}"
 

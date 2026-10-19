@@ -12,7 +12,9 @@ Deployed to the `daily-brief` Lambda by `.github/workflows/deploy.yml` on push t
 
 ## HTTP routing (`handle_http_request`)
 - Public (no key): `view=click` (mailer click tracking), `view=daily` (Daily Highlight signup),
-  `view=unsub` (weekly mailer unsubscribe).
+  `view=unsub` (mailer unsubscribe).
+- Admin (key): `view=unsub_undo&pid=<id>&email=<addr>` reverses an opt-out (S3 list + retry
+  queue + Pipeline tag) and reports which Pipeline people have that email.
 - Everything else requires `key=BRIEF_PAGE_KEY`.
 
 ## Weekly mailer ("Weekly Pre-IPO secondary transactions")
@@ -26,14 +28,23 @@ Deployed to the `daily-brief` Lambda by `.github/workflows/deploy.yml` on push t
 ## Unsubscribe
 - Token (`_unsub_token` / `_parse_unsub_token`): opaque, `pid|email|issued` encrypted with
   an HMAC-SHA256 keystream + 16-byte HMAC tag; keys derived from `MAILER_CLICK_SECRET`
-  (fails closed if unset). Valid for `UNSUB_TOKEN_TTL_DAYS` (365).
-- `GET ?view=unsub&u=…` records + confirmation page; `POST` (one-click) records, empty 200.
+  (fails closed if unset). Valid for `UNSUB_TOKEN_TTL_DAYS` (365). pid may be empty
+  (email-only token): recorded in S3 as `email:<addr>`, no Pipeline write.
+- Tokens must belong to the actual recipient. Test sends look the recipient's person up by
+  email in `people.json` (`_person_id_for_email`), else email-only. Composer previews use
+  `UNSUB_PREVIEW_URL` (an invalid token — records nothing).
+- `GET ?view=unsub&u=…` records + confirmation page showing the recorded email; `POST`
+  (one-click) records, empty 200.
   Not routed through click tracking — never counts as a click.
 - Recording (`_record_unsub`): S3 opt-out list `full-pipeline-cache/mailer-unsub.json`
   (required), then Pipeline tag "Unsub: Weekly" via `PUT /people/{id}.json`
   `predefined_contacts_tag_ids`; tag id from env `UNSUB_WEEKLY_TAG_ID`, else looked up /
   created via `/admin/predefined_contacts_tags.json`. Chad gets an SES alert on new
   unsubscribes and on any Pipeline tag failure.
+- Pipeline calls here go through `_pipeline_call_retry` (backoff 1s/2s/4s on 429/5xx, 4 tries).
+  If still failing, the person is queued in `full-pipeline-cache/mailer-unsub-pending.json`;
+  `_retry_unsub_queue` retries it before each weekly/news send and on the scheduled daily run
+  (dropped after 20 passes). The S3 opt-out list stays authoritative for skipping.
 - An unsubscribe means out of ALL recurring mailers (weekly + news). The tag keeps the name
   "Unsub: Weekly" (it lives in Pipeline; renaming would need a migration).
 - Send-time guard (`_mailer_suppressed` + `_drop_suppressed`): skips anyone on the S3 list or

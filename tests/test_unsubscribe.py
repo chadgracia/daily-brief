@@ -47,6 +47,7 @@ class FakeSES:
 
     def send_email(self, **kw):
         self.simple.append(kw)
+        return {"MessageId": "m"}
 
 
 class FakePipeline:
@@ -57,6 +58,8 @@ class FakePipeline:
         self.person = {"id": PID, "first_name": "Ann", "email": "ann@example.com",
                        "predefined_contacts_tag_ids": list(person_tags or [])}
         self.put_status = put_status
+        self.get_statuses = []  # consumed one per person GET before succeeding, e.g. [429, 429]
+        self.put_statuses = []
         self.calls = []
 
     def __call__(self, method, endpoint, payload=None, jwt=None, timeout=15):
@@ -66,9 +69,15 @@ class FakePipeline:
                 return {"status": 200, "data": {"entries": self.tags}}
             self.tags.append({"id": 777, "name": payload["predefined_contacts_tag"]["name"]})
             return {"status": 201, "data": self.tags[-1]}
+        if endpoint.startswith("/people.json"):
+            return {"status": 200, "data": {"entries": [dict(self.person)]}}
         if endpoint == f"/people/{PID}.json":
             if method == "GET":
+                if self.get_statuses:
+                    return {"status": self.get_statuses.pop(0), "data": "Too Many Requests"}
                 return {"status": 200, "data": dict(self.person)}
+            if self.put_statuses:
+                return {"status": self.put_statuses.pop(0), "data": "server error"}
             if self.put_status != 200:
                 return {"status": self.put_status, "data": "forbidden"}
             self.person.update(payload["person"])
@@ -82,6 +91,7 @@ class Base(unittest.TestCase):
         self.s3 = FakeS3()
         self.ses = FakeSES()
         self.pipe = FakePipeline()
+        self.sleeps = []
 
         def client(name, region_name=None):
             return {"s3": self.s3, "ses": self.ses}[name]
@@ -90,6 +100,7 @@ class Base(unittest.TestCase):
             ("boto3.client", client),
             ("lambda_function.get_jwt", lambda: "jwt"),
             ("lambda_function.call_pipeline_api", self.pipe),
+            ("lambda_function.time.sleep", self.sleeps.append),
         ):
             p = mock.patch(target, value, create=True)
             p.start()
@@ -107,6 +118,11 @@ class TokenTests(unittest.TestCase):
         for raw in (str(PID), "ann", "example.com"):
             self.assertNotIn(raw, tok)
             self.assertNotIn(raw, url)
+
+    def test_email_only_token(self):
+        tok = lf._unsub_token(None, "x@example.com")
+        self.assertEqual(lf._parse_unsub_token(tok), (None, "x@example.com"))
+        self.assertIsNone(lf._parse_unsub_token(lf._unsub_token(None, "")))
 
     def test_tampered_token_rejected(self):
         tok = lf._unsub_token(PID, "ann@example.com")
@@ -168,6 +184,18 @@ class RouteTests(Base):
         puts = [c for c in self.pipe.calls if c[0] == "PUT"]
         self.assertEqual(len(puts), 1)
 
+    def test_confirmation_page_shows_email(self):
+        tok = lf._unsub_token(PID, "a<b>@example.com")
+        resp = lf.lambda_handler(_event("GET", tok), None)
+        self.assertIn("Recorded for <strong>a&lt;b&gt;@example.com</strong>", resp["body"])
+
+    def test_preview_link_records_nothing(self):
+        html = lf._render_mailer_email("Chad", lf.MAILER_PREVIEW_PID, [], [])
+        self.assertIn(lf.UNSUB_PREVIEW_URL.replace("&", "&amp;"), html)
+        resp = lf.lambda_handler(_event("GET", "preview"), None)
+        self.assertEqual(resp["statusCode"], 400)
+        self.assertNotIn(lf.UNSUB_LIST_KEY, self.s3.objects)
+
     def test_bad_token_records_nothing(self):
         for method, code in (("GET", 400), ("POST", 400)):
             resp = lf.lambda_handler(_event(method, "bogus"), None)
@@ -223,6 +251,47 @@ class PipelineWriteTests(Base):
         self.assertIn(str(PID), json.loads(self.s3.objects[lf.UNSUB_LIST_KEY])["people"])
         subj = self.ses.simple[0]["Message"]["Subject"]["Data"]
         self.assertIn("FAILED", subj)
+
+    def test_429_then_success_retries_with_backoff(self):
+        self.pipe.get_statuses = [429, 429]
+        self.pipe.put_statuses = [503]
+        ok, detail = lf._tag_person_unsub(PID, "jwt")
+        self.assertTrue(ok, detail)
+        self.assertEqual(self.sleeps, [1.0, 2.0, 1.0])
+        self.assertIn(TAG_ID, self.pipe.person["predefined_contacts_tag_ids"])
+
+    def test_non_retryable_status_is_not_retried(self):
+        self.pipe.put_status = 403
+        ok, _ = lf._tag_person_unsub(PID, "jwt")
+        self.assertFalse(ok)
+        self.assertEqual(self.sleeps, [])
+        self.assertEqual(len([c for c in self.pipe.calls if c[0] == "PUT"]), 1)
+
+    def test_exhausted_retries_queue_then_later_pass_tags(self):
+        self.pipe.get_statuses = [429] * lf.UNSUB_RETRY_ATTEMPTS
+        tok = lf._unsub_token(PID, "ann@example.com")
+        resp = lf.lambda_handler(_event("GET", tok), None)
+        self.assertEqual(resp["statusCode"], 200)
+        self.assertEqual(self.sleeps, [1.0, 2.0, 4.0])
+        self.assertIn(str(PID), json.loads(self.s3.objects[lf.UNSUB_LIST_KEY])["people"])
+        pending = json.loads(self.s3.objects[lf.UNSUB_PENDING_KEY])["people"]
+        self.assertIn("person read failed (429)", pending[str(PID)]["last_error"])
+        self.assertIn("queued for retry", self.ses.simple[0]["Message"]["Body"]["Text"]["Data"])
+        self.assertEqual(lf._retry_unsub_queue(self.s3), (1, 0))
+        self.assertIn(TAG_ID, self.pipe.person["predefined_contacts_tag_ids"])
+
+    def test_retry_pass_keeps_failures_queued(self):
+        self.s3.objects[lf.UNSUB_PENDING_KEY] = json.dumps(
+            {"people": {str(PID): {"email": "ann@example.com", "passes": 0}}}).encode()
+        self.pipe.get_statuses = [429] * 10
+        self.assertEqual(lf._retry_unsub_queue(self.s3), (0, 1))
+        self.assertEqual(json.loads(self.s3.objects[lf.UNSUB_PENDING_KEY])["people"][str(PID)]["passes"], 1)
+
+    def test_scheduled_run_retries_queue(self):
+        with mock.patch.object(lf, "_retry_unsub_queue") as retry, \
+                mock.patch.object(lf, "_build_brief_html", return_value=("<p></p>", "Oct 19", {})):
+            lf.lambda_handler({}, None)
+        retry.assert_called_once()
 
     def test_s3_failure_shows_error_not_success(self):
         def boom(**kw):
@@ -309,6 +378,40 @@ class SendTests(Base):
         self.assertIn("view=unsub", str(msg["List-Unsubscribe"]))
         self.assertEqual(str(msg["List-Unsubscribe-Post"]), "List-Unsubscribe=One-Click")
 
+    def _test_send_token(self):
+        lf._handle_mailer_test({"subject": "x"})
+        msg = email.message_from_bytes(self.ses.raw[0]["RawMessage"]["Data"], policy=policy.default)
+        return str(msg["List-Unsubscribe"]).split("u=")[1].split(">")[0]
+
+    def test_test_send_token_uses_recipient_person(self):
+        people = json.loads(self.s3.objects["people.json"])
+        people["people"].append({"id": 4242, "email": "CGracia@RainmakerSecurities.com"})
+        self.s3.objects["people.json"] = json.dumps(people).encode()
+        self.assertEqual(lf._parse_unsub_token(self._test_send_token()),
+                         (4242, "cgracia@rainmakersecurities.com"))
+
+    def test_test_send_token_email_only_when_no_person(self):
+        tok = self._test_send_token()
+        self.assertEqual(lf._parse_unsub_token(tok), (None, "cgracia@rainmakersecurities.com"))
+        self.pipe.calls.clear()
+        resp = lf.lambda_handler(_event("GET", tok), None)
+        self.assertEqual(resp["statusCode"], 200)
+        listed = json.loads(self.s3.objects[lf.UNSUB_LIST_KEY])["people"]
+        self.assertIn("email:cgracia@rainmakersecurities.com", listed)
+        self.assertNotIn(str(lf.MAILER_PREVIEW_PID), listed)
+        self.assertEqual(self.pipe.calls, [])  # no Pipeline write for email-only tokens
+        pids, emails, _ = lf._mailer_suppressed(self.s3)
+        self.assertIn("cgracia@rainmakersecurities.com", emails)
+
+    def test_send_retries_queued_tag_writes(self):
+        self.s3.objects[lf.UNSUB_PENDING_KEY] = json.dumps(
+            {"people": {str(PID): {"email": "ann@example.com", "passes": 0}}}).encode()
+        lf._handle_mailer_send({"subject": "s"})
+        self.assertIn(TAG_ID, self.pipe.person["predefined_contacts_tag_ids"])
+        self.assertEqual(json.loads(self.s3.objects[lf.UNSUB_PENDING_KEY])["people"], {})
+        report = self.ses.simple[-1]["Message"]["Body"]["Text"]["Data"]
+        self.assertIn("Pipeline tag retries: 1 tagged, 0 still queued", report)
+
     def test_admin_list_page_shows_skipped_count(self):
         resp = lf._render_mailer_page()
         self.assertEqual(resp["statusCode"], 200)
@@ -353,6 +456,50 @@ class SendTests(Base):
         self.assertFalse(tag_ok)
         self.assertEqual(pids, {PID, 99})
         self.assertFalse([c for c in self.pipe.calls if c[0] == "POST"])  # send path never creates the tag
+
+
+class UndoTests(Base):
+    def setUp(self):
+        super().setUp()
+        os.environ["BRIEF_PAGE_KEY"] = "k"
+        self.addCleanup(os.environ.pop, "BRIEF_PAGE_KEY", None)
+        self.pipe.person.update({"id": PID, "email": "cgracia@rainmakersecurities.com",
+                                 "predefined_contacts_tag_ids": [11, TAG_ID]})
+        self.s3.objects.update({
+            "people.json": json.dumps({"people": [dict(self.pipe.person)]}).encode(),
+            lf.UNSUB_LIST_KEY: json.dumps({"people": {
+                str(PID): {"email": "someone@else.com"},
+                "email:cgracia@rainmakersecurities.com": {"email": "cgracia@rainmakersecurities.com"},
+                "77": {"email": "cgracia@rainmakersecurities.com"},
+                "88": {"email": "keep@example.com"},
+            }}).encode(),
+            lf.UNSUB_PENDING_KEY: json.dumps({"people": {str(PID): {"email": "x"}}}).encode(),
+        })
+
+    def _undo(self, key="k"):
+        return lf.lambda_handler({"requestContext": {"http": {"method": "GET"}},
+                                  "queryStringParameters": {"view": "unsub_undo", "key": key, "pid": str(PID),
+                                                            "email": "cgracia@rainmakersecurities.com"}}, None)
+
+    def test_requires_admin_key(self):
+        self.assertEqual(self._undo("wrong")["statusCode"], 403)
+        self.assertIn("88", json.loads(self.s3.objects[lf.UNSUB_LIST_KEY])["people"])
+
+    def test_undo_removes_entries_and_tag_and_reports_people(self):
+        resp = self._undo()
+        self.assertEqual(resp["statusCode"], 200)
+        self.assertEqual(list(json.loads(self.s3.objects[lf.UNSUB_LIST_KEY])["people"]), ["88"])
+        self.assertEqual(json.loads(self.s3.objects[lf.UNSUB_PENDING_KEY])["people"], {})
+        self.assertEqual(self.pipe.person["predefined_contacts_tag_ids"], [11])
+        self.assertIn("Pipeline tag: removed from person " + str(PID), resp["body"])
+        self.assertIn("(people.json cache): " + str(PID), resp["body"])
+        self.assertIn("(live API, status 200): " + str(PID), resp["body"])
+
+    def test_undo_when_not_tagged(self):
+        self.pipe.person["predefined_contacts_tag_ids"] = [11]
+        resp = self._undo()
+        self.assertIn("was not tagged", resp["body"])
+        self.assertFalse([c for c in self.pipe.calls if c[0] == "PUT"])
 
 
 if __name__ == "__main__":
