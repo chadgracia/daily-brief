@@ -297,7 +297,8 @@ class SendTests(Base):
         url = lu.split(">")[0][1:]
         self.assertIn('href="' + url.replace("&", "&amp;") + '"', html)
         self.assertIn(">Unsubscribe</a>", html)
-        self.assertIn("TODO: physical postal address", html)
+        self.assertNotIn("TODO", html)
+        self.assertNotIn("postal address", html)
         # header + footer token belong to this recipient
         token = url.split("u=")[1]
         self.assertEqual(lf._parse_unsub_token(token), (3, "cat@example.com"))
@@ -316,6 +317,34 @@ class SendTests(Base):
 
     def test_composer_preview_shows_skipped_count(self):
         resp = lf._render_mailer_composer(lf.MAILER_PREVIEW_PID)
+        self.assertIn("1 recipients will be sent &middot; 3 skipped (Unsub: Weekly)", resp["body"])
+
+    def _patch_news(self):
+        content = {"intro": "hi", "items": [], "_search_id": "19530439"}
+        for target, value in (
+            ("lambda_function._load_news_mailer", lambda s3: content),
+            ("lambda_function._news_send_content", lambda c: (c, 0)),
+            ("lambda_function._render_news_email", lambda first, pid, c: "<p>news</p>"),
+        ):
+            p = mock.patch(target, value)
+            p.start()
+            self.addCleanup(p.stop)
+
+    def test_news_send_skips_tagged_and_opted_out(self):
+        self._patch_news()
+        resp = lf._handle_news_send({"subject": "News", "search_id": "19530439"})
+        body = json.loads(resp["body"])
+        self.assertEqual(body["sent"], 1)
+        self.assertEqual(body["unsubscribed"], 3)
+        sent_to = [m["Destination"]["ToAddresses"] for m in self.ses.simple
+                   if m["Source"] == lf.MAILER_FROM]
+        self.assertEqual(sent_to, [["cat@example.com"]])
+        report = self.ses.simple[-1]["Message"]["Body"]["Text"]["Data"]
+        self.assertIn("Skipped (Unsub: Weekly): 3", report)
+
+    def test_news_composer_shows_skipped_count(self):
+        self._patch_news()
+        resp = lf._render_news_composer(lf.MAILER_PREVIEW_PID)
         self.assertIn("1 recipients will be sent &middot; 3 skipped (Unsub: Weekly)", resp["body"])
 
     def test_tag_lookup_failure_falls_back_to_s3_list(self):

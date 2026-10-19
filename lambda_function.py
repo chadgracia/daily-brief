@@ -3618,8 +3618,6 @@ def _unsub_url(person_id, email):
 def _mailer_unsub_footer(unsub_url):
     return (
         '<div style="font-size:11px;color:#6b7280;line-height:1.5;margin:12px 0 0 0;">'
-        # TODO: CAN-SPAM requires a valid physical postal address — replace this placeholder.
-        '<p style="margin:0 0 6px 0;">TODO: physical postal address</p>'
         '<p style="margin:0;">You are receiving this because you are on the Gracia Group weekly list. '
         '<a href="' + escape(unsub_url, quote=True) + '" style="color:#6b7280;">Unsubscribe</a></p>'
         "</div>"
@@ -3814,6 +3812,19 @@ def _drop_suppressed(rows, pids, emails):
     kept = [r for r in rows
             if _normalize_id(r[2]) not in pids and (r[1] or "").lower() not in emails]
     return kept, len(rows) - len(kept)
+
+
+def _recipient_count_line(search_id, s3):
+    """Admin preview line: how many would be sent vs skipped as unsubscribed."""
+    try:
+        rows, _missing = _fetch_mailer_rows(search_id)
+        unsub_pids, unsub_emails, tag_ok = _mailer_suppressed(s3)
+        kept, n_unsub = _drop_suppressed(rows, unsub_pids, unsub_emails)
+        return (str(len(kept)) + " recipients will be sent &middot; " + str(n_unsub)
+                + " skipped (" + UNSUB_TAG_NAME + ")"
+                + ("" if tag_ok else " &mdash; Pipeline tag lookup failed; S3 opt-out list only"))
+    except Exception as e:
+        return "Recipient count unavailable: " + escape(str(e))
 
 
 def _mailer_fmt_money(v):
@@ -5063,6 +5074,8 @@ def _handle_news_send(body):
         return {"statusCode": 400, "headers": {"Content-Type": "application/json"},
                 "body": json.dumps({"ok": False, "error": "nothing to send: no intro and no items"})}
     rows, missing = _fetch_mailer_rows(search_id)
+    unsub_pids, unsub_emails, _tag_ok = _mailer_suppressed(s3)
+    rows, unsubscribed = _drop_suppressed(rows, unsub_pids, unsub_emails)
     progress_key = "news-send-" + datetime.now(timezone.utc).strftime("%Y-%m-%d") + ".json"
     already = set()
     try:
@@ -5115,6 +5128,7 @@ def _handle_news_send(body):
               + "\nSaved search: " + str(search_id)
               + "\nSent: " + str(sent)
               + "\nSkipped (already sent today / no person id): " + str(skipped)
+              + "\nSkipped (" + UNSUB_TAG_NAME + "): " + str(unsubscribed)
               + "\nFailed: " + str(failed)
               + "\nNo email on record: " + str(len(missing))
               + "\nItems: " + str(len(content.get("items") or [])) + "\n")
@@ -5128,7 +5142,8 @@ def _handle_news_send(body):
     except Exception as e:
         print(f"news send report failed: {e}")
     return {"statusCode": 200, "headers": {"Content-Type": "application/json"},
-            "body": json.dumps({"ok": True, "sent": sent, "failed": failed, "skipped": skipped})}
+            "body": json.dumps({"ok": True, "sent": sent, "failed": failed, "skipped": skipped,
+                                "unsubscribed": unsubscribed})}
 
 
 NEWS_COMPOSER_SCRIPT = """
@@ -5167,7 +5182,7 @@ NEWS_COMPOSER_SCRIPT = """
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({action: 'news_send', subject: subj, search_id: sid})
     }).then(function (r) { return r.json(); }).then(function (j) {
-      snd.textContent = j.ok ? ('Sent to ' + j.sent + ' ✓') : ('Failed: ' + (j.error || 'try again'));
+      snd.textContent = j.ok ? ('Sent to ' + j.sent + ' ✓ (' + (j.unsubscribed || 0) + ' unsubscribed skipped)') : ('Failed: ' + (j.error || 'try again'));
       snd.disabled = false;
     }).catch(function () { snd.textContent = 'Failed — try again'; snd.disabled = false; });
   });
@@ -5200,6 +5215,7 @@ def _render_news_composer(pid):
                     if n_blocked else "")
     saved_subject = str(content.get("_subject") or "Recent news and deal updates for ten pre-IPO opportunities")
     saved_search = str(content.get("_search_id") or "19530439")
+    recip_line = _recipient_count_line(int(saved_search) if saved_search.isdigit() else MAILER_SEARCH_ID, s3)
     raw = json.dumps({k: v for k, v in content.items() if not str(k).startswith("_")},
                      ensure_ascii=False, indent=2)
     html = (
@@ -5214,7 +5230,8 @@ def _render_news_composer(pid):
         '<h1 style="font-size:20px;margin:0 0 4px 0;">News mailer</h1>'
         '<p style="color:#6b7280;font-size:13px;margin:0 0 12px 0;">Edit the content JSON, save, and the '
         "preview updates. Step 1: nothing is sent to the list from this page.</p>"
-        + blocked_html +
+        + blocked_html
+        + '<p id="recip-count" style="color:#374151;font-size:13px;margin:0 0 12px 0;">' + recip_line + "</p>"
         '<textarea id="news-json" spellcheck="false" style="width:100%;height:320px;padding:10px;'
         "border:1px solid #d1d5db;border-radius:6px;font-family:Menlo,Consolas,monospace;font-size:12px;"
         'box-sizing:border-box;">' + escape(raw) + "</textarea>"
@@ -5421,15 +5438,7 @@ def _render_mailer_composer(pid):
     selected_lc = {str(x).lower() for x in selected}
     buys = [(nm, n) for nm, n in buy_cos if ("c:" + nm).lower() in selected_lc]
     email_html = _render_mailer_email("Chad", pid, sells, buys, counts, True)
-    try:
-        rows, _missing = _fetch_mailer_rows()
-        unsub_pids, unsub_emails, tag_ok = _mailer_suppressed(s3)
-        kept, n_unsub = _drop_suppressed(rows, unsub_pids, unsub_emails)
-        recip_line = (str(len(kept)) + " recipients will be sent &middot; " + str(n_unsub)
-                      + " skipped (" + UNSUB_TAG_NAME + ")"
-                      + ("" if tag_ok else " &mdash; Pipeline tag lookup failed; S3 opt-out list only"))
-    except Exception as e:
-        recip_line = "Recipient count unavailable: " + escape(str(e))
+    recip_line = _recipient_count_line(MAILER_SEARCH_ID, s3)
 
     html = (
         '<!doctype html><html lang="en"><head><meta charset="utf-8">'
