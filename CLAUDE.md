@@ -21,8 +21,7 @@ Deployed to the `daily-brief` Lambda by `.github/workflows/deploy.yml` on push t
   `List-Unsubscribe` (https endpoint + `mailto:cgracia@graciagroup.com?subject=unsubscribe`)
   and `List-Unsubscribe-Post: List-Unsubscribe=One-Click`. The Lambda role needs
   `ses:SendRawEmail`.
-- Footer (`_mailer_unsub_footer`): per-recipient Unsubscribe link + a **TODO postal address
-  placeholder** (CAN-SPAM) — replace with the real address.
+- Footer (`_mailer_unsub_footer`): per-recipient Unsubscribe link. No postal address (by choice).
 
 ## Unsubscribe
 - Token (`_unsub_token` / `_parse_unsub_token`): opaque, `pid|email|issued` encrypted with
@@ -35,9 +34,15 @@ Deployed to the `daily-brief` Lambda by `.github/workflows/deploy.yml` on push t
   `predefined_contacts_tag_ids`; tag id from env `UNSUB_WEEKLY_TAG_ID`, else looked up /
   created via `/admin/predefined_contacts_tags.json`. Chad gets an SES alert on new
   unsubscribes and on any Pipeline tag failure.
+- An unsubscribe means out of ALL recurring mailers (weekly + news). The tag keeps the name
+  "Unsub: Weekly" (it lives in Pipeline; renaming would need a migration).
 - Send-time guard (`_mailer_suppressed` + `_drop_suppressed`): skips anyone on the S3 list or
-  tagged in the `people.json` cache, even if the saved search returns them. Composer and
-  recipient-list pages show the skipped count. The news mailer does NOT apply this guard.
+  tagged in the `people.json` cache, even if the saved search returns them. Applied in
+  `_handle_mailer_send` and `_handle_news_send`; skipped counts appear in both send reports,
+  both composers (`_recipient_count_line`) and the recipient-list page.
+- The news mailer only has the skip — no unsubscribe footer link or List-Unsubscribe headers.
+- The broadcast mailer (unique messages to a pre-filtered list) intentionally does NOT check
+  the tag. Don't add it there.
 
 ## Pipeline API
 - JWT (S3 `pipeline-token/pipeline-jwt.json`) via `call_pipeline_api` — used for person/company
