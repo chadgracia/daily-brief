@@ -1,3 +1,4 @@
+import base64
 import concurrent.futures
 import hashlib
 import hmac
@@ -7,6 +8,9 @@ import re
 import urllib.error
 import urllib.request
 from datetime import datetime, timedelta, timezone
+from email import policy as email_policy
+from email.message import EmailMessage
+from email.utils import formatdate
 from html import escape
 from urllib.parse import quote
 
@@ -3422,6 +3426,8 @@ MAILER_SCRIPT = """
 def _render_mailer_page(search_id=MAILER_SEARCH_ID):
     try:
         rows, missing = _fetch_mailer_rows(search_id)
+        unsub_pids, unsub_emails, _tag_ok = _mailer_suppressed(boto3.client("s3", region_name=S3_REGION))
+        rows, n_unsub = _drop_suppressed(rows, unsub_pids, unsub_emails)
     except Exception as exc:
         return {
             "statusCode": 500,
@@ -3451,7 +3457,7 @@ def _render_mailer_page(search_id=MAILER_SEARCH_ID):
         '<p style="color:#6b7280;margin:0 0 16px 0;">Source: focused list '
         + src_label + " &middot; "
         + str(len(rows))
-        + " recipients</p>"
+        + " recipients &middot; " + str(n_unsub) + " skipped (" + UNSUB_TAG_NAME + ")</p>"
     )
     out.append(
         '<form method="get" style="margin:0 0 16px 0;">'
@@ -3538,6 +3544,276 @@ def _mailer_click_url(person_id, deal_id):
         + "&did=" + str(deal_id)
         + "&t=" + _mailer_token(person_id, deal_id)
     )
+
+
+# ---- Weekly mailer unsubscribe ------------------------------------------------
+# Footer link + List-Unsubscribe header point at ?view=unsub&u=<token>. The token is
+# opaque: "pid|email|issued" encrypted with an HMAC-SHA256 keystream and signed with a
+# 16-byte HMAC tag (keys derived from MAILER_CLICK_SECRET), so no raw ID is in the URL.
+# The route is separate from view=click, so unsubscribes never count as clicks.
+UNSUB_TAG_NAME = "Unsub: Weekly"
+UNSUB_LIST_KEY = "mailer-unsub.json"
+UNSUB_TOKEN_TTL_DAYS = 365
+UNSUB_MAILTO = "mailto:cgracia@graciagroup.com?subject=unsubscribe"
+MAILER_REPLY_TO = "cgracia@rainmakersecurities.com"
+_UNSUB_TAG_CACHE = {}
+
+
+def _unsub_keys():
+    secret = os.environ.get("MAILER_CLICK_SECRET", "")
+    if not secret:
+        raise RuntimeError("MAILER_CLICK_SECRET is not set")
+    s = secret.encode()
+    return (hmac.new(s, b"unsub-enc", hashlib.sha256).digest(),
+            hmac.new(s, b"unsub-mac", hashlib.sha256).digest())
+
+
+def _unsub_keystream(key, nonce, n):
+    out = b""
+    i = 0
+    while len(out) < n:
+        out += hmac.new(key, nonce + i.to_bytes(4, "big"), hashlib.sha256).digest()
+        i += 1
+    return out[:n]
+
+
+def _unsub_token(person_id, email, issued=None, nonce=None):
+    enc_key, mac_key = _unsub_keys()
+    if issued is None:
+        issued = datetime.now(timezone.utc).timestamp()
+    nonce = nonce or os.urandom(8)
+    plain = (str(person_id) + "|" + (email or "").strip().lower() + "|" + str(int(issued))).encode()
+    ct = bytes(a ^ b for a, b in zip(plain, _unsub_keystream(enc_key, nonce, len(plain))))
+    tag = hmac.new(mac_key, nonce + ct, hashlib.sha256).digest()[:16]
+    return base64.urlsafe_b64encode(nonce + ct + tag).decode().rstrip("=")
+
+
+def _parse_unsub_token(token, now=None):
+    """Return (person_id, email) for a valid, unexpired token, else None."""
+    try:
+        enc_key, mac_key = _unsub_keys()
+        raw = base64.urlsafe_b64decode(str(token) + "=" * (-len(str(token)) % 4))
+    except Exception:
+        return None
+    if len(raw) < 8 + 5 + 16:
+        return None
+    nonce, ct, tag = raw[:8], raw[8:-16], raw[-16:]
+    if not hmac.compare_digest(tag, hmac.new(mac_key, nonce + ct, hashlib.sha256).digest()[:16]):
+        return None
+    plain = bytes(a ^ b for a, b in zip(ct, _unsub_keystream(enc_key, nonce, len(ct)))).decode("utf-8", "replace")
+    pid_s, _, rest = plain.partition("|")
+    email, _, issued_s = rest.rpartition("|")
+    if not pid_s.isdigit() or not issued_s.isdigit():
+        return None
+    now = datetime.now(timezone.utc).timestamp() if now is None else now
+    if now - int(issued_s) > UNSUB_TOKEN_TTL_DAYS * 86400:
+        return None
+    return int(pid_s), email
+
+
+def _unsub_url(person_id, email):
+    return MAILER_BASE_URL + "?view=unsub&u=" + _unsub_token(person_id, email)
+
+
+def _mailer_unsub_footer(unsub_url):
+    return (
+        '<div style="font-size:11px;color:#6b7280;line-height:1.5;margin:12px 0 0 0;">'
+        # TODO: CAN-SPAM requires a valid physical postal address — replace this placeholder.
+        '<p style="margin:0 0 6px 0;">TODO: physical postal address</p>'
+        '<p style="margin:0;">You are receiving this because you are on the Gracia Group weekly list. '
+        '<a href="' + escape(unsub_url, quote=True) + '" style="color:#6b7280;">Unsubscribe</a></p>'
+        "</div>"
+    )
+
+
+def _mailer_raw_message(to_addr, subject, html, unsub_url):
+    msg = EmailMessage()
+    msg["From"] = MAILER_FROM
+    msg["To"] = to_addr
+    msg["Reply-To"] = MAILER_REPLY_TO
+    msg["Subject"] = subject
+    msg["Date"] = formatdate(usegmt=True)
+    msg["List-Unsubscribe"] = "<" + unsub_url + ">, <" + UNSUB_MAILTO + ">"
+    msg["List-Unsubscribe-Post"] = "List-Unsubscribe=One-Click"
+    msg.set_content(html, subtype="html", charset="utf-8")
+    return msg.as_bytes(policy=email_policy.SMTP.clone(max_line_length=998))
+
+
+def _mailer_send_one(ses, to_addr, subject, html, unsub_url):
+    # send_raw_email (not send_email) because SES v1 send_email can't set custom headers.
+    ses.send_raw_email(
+        Source=MAILER_FROM,
+        Destinations=[to_addr],
+        RawMessage={"Data": _mailer_raw_message(to_addr, subject, html, unsub_url)},
+    )
+
+
+def _find_tag_id(data, name):
+    if isinstance(data, dict):
+        data = (data.get("entries") or data.get("predefined_contacts_tags")
+                or data.get("data") or [])
+    for t in data if isinstance(data, list) else []:
+        if isinstance(t, dict) and str(t.get("name") or "").strip().lower() == name.lower():
+            return _normalize_id(t.get("id"))
+    return None
+
+
+def _resolve_unsub_tag_id(jwt, create=False):
+    """Pipeline tag id for "Unsub: Weekly". UNSUB_WEEKLY_TAG_ID env var pins it;
+    otherwise looked up by name (and created when create=True). Cached per container."""
+    env = str(os.environ.get("UNSUB_WEEKLY_TAG_ID") or "").strip()
+    if env.isdigit():
+        return int(env)
+    if _UNSUB_TAG_CACHE.get("id"):
+        return _UNSUB_TAG_CACHE["id"]
+    res = call_pipeline_api("GET", "/admin/predefined_contacts_tags.json?per_page=200", jwt=jwt)
+    tag_id = _find_tag_id(res.get("data"), UNSUB_TAG_NAME) if res.get("status") == 200 else None
+    if tag_id is None and create:
+        res = call_pipeline_api("POST", "/admin/predefined_contacts_tags.json",
+                                {"predefined_contacts_tag": {"name": UNSUB_TAG_NAME}}, jwt=jwt)
+        if res.get("status") in (200, 201) and isinstance(res.get("data"), dict):
+            tag_id = _normalize_id(res["data"].get("id"))
+    if tag_id is not None:
+        _UNSUB_TAG_CACHE["id"] = tag_id
+    return tag_id
+
+
+def _tag_person_unsub(pid, jwt):
+    """Add the "Unsub: Weekly" tag to a Pipeline person. Returns (ok, detail)."""
+    tag_id = _resolve_unsub_tag_id(jwt, create=True)
+    if tag_id is None:
+        return False, "could not find or create the '" + UNSUB_TAG_NAME + "' tag in Pipeline"
+    cur = call_pipeline_api("GET", f"/people/{pid}.json", jwt=jwt)
+    if cur.get("status") != 200 or not isinstance(cur.get("data"), dict):
+        return False, "person read failed (" + str(cur.get("status")) + ")"
+    if _has_tag(cur["data"], tag_id):
+        return True, "already tagged"
+    ids = [int(t) for t in (cur["data"].get("predefined_contacts_tag_ids") or []) if str(t).isdigit()]
+    res = call_pipeline_api("PUT", f"/people/{pid}.json",
+                            {"person": {"predefined_contacts_tag_ids": ids + [tag_id]}}, jwt=jwt)
+    if res.get("status") != 200:
+        return False, "tag write failed (" + str(res.get("status")) + "): " + str(res.get("data"))[:300]
+    data = res.get("data")
+    if isinstance(data, dict) and "predefined_contacts_tag_ids" in data and not _has_tag(data, tag_id):
+        return False, "tag write returned 200 but the tag is not on the person"
+    return True, "tagged"
+
+
+def _load_unsub_list(s3):
+    try:
+        people = (_fetch_json(s3, UNSUB_LIST_KEY) or {}).get("people") or {}
+    except Exception:
+        people = {}
+    return people
+
+
+def _add_to_unsub_list(s3, pid, email):
+    """Record the opt-out in S3 (read at send time, so it takes effect before any
+    people.json refresh). Returns True if this person was not already on the list."""
+    people = _load_unsub_list(s3)
+    if str(pid) in people:
+        return False
+    people[str(pid)] = {"email": (email or "").lower(),
+                        "at": datetime.now(timezone.utc).isoformat()}
+    s3.put_object(Bucket=S3_BUCKET, Key=UNSUB_LIST_KEY,
+                  Body=json.dumps({"people": people}).encode("utf-8"),
+                  ContentType="application/json")
+    return True
+
+
+def _record_unsub(pid, email):
+    """S3 opt-out list (must succeed — raises otherwise) + Pipeline tag + alert to Chad."""
+    s3 = boto3.client("s3", region_name=S3_REGION)
+    is_new = _add_to_unsub_list(s3, pid, email)
+    try:
+        ok, detail = _tag_person_unsub(pid, get_jwt())
+    except Exception as e:
+        ok, detail = False, "Pipeline error: " + str(e)
+    if is_new or not ok:
+        try:
+            boto3.client("ses", region_name=SES_REGION).send_email(
+                Source=FROM_ADDR, Destination={"ToAddresses": TO_ADDRS},
+                Message={"Subject": {"Data": "Weekly mailer unsubscribe: " + (email or str(pid))
+                                     + ("" if ok else " (Pipeline tag FAILED)"), "Charset": "UTF-8"},
+                         "Body": {"Text": {"Data": (email or "") + " unsubscribed from the weekly mailer.\n"
+                                           "Pipeline '" + UNSUB_TAG_NAME + "' tag: " + detail + "\n"
+                                           "They are on the S3 opt-out list and will be skipped at send.\n"
+                                           "Person: https://app.pipelinecrm.com/people/" + str(pid) + "\n",
+                                           "Charset": "UTF-8"}}})
+        except Exception as e:
+            print(f"unsub alert failed pid={pid}: {e}")
+    if not ok:
+        print(f"unsub pipeline tag failed pid={pid}: {detail}")
+    return ok
+
+
+def _unsub_page(message, status=200):
+    return {"statusCode": status,
+            "headers": {"Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store"},
+            "body": ('<!doctype html><html lang="en"><head><meta charset="utf-8">'
+                     '<meta name="viewport" content="width=device-width, initial-scale=1">'
+                     "<title>Unsubscribe</title></head>"
+                     '<body style="font-family:-apple-system,BlinkMacSystemFont,'
+                     "'Segoe UI',Roboto,Helvetica,Arial,sans-serif;color:#1f2937;"
+                     'max-width:560px;margin:80px auto;padding:0 24px;text-align:center;">'
+                     '<h1 style="font-size:22px;">' + message + "</h1>"
+                     '<p style="color:#6b7280;font-size:14px;">Chad Gracia &middot; Gracia Group '
+                     "&middot; Rainmaker Securities</p></body></html>")}
+
+
+def _handle_unsub(params, method="GET"):
+    """GET: record + confirmation page. POST: RFC 8058 one-click — record, empty 200."""
+    parsed = _parse_unsub_token(params.get("u") or "")
+    if not parsed:
+        if method == "POST":
+            return {"statusCode": 400, "body": ""}
+        return _unsub_page("This unsubscribe link is invalid or has expired. Reply to any of our "
+                           "emails with &ldquo;unsubscribe&rdquo; and we&rsquo;ll remove you.", 400)
+    pid, email = parsed
+    try:
+        _record_unsub(pid, email)
+    except Exception as e:
+        print(f"unsub record failed pid={pid}: {e}")
+        if method == "POST":
+            return {"statusCode": 500, "body": ""}
+        return _unsub_page("Something went wrong &mdash; reply to any of our emails with "
+                           "&ldquo;unsubscribe&rdquo; and we&rsquo;ll remove you.", 500)
+    if method == "POST":
+        return {"statusCode": 200, "body": ""}
+    return _unsub_page("You&rsquo;ve been unsubscribed from the weekly list.")
+
+
+def _mailer_suppressed(s3):
+    """(pids, emails, tag_checked) to skip at send: the S3 opt-out list plus anyone
+    tagged "Unsub: Weekly" in the people.json cache (catches tags added by hand)."""
+    pids, emails = set(), set()
+    for k, v in _load_unsub_list(s3).items():
+        if str(k).isdigit():
+            pids.add(int(k))
+        if isinstance(v, dict) and v.get("email"):
+            emails.add(str(v["email"]).lower())
+    tag_id = None
+    try:
+        tag_id = _resolve_unsub_tag_id(get_jwt())
+    except Exception as e:
+        print(f"unsub tag lookup failed: {e}")
+    if tag_id is not None:
+        for p in (_fetch_json(s3, "people.json") or {}).get("people", []) or []:
+            if _has_tag(p, tag_id):
+                nid = _normalize_id(p.get("id"))
+                if nid is not None:
+                    pids.add(nid)
+                em = _person_email(p)
+                if em:
+                    emails.add(em.lower())
+    return pids, emails, tag_id is not None
+
+
+def _drop_suppressed(rows, pids, emails):
+    """Split mailer rows [(first, email, pid)] into (kept, n_skipped)."""
+    kept = [r for r in rows
+            if _normalize_id(r[2]) not in pids and (r[1] or "").lower() not in emails]
+    return kept, len(rows) - len(kept)
 
 
 def _mailer_fmt_money(v):
@@ -3721,7 +3997,7 @@ def _mailer_buy_table(title, companies, person_id, buyer_counts=None, logos=None
     return "".join(out)
 
 
-def _render_mailer_email(first_name, person_id, sells, buys, buyer_counts=None, logos=None):
+def _render_mailer_email(first_name, person_id, sells, buys, buyer_counts=None, logos=None, unsub_url=None):
     greet = "Hello " + escape(first_name) + "," if first_name else "Hello,"
     return (
         '<div style="font-family:-apple-system,BlinkMacSystemFont,\'Segoe UI\',Roboto,'
@@ -3758,6 +4034,7 @@ def _render_mailer_email(first_name, person_id, sells, buys, buyer_counts=None, 
         + _mailer_table("Sell orders — current availability", sells, person_id, None, logos)
         + _mailer_buy_table("Buy orders — active demand", buys, person_id, buyer_counts, logos)
         + MAILER_SIGNATURE_HTML
+        + _mailer_unsub_footer(unsub_url or _unsub_url(person_id, ""))
         + "</div>"
     )
 
@@ -4499,7 +4776,7 @@ MAILER_COMPOSER_SCRIPT = """
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({action: 'mailer_test', subject: (document.getElementById('send-subject').value || '').trim()})
     }).then(function (r) { return r.json(); }).then(function (j) {
-      tst.textContent = j.ok ? 'Test sent ✓' : 'Failed — try again';
+      tst.textContent = j.ok ? 'Test sent ✓' : ('Failed: ' + (j.error || 'try again'));
       tst.disabled = false;
     }).catch(function () { tst.textContent = 'Failed — try again'; tst.disabled = false; });
   });
@@ -4519,7 +4796,7 @@ MAILER_COMPOSER_SCRIPT = """
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({action: 'mailer_send', subject: subj, search_id: sid, limit: lim})
     }).then(function (r) { return r.json(); }).then(function (j) {
-      snd.textContent = j.ok ? ('Sent to ' + j.sent + ' ✓') : ('Failed: ' + (j.error || 'try again'));
+      snd.textContent = j.ok ? ('Sent to ' + j.sent + ' ✓ (' + (j.unsubscribed || 0) + ' unsubscribed skipped)') : ('Failed: ' + (j.error || 'try again'));
       snd.disabled = false;
     }).catch(function () { snd.textContent = 'Failed — try again'; snd.disabled = false; });
   });
@@ -5039,6 +5316,8 @@ def _handle_mailer_send(body):
         return {"statusCode": 400, "headers": {"Content-Type": "application/json"},
                 "body": json.dumps({"ok": False, "error": "nothing selected"})}
     rows, missing = _fetch_mailer_rows(search_id)
+    unsub_pids, unsub_emails, _tag_ok = _mailer_suppressed(s3)
+    rows, unsubscribed = _drop_suppressed(rows, unsub_pids, unsub_emails)
     lim_raw = str(body.get("limit") or "").strip()
     if lim_raw.isdigit() and int(lim_raw) > 0:
         rows = rows[:int(lim_raw)]
@@ -5073,14 +5352,9 @@ def _handle_mailer_send(body):
             skipped += 1
             continue
         try:
-            html = _render_mailer_email(first, npid, sells, buys, counts, True)
-            ses.send_email(
-                Source=MAILER_FROM,
-                Destination={"ToAddresses": [email]},
-                ReplyToAddresses=["cgracia@rainmakersecurities.com"],
-                Message={"Subject": {"Data": subject, "Charset": "UTF-8"},
-                         "Body": {"Html": {"Data": html, "Charset": "UTF-8"}}},
-            )
+            unsub_url = _unsub_url(npid, email)
+            html = _render_mailer_email(first, npid, sells, buys, counts, True, unsub_url)
+            _mailer_send_one(ses, email, subject, html, unsub_url)
             already.add(key)
             new_times[str(npid)] = datetime.now(timezone.utc).timestamp()
             sent += 1
@@ -5093,6 +5367,7 @@ def _handle_mailer_send(body):
     report = ("Weekly mailer send complete.\n\nSubject: " + subject
               + "\nSent: " + str(sent)
               + "\nSkipped (already sent today / no person id): " + str(skipped)
+              + "\nSkipped (" + UNSUB_TAG_NAME + "): " + str(unsubscribed)
               + "\nFailed: " + str(failed)
               + "\nNo email on record: " + str(len(missing))
               + "\nSell orders: " + str(len(sells)) + "  Buy companies: " + str(len(buys)) + "\n")
@@ -5106,7 +5381,8 @@ def _handle_mailer_send(body):
     except Exception as e:
         print(f"mailer send report failed: {e}")
     return {"statusCode": 200, "headers": {"Content-Type": "application/json"},
-            "body": json.dumps({"ok": True, "sent": sent, "failed": failed, "skipped": skipped})}
+            "body": json.dumps({"ok": True, "sent": sent, "failed": failed, "skipped": skipped,
+                                "unsubscribed": unsubscribed})}
 
 
 def _handle_mailer_test(body):
@@ -5120,14 +5396,14 @@ def _handle_mailer_test(body):
     sells = [d for d in sells_all if str(d.get("id")) in selected]
     selected_lc = {str(x).lower() for x in selected}
     buys = [(nm, n) for nm, n in _mailer_buy_companies(s3, counts) if ("c:" + nm).lower() in selected_lc]
-    email_html = _render_mailer_email("Chad", pid, sells, buys, counts, True)
-    boto3.client("ses", region_name=SES_REGION).send_email(
-        Source=MAILER_FROM,
-        Destination={"ToAddresses": ["cgracia@rainmakersecurities.com"]},
-        ReplyToAddresses=["cgracia@rainmakersecurities.com"],
-        Message={"Subject": {"Data": "[TEST] " + subject, "Charset": "UTF-8"},
-                 "Body": {"Html": {"Data": email_html, "Charset": "UTF-8"}}},
-    )
+    unsub_url = _unsub_url(pid, MAILER_REPLY_TO)
+    email_html = _render_mailer_email("Chad", pid, sells, buys, counts, True, unsub_url)
+    try:
+        _mailer_send_one(boto3.client("ses", region_name=SES_REGION), MAILER_REPLY_TO,
+                         "[TEST] " + subject, email_html, unsub_url)
+    except Exception as e:
+        return {"statusCode": 500, "headers": {"Content-Type": "application/json"},
+                "body": json.dumps({"ok": False, "error": str(e)})}
     _merge_send_times(s3, {str(pid): datetime.now(timezone.utc).timestamp()})
     return {"statusCode": 200,
             "headers": {"Content-Type": "application/json"},
@@ -5145,6 +5421,15 @@ def _render_mailer_composer(pid):
     selected_lc = {str(x).lower() for x in selected}
     buys = [(nm, n) for nm, n in buy_cos if ("c:" + nm).lower() in selected_lc]
     email_html = _render_mailer_email("Chad", pid, sells, buys, counts, True)
+    try:
+        rows, _missing = _fetch_mailer_rows()
+        unsub_pids, unsub_emails, tag_ok = _mailer_suppressed(s3)
+        kept, n_unsub = _drop_suppressed(rows, unsub_pids, unsub_emails)
+        recip_line = (str(len(kept)) + " recipients will be sent &middot; " + str(n_unsub)
+                      + " skipped (" + UNSUB_TAG_NAME + ")"
+                      + ("" if tag_ok else " &mdash; Pipeline tag lookup failed; S3 opt-out list only"))
+    except Exception as e:
+        recip_line = "Recipient count unavailable: " + escape(str(e))
 
     html = (
         '<!doctype html><html lang="en"><head><meta charset="utf-8">'
@@ -5158,6 +5443,7 @@ def _render_mailer_composer(pid):
         '<h1 style="font-size:20px;margin:0 0 4px 0;">Weekly mailer</h1>'
         '<p style="color:#6b7280;font-size:13px;margin:0 0 16px 0;">Tick the orders to include, '
         "save, and the preview below updates. Nothing is sent from this page yet.</p>"
+        '<p id="recip-count" style="color:#374151;font-size:13px;margin:0 0 12px 0;">' + recip_line + "</p>"
         '<button type="button" id="save-sel" style="margin:0 0 12px 0;padding:8px 18px;'
         "border:1px solid #d1d5db;background:#ffffff;color:#374151;font-size:14px;font-weight:500;"
         'border-radius:6px;cursor:pointer;font-family:inherit;">Save selection &amp; update preview</button>'
@@ -5210,6 +5496,8 @@ def handle_http_request(event):
         return _handle_mailer_click(params, _method, _meta)
     if isinstance(params, dict) and params.get("view") == "daily":
         return _handle_daily_signup(params, _method, _meta)
+    if isinstance(params, dict) and params.get("view") == "unsub":
+        return _handle_unsub(params, _method)
     key = params.get("key") if isinstance(params, dict) else None
     expected = os.environ.get("BRIEF_PAGE_KEY")
     if not expected or key != expected:
