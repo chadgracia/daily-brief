@@ -1,0 +1,210 @@
+name: Check restricted issuers
+on:
+  workflow_dispatch:
+permissions:
+  id-token: write
+  contents: read
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::271378210266:role/github-actions-deploy
+          aws-region: us-east-1
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Download companies.json and deals.json
+        run: |
+          aws s3 cp s3://full-pipeline-cache/companies.json /tmp/companies.json
+          aws s3 cp s3://full-pipeline-cache/deals.json /tmp/deals.json
+      - name: Check restricted issuers
+        shell: python
+        run: |
+          import json, re
+          from collections import Counter, defaultdict
+
+          FIELD = "4011458"
+          OPTION = "7217010"
+          NAME_RE = re.compile(r"(anthropic|openevidence|open evidence|amca|advanced manufacturing)", re.I)
+          LIST_KEYS = ("entries", "companies", "deals", "data", "records", "items", "results")
+
+          def shape(obj, label):
+              print(f"[{label}] top-level type: {type(obj).__name__}")
+              if isinstance(obj, dict):
+                  print(f"[{label}] top-level keys: {list(obj.keys())[:50]}")
+
+          def records(obj):
+              if isinstance(obj, list):
+                  return obj
+              if isinstance(obj, dict):
+                  for k in LIST_KEYS:
+                      if isinstance(obj.get(k), list):
+                          return obj[k]
+                  vals = list(obj.values())
+                  if vals and all(isinstance(v, dict) for v in vals):
+                      return vals
+              return []
+
+          def field_values(rec):
+              """Every value attached to field 4011458, in any representation."""
+              out = []
+              def walk(node):
+                  if isinstance(node, dict):
+                      for k in ("id", "custom_field_id", "custom_field_label_id", "field_id"):
+                          if str(node.get(k)) == FIELD:
+                              for vk in ("value", "values", "option_id", "option_ids"):
+                                  if vk in node:
+                                      out.append(node[vk])
+                      for k, v in node.items():
+                          if FIELD in str(k):
+                              out.append(v)
+                          walk(v)
+                  elif isinstance(node, list):
+                      for v in node:
+                          walk(v)
+              walk(rec)
+              return out
+
+          def contains_option(val):
+              if isinstance(val, (list, tuple)):
+                  return any(contains_option(v) for v in val)
+              if isinstance(val, dict):
+                  return any(contains_option(v) for v in val.values())
+              if isinstance(val, str):
+                  return OPTION in [s.strip() for s in re.split(r"[,\s]+", val)]
+              return str(val) == OPTION
+
+          def keys_with_field(node, path="", acc=None):
+              acc = set() if acc is None else acc
+              if isinstance(node, dict):
+                  for k, v in node.items():
+                      p = f"{path}.{k}" if path else str(k)
+                      if FIELD in str(k):
+                          acc.add(p)
+                      keys_with_field(v, p, acc)
+              elif isinstance(node, list):
+                  for v in node:
+                      keys_with_field(v, path + "[]", acc)
+              return acc
+
+          def custom_repr(rec):
+              """Return (location, value) for the custom-field container in a record, if any."""
+              for k in ("custom_fields", "custom_field_values", "custom_field_labels"):
+                  v = rec.get(k)
+                  if v:
+                      return k, v
+              flat = {k: v for k, v in rec.items() if str(k).startswith("custom_label_") and v not in (None, "", [], {})}
+              if flat:
+                  return "top-level custom_label_* keys", flat
+              return None, None
+
+          # ---------- companies ----------
+          raw_c = json.load(open("/tmp/companies.json"))
+          print("=" * 70)
+          print("1. companies.json")
+          shape(raw_c, "companies")
+          companies = records(raw_c)
+          print(f"[companies] total records: {len(companies)}")
+          if companies:
+              s = companies[0]
+              print(f"[companies] sample id={s.get('id')} name={s.get('name')!r}")
+              print(f"[companies] sample keys: {sorted(s.keys())}")
+
+          print("=" * 70)
+          print("2. Company custom-field representation")
+          shown = False
+          for c in companies:
+              loc, val = custom_repr(c)
+              if loc:
+                  print(f"Record id={c.get('id')} name={c.get('name')!r}")
+                  print(f"Container: {loc} (type {type(val).__name__})")
+                  print(json.dumps(val, indent=2, default=str)[:3000])
+                  shown = True
+                  break
+          if not shown:
+              print("No record has a custom_fields container or custom_label_* key set.")
+
+          print("=" * 70)
+          print(f"3. Companies with field {FIELD} (RMS Restricted) = option {OPTION} (Restricted)")
+          restricted = [c for c in companies if any(contains_option(v) for v in field_values(c))]
+          for c in restricted:
+              print(f"  RESTRICTED id={c.get('id')} name={c.get('name')!r}")
+          print(f"  count: {len(restricted)}")
+          if not restricted:
+              print(f"  NONE FOUND with option {OPTION}.")
+              allkeys = set()
+              for c in companies:
+                  keys_with_field(c, "", allkeys)
+              print(f"  Keys containing '{FIELD}' anywhere: {sorted(allkeys) if allkeys else 'none'}")
+              vals = Counter(json.dumps(v, default=str) for c in companies for v in field_values(c))
+              print(f"  Distinct values seen for {FIELD}: {dict(vals) if vals else 'none'}")
+
+          print("=" * 70)
+          print("4. Companies matching name regex")
+          targets = [c for c in companies if NAME_RE.search(str(c.get("name") or ""))]
+          for c in targets:
+              fv = field_values(c)
+              print(f"  id={c.get('id')} name={c.get('name')!r} field_{FIELD}={json.dumps(fv, default=str) if fv else 'not present'}")
+          print(f"  count: {len(targets)}")
+
+          # ---------- deals ----------
+          raw_d = json.load(open("/tmp/deals.json"))
+          print("=" * 70)
+          print("5. deals.json")
+          shape(raw_d, "deals")
+          deals = records(raw_d)
+          print(f"[deals] total records: {len(deals)}")
+          if deals:
+              print(f"[deals] sample keys: {sorted(deals[0].keys())}")
+
+          def deal_company(d):
+              cid = d.get("company_id") or d.get("primary_company_id")
+              cname = d.get("company_name")
+              comp = d.get("company") or d.get("primary_company")
+              if isinstance(comp, dict):
+                  cid = cid or comp.get("id")
+                  cname = cname or comp.get("name")
+              elif isinstance(comp, str):
+                  cname = cname or comp
+              return (str(cid) if cid not in (None, "") else None), cname
+
+          def deal_stage(d):
+              for k in ("deal_stage", "stage", "deal_stage_name", "stage_name"):
+                  v = d.get(k)
+                  if isinstance(v, dict):
+                      return v.get("name") or str(v.get("id"))
+                  if v not in (None, ""):
+                      return str(v)
+              v = d.get("deal_stage_id")
+              return f"stage_id={v}" if v is not None else "(no stage)"
+
+          has_id = sum(1 for d in deals if deal_company(d)[0])
+          has_name = sum(1 for d in deals if deal_company(d)[1])
+          print(f"[deals] carrying a company id: {has_id}/{len(deals)}")
+          print(f"[deals] carrying a company name: {has_name}/{len(deals)}")
+          print(f"[deals] company-related keys on sample: {[k for k in (deals[0].keys() if deals else []) if 'compan' in k.lower()]}")
+          print(f"[deals] stage-related keys on sample: {[k for k in (deals[0].keys() if deals else []) if 'stage' in k.lower()]}")
+
+          by_id = defaultdict(list)
+          by_name = defaultdict(list)
+          for d in deals:
+              cid, cname = deal_company(d)
+              if cid:
+                  by_id[cid].append(d)
+              if cname:
+                  by_name[cname].append(d)
+          for c in targets:
+              cid = str(c.get("id"))
+              linked = by_id.get(cid)
+              how = "company id"
+              if not linked:
+                  linked = by_name.get(c.get("name"), [])
+                  how = "exact company name"
+              stages = Counter(deal_stage(d) for d in linked)
+              print(f"  id={cid} name={c.get('name')!r}: {len(linked)} deals (matched by {how})")
+              for st, n in stages.most_common():
+                  print(f"      {st}: {n}")
+          print("=" * 70)
+          print("Done.")
