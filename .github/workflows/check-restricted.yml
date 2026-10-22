@@ -1,3 +1,4 @@
+# Read-only: downloads from S3 and prints to the run log; writes nothing.
 name: Check restricted issuers
 on:
   workflow_dispatch:
