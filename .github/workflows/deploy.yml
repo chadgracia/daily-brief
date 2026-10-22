@@ -15,5 +15,11 @@ jobs:
           role-to-assume: arn:aws:iam::271378210266:role/github-actions-deploy
           aws-region: us-east-1
       - run: |
-          zip -j function.zip lambda_function.py
-          aws lambda update-function-code --function-name daily-brief --zip-file fileb://function.zip
+          # Vendor requirements as wheels built for the Lambda runtime (python3.14, x86_64).
+          pip install --quiet --target build --only-binary=:all: --implementation cp \
+            --platform manylinux2014_x86_64 --python-version 3.14 -r requirements.txt
+          cp lambda_function.py build/
+          (cd build && zip -qr ../function.zip .)
+          # Print only status fields: the full response includes environment variables.
+          aws lambda update-function-code --function-name daily-brief --zip-file fileb://function.zip \
+            --query '{FunctionName:FunctionName,CodeSize:CodeSize,LastModified:LastModified,LastUpdateStatus:LastUpdateStatus}'

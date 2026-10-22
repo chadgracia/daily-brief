@@ -5198,6 +5198,183 @@ def _render_mailer_composer(pid):
     }
 
 
+# ── Restricted issuers list ───────────────────────────────────────────────
+# Single source of truth for RMS-restricted companies (Pipeline company field
+# "RMS Restricted" = "Restricted"). Other repos read restricted-issuers.json.
+RESTRICTED_KEY = "restricted-issuers.json"
+RESTRICTED_FIELD_ID = 4011458
+RESTRICTED_OPTION_ID = 7217010
+RESTRICTED_MIN_COMPANIES = 5000
+PIPELINE_COMPANY_URL = "https://app.pipelinecrm.com/companies/{}"
+_RESTRICTED_LABEL = "custom_label_" + str(RESTRICTED_FIELD_ID)
+
+
+def _restricted_value_flagged(val):
+    """True if a custom_label_4011458 value includes the Restricted option."""
+    if val is None:
+        return False
+    vals = val if isinstance(val, (list, tuple)) else [val]
+    return any(str(v).strip() == str(RESTRICTED_OPTION_ID) for v in vals)
+
+
+def _company_is_restricted(company):
+    cf = company.get("custom_fields") if isinstance(company, dict) else None
+    if not isinstance(cf, dict):
+        return False
+    return _restricted_value_flagged(cf.get(_RESTRICTED_LABEL))
+
+
+def _scan_companies_stream(fileobj):
+    """Stream companies.json; return (last_updated, scanned_count, restricted list).
+
+    Only id, name and the RMS Restricted field are kept per company, so memory
+    stays flat regardless of file size.
+    """
+    import ijson
+
+    field_prefix = "companies.item.custom_fields." + _RESTRICTED_LABEL
+    last_updated = None
+    scanned = 0
+    restricted = []
+    cur = None
+    for prefix, ev, value in ijson.parse(fileobj, use_float=True):
+        if prefix == "last_updated" and ev not in ("start_map", "start_array", "end_map", "end_array", "map_key"):
+            last_updated = value
+        elif prefix == "companies.item":
+            if ev == "start_map":
+                cur = {"id": None, "name": None, "flag": None}
+            elif ev == "end_map" and cur is not None:
+                scanned += 1
+                if _restricted_value_flagged(cur["flag"]):
+                    cid = cur["id"]
+                    restricted.append({"id": int(cid) if isinstance(cid, (int, float)) else cid,
+                                       "name": cur["name"]})
+                cur = None
+        elif cur is None:
+            continue
+        elif prefix == "companies.item.id" and ev in ("number", "string"):
+            cur["id"] = value
+        elif prefix == "companies.item.name" and ev == "string":
+            cur["name"] = value
+        elif prefix == field_prefix:
+            if ev == "start_array":
+                cur["flag"] = []
+            elif ev in ("number", "string"):
+                cur["flag"] = value
+        elif prefix == field_prefix + ".item" and ev in ("number", "string"):
+            if isinstance(cur["flag"], list):
+                cur["flag"].append(value)
+    return last_updated, scanned, restricted
+
+
+def build_restricted():
+    """Rebuild s3://full-pipeline-cache/restricted-issuers.json from companies.json.
+
+    Never writes on a missing/unparseable file or a short scan, so a good list
+    is never replaced by an empty or partial one.
+    """
+    s3 = boto3.client("s3", region_name=S3_REGION)
+    try:
+        body = s3.get_object(Bucket=S3_BUCKET, Key="companies.json")["Body"]
+    except Exception as e:
+        reason = f"companies.json unavailable: {e}"
+        print(f"ERROR build_restricted: {reason}")
+        return {"ok": False, "reason": reason}
+    try:
+        last_updated, scanned, restricted = _scan_companies_stream(body)
+    except Exception as e:
+        reason = f"companies.json unparseable: {type(e).__name__}: {e}"
+        print(f"ERROR build_restricted: {reason}")
+        return {"ok": False, "reason": reason}
+    finally:
+        try:
+            body.close()
+        except Exception:
+            pass
+    if scanned < RESTRICTED_MIN_COMPANIES:
+        reason = (f"only {scanned} company records scanned "
+                  f"(minimum {RESTRICTED_MIN_COMPANIES}); not writing")
+        print(f"ERROR build_restricted: {reason}")
+        return {"ok": False, "reason": reason, "company_count_scanned": scanned}
+    doc = {
+        "built_at": datetime.now(timezone.utc).isoformat(),
+        "source_last_updated": last_updated,
+        "company_count_scanned": scanned,
+        "field_id": RESTRICTED_FIELD_ID,
+        "option_id": RESTRICTED_OPTION_ID,
+        "companies": restricted,
+    }
+    s3.put_object(Bucket=S3_BUCKET, Key=RESTRICTED_KEY,
+                  Body=json.dumps(doc, ensure_ascii=False).encode("utf-8"),
+                  ContentType="application/json")
+    print(f"build_restricted: scanned={scanned} restricted={len(restricted)}")
+    return {"ok": True, "built_at": doc["built_at"], "company_count_scanned": scanned,
+            "restricted_count": len(restricted)}
+
+
+def _render_restricted_page(params):
+    key = params.get("key") or ""
+    page_url = "?view=restricted&key=" + quote(key, safe="")
+    result_html = ""
+    if params.get("rebuild") == "1":
+        try:
+            res = build_restricted()
+        except Exception as e:
+            res = {"ok": False, "reason": f"{type(e).__name__}: {e}"}
+        color = "#15803d" if res.get("ok") else "#b91c1c"
+        result_html = (f'<div style="border:1px solid {color}; color:{color}; border-radius:8px; '
+                       'padding:10px 14px; margin:0 0 16px 0; font-size:14px;">'
+                       '<b>Rebuild ' + ("succeeded" if res.get("ok") else "failed") + ':</b> '
+                       + escape(json.dumps(res, default=str)) + '</div>')
+    doc, load_err = None, ""
+    try:
+        obj = boto3.client("s3", region_name=S3_REGION).get_object(Bucket=S3_BUCKET, Key=RESTRICTED_KEY)
+        doc = json.loads(obj["Body"].read())
+    except Exception as e:
+        load_err = f"{type(e).__name__}: {e}"
+    if doc is None:
+        info_html = ('<p style="color:#b91c1c;">No restricted-issuers.json yet ('
+                     + escape(load_err) + '). Use Rebuild now.</p>')
+    else:
+        rows = "".join(
+            '<tr><td style="padding:4px 12px 4px 0;">' + escape(str(c.get("id"))) + '</td>'
+            '<td style="padding:4px 0;"><a href="'
+            + escape(PIPELINE_COMPANY_URL.format(c.get("id")), quote=True)
+            + '" target="_blank" rel="noopener" style="color:#2563eb; text-decoration:none;">'
+            + escape(str(c.get("name") or "")) + '</a></td></tr>'
+            for c in (doc.get("companies") or []))
+        info_html = (
+            '<table style="font-size:14px; margin:0 0 16px 0;">'
+            '<tr><td style="padding:2px 12px 2px 0; color:#6b7280;">built_at</td><td>'
+            + escape(str(doc.get("built_at"))) + '</td></tr>'
+            '<tr><td style="padding:2px 12px 2px 0; color:#6b7280;">source_last_updated</td><td>'
+            + escape(str(doc.get("source_last_updated"))) + '</td></tr>'
+            '<tr><td style="padding:2px 12px 2px 0; color:#6b7280;">company_count_scanned</td><td>'
+            + escape(str(doc.get("company_count_scanned"))) + '</td></tr>'
+            '<tr><td style="padding:2px 12px 2px 0; color:#6b7280;">restricted</td><td>'
+            + str(len(doc.get("companies") or [])) + '</td></tr></table>'
+            '<table style="font-size:14px; border-collapse:collapse;">'
+            '<tr><th style="text-align:left; padding:4px 12px 4px 0;">ID</th>'
+            '<th style="text-align:left; padding:4px 0;">Company</th></tr>'
+            + (rows or '<tr><td colspan="2" style="padding:4px 0; color:#6b7280;">None flagged.</td></tr>')
+            + '</table>')
+    html = (
+        '<!doctype html><html><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width, initial-scale=1">'
+        '<title>Restricted issuers</title>'
+        f'<link rel="stylesheet" href="{escape(MASTER_CSS_URL, quote=True)}"></head>'
+        f'<body style="{BODY_STYLE}"><div style="{CONTAINER_STYLE}">'
+        f'<h1 style="{H1_STYLE}">Restricted issuers</h1>'
+        + result_html + info_html
+        + '<p style="margin:20px 0 0 0;"><a href="' + escape(page_url + "&rebuild=1", quote=True)
+        + '" style="display:inline-block; padding:8px 14px; border-radius:6px; background:#2563eb; '
+        'color:#ffffff; text-decoration:none; font-size:14px; font-weight:600;">Rebuild now</a></p>'
+        '</div></body></html>')
+    return {"statusCode": 200,
+            "headers": {"Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store"},
+            "body": html}
+
+
 def handle_http_request(event):
     params = event.get("queryStringParameters") or {}
     _method = ((event.get("requestContext") or {}).get("http") or {}).get("method", "GET")
@@ -5214,6 +5391,9 @@ def handle_http_request(event):
     expected = os.environ.get("BRIEF_PAGE_KEY")
     if not expected or key != expected:
         return {"statusCode": 403, "body": "Forbidden"}
+
+    if params.get("view") == "restricted":
+        return _render_restricted_page(params)
 
     method = ((event.get("requestContext") or {}).get("http") or {}).get("method", "GET")
     if method == "POST":
@@ -5339,6 +5519,10 @@ def handle_http_request(event):
 
 
 def lambda_handler(event, context):
+    # Scheduled restricted-issuers rebuild: must return before any brief/mailer routing.
+    if isinstance(event, dict) and event.get("action") == "build_restricted":
+        return build_restricted()
+
     http = (event.get("requestContext") or {}).get("http")
     if http:
         return handle_http_request(event)
