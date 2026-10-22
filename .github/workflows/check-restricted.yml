@@ -1,6 +1,9 @@
 name: Check restricted issuers
 on:
   workflow_dispatch:
+  push:
+    branches: [main]
+    paths: ['.github/workflows/check-restricted.yml']
 permissions:
   id-token: write
   contents: read
@@ -16,10 +19,21 @@ jobs:
         with:
           python-version: "3.12"
       - name: Download companies.json and deals.json
+        continue-on-error: true
         run: |
           aws s3 cp s3://full-pipeline-cache/companies.json /tmp/companies.json
           aws s3 cp s3://full-pipeline-cache/deals.json /tmp/deals.json
+      - name: S3 access check (read-only)
+        if: ${{ always() }}
+        run: |
+          set +e
+          for k in companies.json deals.json mailer-scanner-pids.json; do
+            echo "== list $k"; aws s3api list-objects-v2 --bucket full-pipeline-cache --prefix "$k" --max-items 1 --query 'Contents[0].[Key,Size]' --output text 2>&1
+            echo "== head $k"; aws s3api head-object --bucket full-pipeline-cache --key "$k" --query '[ContentLength,ServerSideEncryption]' --output text 2>&1
+          done
+          exit 0
       - name: Check restricted issuers
+        if: ${{ always() }}
         shell: python
         run: |
           import json, re
@@ -101,7 +115,14 @@ jobs:
               return None, None
 
           # ---------- companies ----------
-          raw_c = json.load(open("/tmp/companies.json"))
+          def load(path):
+              try:
+                  return json.load(open(path))
+              except Exception as e:
+                  print(f"Could not load {path}: {type(e).__name__}")
+                  return None
+
+          raw_c = load("/tmp/companies.json")
           print("=" * 70)
           print("1. companies.json")
           shape(raw_c, "companies")
@@ -113,14 +134,18 @@ jobs:
               print(f"[companies] sample keys: {sorted(s.keys())}")
 
           print("=" * 70)
-          print("2. Company custom-field representation")
+          print("2. Company custom-field representation (key names only)")
           shown = False
           for c in companies:
               loc, val = custom_repr(c)
               if loc:
                   print(f"Record id={c.get('id')} name={c.get('name')!r}")
                   print(f"Container: {loc} (type {type(val).__name__})")
-                  print(json.dumps(val, indent=2, default=str)[:3000])
+                  if isinstance(val, dict):
+                      print(f"Keys: {sorted(val.keys())}")
+                  elif isinstance(val, list):
+                      ks = sorted({str(k) for e in val if isinstance(e, dict) for k in e.keys()})
+                      print(f"List of {len(val)} entries; entry keys: {ks}")
                   shown = True
                   break
           if not shown:
@@ -150,7 +175,7 @@ jobs:
           print(f"  count: {len(targets)}")
 
           # ---------- deals ----------
-          raw_d = json.load(open("/tmp/deals.json"))
+          raw_d = load("/tmp/deals.json")
           print("=" * 70)
           print("5. deals.json")
           shape(raw_d, "deals")
