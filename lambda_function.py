@@ -1,3 +1,4 @@
+import base64
 import concurrent.futures
 import hashlib
 import hmac
@@ -5616,6 +5617,152 @@ def _pd_abort_send(kind, err):
             "body": json.dumps({"ok": False, "error": "aborted: partner-desk/access.json unreadable: " + err})}
 
 
+PD_EVENT_ACTIONS = {"partner_desk", "iqf_individual", "iqf_entity", "leave"}
+PD_IQF_ACTIONS = {"iqf_individual", "iqf_entity"}
+PD_INVESTOR = 7218523
+PD_PROMOTABLE = {None, 7218524, 7218525, 7218527}  # empty, Not interested, Referral/Partner – Interested
+PD_EVENTS_PREFIX = "partner-desk/events/"
+PD_EMAIL_DEDUPE_MS = 10 * 60 * 1000
+
+
+def _pd_verify_handoff(s3, gp):
+    """pid (int) if gp is a valid, unexpired pid.exp.sig token, else None."""
+    parts = str(gp or "").split(".")
+    if len(parts) != 3 or not parts[0].isdigit() or not parts[1].isdigit():
+        return None
+    pid, exp, sig = parts
+    if int(exp) <= int(datetime.now(timezone.utc).timestamp()):
+        return None
+    secret = _pd_secret(s3)
+    want = hmac.new(secret.encode("utf-8"), f"{pid}|{exp}".encode("utf-8"), hashlib.sha256).hexdigest()[:32]
+    if not hmac.compare_digest(sig, want):
+        return None
+    return int(pid)
+
+
+def _pd_recently_emailed(s3, pid, action, now_ms):
+    cutoff = now_ms - PD_EMAIL_DEDUPE_MS
+    days = sorted({datetime.fromtimestamp(t / 1000, timezone.utc).strftime("%Y-%m-%d") for t in (cutoff, now_ms)})
+    for day in days:
+        prefix = PD_EVENTS_PREFIX + day + "/"
+        resp = s3.list_objects_v2(Bucket=S3_BUCKET, Prefix=prefix, StartAfter=prefix + str(cutoff))
+        for obj in resp.get("Contents") or []:
+            name = obj["Key"][len(prefix):]
+            if not name.endswith("-" + str(pid) + ".json"):
+                continue
+            ev = _fetch_json(s3, obj["Key"]) or {}
+            if ev.get("action") == action and ev.get("emailed") and int(ev.get("ts_ms") or 0) >= cutoff:
+                return True
+    return False
+
+
+def _pd_access_set_pd(s3, person, pd, jwt=None):
+    doc = _fetch_json(s3, PD_ACCESS_KEY)
+    people = doc.setdefault("people", {})
+    key = str(_normalize_id(person.get("id")))
+    if key in people:
+        people[key]["pd"] = pd
+    else:
+        people.update(_pd_access_rows(
+            [person], _pd_buy_entry_names(s3, _cf_option_ids(person, CF_PERSON_BUY_INTERESTS), jwt)))
+    s3.put_object(Bucket=S3_BUCKET, Key=PD_ACCESS_KEY,
+                  Body=json.dumps(doc, ensure_ascii=False).encode("utf-8"),
+                  ContentType="application/json")
+
+
+def _handle_pd_event(event, method, meta):
+    """POST ?view=pd-event from the trades deal page (sendBeacon). Authenticated by the gp token."""
+    if method != "POST":
+        return {"statusCode": 405, "body": ""}
+    try:
+        raw = event.get("body") or ""
+        if event.get("isBase64Encoded"):
+            raw = base64.b64decode(raw).decode("utf-8")
+        body = json.loads(raw or "{}")
+        if not isinstance(body, dict):
+            body = {}
+    except Exception:
+        body = {}
+    try:
+        s3 = boto3.client("s3", region_name=S3_REGION)
+        pid = _pd_verify_handoff(s3, body.get("gp"))
+    except Exception as e:
+        print(f"pd-event verify failed: {e}")
+        pid = None
+    if pid is None:
+        return {"statusCode": 403, "body": ""}
+    action = str(body.get("action") or "")
+    if action not in PD_EVENT_ACTIONS:
+        return {"statusCode": 400, "body": ""}
+    did = str(body.get("did") or "").strip()
+    try:
+        now = datetime.now(timezone.utc)
+        now_ms = int(now.timestamp() * 1000)
+        jwt = get_jwt()
+        cur = call_pipeline_api("GET", f"/people/{pid}.json", jwt=jwt)
+        person = cur["data"] if cur.get("status") == 200 and isinstance(cur.get("data"), dict) else {}
+        pd_before = _cf_option_id(person, CF_PARTNER_DESK_RESPONSE)
+        pd_after, wrote = pd_before, False
+        if action in PD_IQF_ACTIONS and person and pd_before in PD_PROMOTABLE:
+            res = call_pipeline_api("PUT", f"/people/{pid}.json",
+                                    {"person": {"custom_fields": {CF_PARTNER_DESK_RESPONSE: PD_INVESTOR}}},
+                                    jwt=jwt)
+            if res.get("status") == 200:
+                wrote, pd_after = True, PD_INVESTOR
+                try:
+                    _pd_access_set_pd(s3, person, PD_INVESTOR, jwt)
+                except Exception as e:
+                    print(f"pd-event access.json update failed pid={pid}: {e}")
+            else:
+                print(f"pd-event PD write failed pid={pid}: {res.get('status')}")
+        emailed = False
+        try:
+            dup = _pd_recently_emailed(s3, pid, action, now_ms)
+        except Exception as e:
+            print(f"pd-event dedupe check failed pid={pid}: {e}")
+            dup = False
+        if not dup:
+            try:
+                who = _person_full_name(person) or "Person " + str(pid)
+                co_name = ""
+                if did.isdigit():
+                    deals = (_fetch_json(s3, "deals.json") or {}).get("deals", []) or []
+                    deal = next((d for d in deals if _normalize_id(d.get("id")) == int(did)), None)
+                    if deal:
+                        co_name = _company_name(deal) or _deal_title(deal) or ""
+                tt = _cf_option_id(person, CF_TRANSACTOR_TYPE)
+
+                def _pd_lbl(v):
+                    return "(empty)" if v is None else PD_RESPONSE_LABELS.get(v, str(v))
+
+                alert = ("Name: " + who + "\n"
+                         + "Email: " + (_person_email(person) or "") + "\n"
+                         + "Transactor Type: " + (TRANSACTOR_TYPE_LABELS.get(tt, str(tt)) if tt else "(empty)") + "\n"
+                         + "Action: " + action + "\n"
+                         + "Deal: " + (did or "(none)") + (" — " + co_name if co_name else "") + "\n"
+                         + "Partner Desk Response: " + _pd_lbl(pd_before) + " → " + _pd_lbl(pd_after)
+                         + (" (written)" if wrote else "") + "\n\n"
+                         + "Person: " + PIPELINE_PERSON_URL.format(pid) + "\n")
+                boto3.client("ses", region_name=SES_REGION).send_email(
+                    Source=FROM_ADDR,
+                    Destination={"ToAddresses": TO_ADDRS},
+                    Message={"Subject": {"Data": "Partner Desk pop-up: " + who + " — " + action, "Charset": "UTF-8"},
+                             "Body": {"Text": {"Data": alert, "Charset": "UTF-8"}}},
+                )
+                emailed = True
+            except Exception as e:
+                print(f"pd-event alert failed pid={pid}: {e}")
+        log = {"ts": now.isoformat(), "ts_ms": now_ms, "pid": pid, "action": action, "did": did,
+               "pd_before": pd_before, "pd_after": pd_after, "wrote": wrote,
+               "ip": (meta or {}).get("ip", ""), "ua": (meta or {}).get("ua", ""), "emailed": emailed}
+        s3.put_object(Bucket=S3_BUCKET,
+                      Key=PD_EVENTS_PREFIX + now.strftime("%Y-%m-%d") + "/" + str(now_ms) + "-" + str(pid) + ".json",
+                      Body=json.dumps(log).encode("utf-8"), ContentType="application/json")
+    except Exception as e:
+        print(f"pd-event failed pid={pid} action={action}: {type(e).__name__}: {e}")
+    return {"statusCode": 204, "body": ""}
+
+
 def handle_http_request(event):
     params = event.get("queryStringParameters") or {}
     _method = ((event.get("requestContext") or {}).get("http") or {}).get("method", "GET")
@@ -5628,6 +5775,8 @@ def handle_http_request(event):
         return _handle_mailer_click(params, _method, _meta)
     if isinstance(params, dict) and params.get("view") == "daily":
         return _handle_daily_signup(params, _method, _meta)
+    if isinstance(params, dict) and params.get("view") == "pd-event":
+        return _handle_pd_event(event, _method, _meta)
     key = params.get("key") if isinstance(params, dict) else None
     expected = os.environ.get("BRIEF_PAGE_KEY")
     if not expected or key != expected:

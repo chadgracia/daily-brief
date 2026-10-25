@@ -280,5 +280,132 @@ class Route(unittest.TestCase):
         self.assertIn("Referral – Client (7218570): 1", res["body"])
 
 
+class FakeS3List(FakeS3):
+    def list_objects_v2(self, Bucket, Prefix, StartAfter=""):
+        keys = sorted(k for (b, k) in self.objects if b == Bucket and k.startswith(Prefix) and k > StartAfter)
+        return {"Contents": [{"Key": k} for k in keys]}
+
+
+class PdEvent(unittest.TestCase):
+    def setUp(self):
+        lf._PD_SECRET = "abc"
+
+    def _gp(self, pid=42, exp_delta=3600, secret="abc"):
+        exp = int(lf.datetime.now(lf.timezone.utc).timestamp()) + exp_delta
+        sig = hmac.new(secret.encode(), f"{pid}|{exp}".encode(), hashlib.sha256).hexdigest()[:32]
+        return f"{pid}.{exp}.{sig}"
+
+    def _run(self, body, pd=None, s3=None, raw=None, put_status=200):
+        s3 = s3 or FakeS3List({
+            ("full-pipeline-cache", "partner-desk/access.json"): json.dumps(
+                {"built_at": "x", "people": {"42": {"tt": 6577160, "pd": pd, "intermediary": True,
+                                                    "buying": [], "emails": ["a@b.com"]}}}).encode(),
+            ("full-pipeline-cache", "deals.json"): json.dumps(
+                {"deals": [{"id": 7, "company": {"id": 9, "name": "SpaceX"}}]}).encode()})
+        ses = FakeSES()
+        person = {"id": 42, "first_name": "A", "last_name": "B", "email": "a@b.com",
+                  "custom_fields": {TT: [6577160], **({PD: pd} if pd is not None else {})}}
+        calls = []
+
+        def api(method, endpoint, payload=None, jwt=None, timeout=15):
+            calls.append((method, endpoint, payload))
+            return {"status": put_status if method == "PUT" else 200, "data": person}
+
+        ev = {"queryStringParameters": {"view": "pd-event"},
+              "requestContext": {"http": {"method": "POST", "sourceIp": "1.2.3.4", "userAgent": "UA"}},
+              "body": raw if raw is not None else json.dumps(body)}
+        with mock.patch.object(lf.boto3, "client", side_effect=lambda svc, **k: ses if svc == "ses" else s3), \
+                mock.patch.object(lf, "call_pipeline_api", side_effect=api), \
+                mock.patch.object(lf, "get_jwt", return_value="j"):
+            res = lf.handle_http_request(ev)
+        return res, calls, ses, s3
+
+    def _events(self, s3):
+        return [json.loads(v) for (b, k), v in s3.objects.items() if k.startswith("partner-desk/events/")]
+
+    def test_bad_sig(self):
+        res, calls, ses, s3 = self._run({"gp": self._gp(secret="nope"), "action": "leave", "did": ""})
+        self.assertEqual(res["statusCode"], 403)
+        self.assertEqual((calls, ses.sent, s3.puts), ([], [], []))
+
+    def test_expired(self):
+        res, calls, ses, s3 = self._run({"gp": self._gp(exp_delta=-5), "action": "leave", "did": ""})
+        self.assertEqual(res["statusCode"], 403)
+        self.assertEqual((calls, ses.sent, s3.puts), ([], [], []))
+
+    def test_unknown_action(self):
+        res, calls, ses, s3 = self._run({"gp": self._gp(), "action": "hack", "did": ""})
+        self.assertEqual(res["statusCode"], 400)
+        self.assertEqual((calls, ses.sent, s3.puts), ([], [], []))
+
+    def test_iqf_writes_for_promotable(self):
+        for pd in (None, 7218524, 7218525, 7218527):
+            for action in ("iqf_individual", "iqf_entity"):
+                res, calls, ses, s3 = self._run({"gp": self._gp(), "action": action, "did": "7"}, pd=pd)
+                self.assertEqual(res, {"statusCode": 204, "body": ""})
+                puts = [c for c in calls if c[0] == "PUT"]
+                self.assertEqual(puts, [("PUT", "/people/42.json",
+                                         {"person": {"custom_fields": {PD: 7218523}}})])
+                acc = json.loads(s3.objects[("full-pipeline-cache", "partner-desk/access.json")])
+                self.assertEqual(acc["people"]["42"]["pd"], 7218523)
+                ev = self._events(s3)[0]
+                self.assertEqual((ev["pd_before"], ev["pd_after"], ev["wrote"]), (pd, 7218523, True))
+
+    def test_iqf_skips_protected(self):
+        for pd in (7218526, 7218528, 7218570, 7218529, 7218523):
+            res, calls, ses, s3 = self._run({"gp": self._gp(), "action": "iqf_entity", "did": ""}, pd=pd)
+            self.assertEqual(res["statusCode"], 204)
+            self.assertFalse([c for c in calls if c[0] == "PUT"])
+            self.assertFalse([p for p in s3.puts if p["Key"] == "partner-desk/access.json"])
+            ev = self._events(s3)[0]
+            self.assertEqual((ev["pd_after"], ev["wrote"]), (pd, False))
+
+    def test_non_iqf_never_writes_and_logs(self):
+        for action in ("partner_desk", "leave", "iqf_individual"):
+            res, calls, ses, s3 = self._run({"gp": self._gp(), "action": action, "did": "7"}, pd=7218524,
+                                            raw=None)
+            self.assertEqual(res["statusCode"], 204)
+            evs = self._events(s3)
+            self.assertEqual(len(evs), 1)
+            self.assertEqual((evs[0]["pid"], evs[0]["action"], evs[0]["did"], evs[0]["ip"], evs[0]["ua"]),
+                             (42, action, "7", "1.2.3.4", "UA"))
+            self.assertEqual(bool([c for c in calls if c[0] == "PUT"]), action == "iqf_individual")
+            self.assertEqual(ses.sent[0]["Message"]["Subject"]["Data"], "Partner Desk pop-up: A B — " + action)
+            text = ses.sent[0]["Message"]["Body"]["Text"]["Data"]
+            self.assertIn("Deal: 7 — SpaceX", text)
+            self.assertIn("Intermediary - Co-Broker", text)
+            self.assertIn("https://app.pipelinecrm.com/people/42", text)
+
+    def test_text_plain_beacon_body(self):
+        res, calls, ses, s3 = self._run(None, raw=json.dumps({"gp": self._gp(), "action": "leave", "did": ""}))
+        self.assertEqual(res["statusCode"], 204)
+        self.assertEqual(len(self._events(s3)), 1)
+
+    def test_email_dedupe(self):
+        res, calls, ses, s3 = self._run({"gp": self._gp(), "action": "leave", "did": ""})
+        self.assertEqual(len(ses.sent), 1)
+        _, _, ses2, s3 = self._run({"gp": self._gp(), "action": "leave", "did": ""}, s3=s3)
+        self.assertEqual(ses2.sent, [])
+        self.assertEqual(len(self._events(s3)), 2)
+        _, _, ses3, s3 = self._run({"gp": self._gp(), "action": "partner_desk", "did": ""}, s3=s3)
+        self.assertEqual(len(ses3.sent), 1)
+        # an email older than 10 minutes no longer suppresses
+        for (b, k), v in list(s3.objects.items()):
+            if k.startswith("partner-desk/events/"):
+                ev = json.loads(v)
+                ev["ts_ms"] -= 11 * 60 * 1000
+                del s3.objects[(b, k)]
+                prefix, name = k.rsplit("/", 1)
+                s3.objects[(b, prefix + "/" + str(ev["ts_ms"]) + "-42.json")] = json.dumps(ev).encode()
+        _, _, ses4, s3 = self._run({"gp": self._gp(), "action": "leave", "did": ""}, s3=s3)
+        self.assertEqual(len(ses4.sent), 1)
+
+    def test_fail_soft(self):
+        with mock.patch.object(lf, "_pd_recently_emailed", side_effect=RuntimeError("boom")), \
+                mock.patch.object(lf, "_fetch_json", side_effect=RuntimeError("boom")):
+            res, calls, ses, s3 = self._run({"gp": self._gp(), "action": "iqf_entity", "did": "7"})
+        self.assertEqual(res, {"statusCode": 204, "body": ""})
+
+
 if __name__ == "__main__":
     unittest.main()
