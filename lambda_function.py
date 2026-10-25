@@ -4,6 +4,7 @@ import hmac
 import json
 import os
 import re
+import secrets
 import urllib.error
 import urllib.request
 from datetime import datetime, timedelta, timezone
@@ -4311,6 +4312,11 @@ def _handle_mailer_click(params, method="GET", meta=None):
                         "?name=" + urllib.parse.quote(co_name) + "&side=sell")
         except Exception as e:
             print(f"mailer click interstitial dest failed did={did}: {e}")
+        if dest.startswith(TRADES_DEAL_PREFIX):
+            try:
+                dest += ("&" if "?" in dest else "?") + "gp=" + _pd_handoff(pid)
+            except Exception as e:
+                print(f"mailer click gp handoff failed pid={pid}: {e}")
         return _click_interstitial(dest)
     redirect = {"statusCode": 200,
                 "headers": {"Content-Type": "application/json"},
@@ -4341,7 +4347,10 @@ def _handle_mailer_click(params, method="GET", meta=None):
         who = (_person_full_name(person) or "Person " + str(pid))
         who_email = _person_email(person) or ""
         interest_status = "note only"
-        if side == "SELL" and cls == "human":
+        pd_resp = _cf_option_id(person, CF_PARTNER_DESK_RESPONSE)
+        if side == "SELL" and cls == "human" and pd_resp in REFERRAL_LOCKED:
+            interest_status = "Buy Interest NOT added — referral-locked account"
+        elif side == "SELL" and cls == "human":
             agent_obj = s3.get_object(Bucket="pipeline-token", Key="agent-data.json")
             agent_data = json.loads(agent_obj["Body"].read())
             sec_ids = agent_data.get("security_ids", {}) or {}
@@ -4785,7 +4794,14 @@ def _handle_news_send(body):
     if not content.get("items") and not str(content.get("intro") or "").strip():
         return {"statusCode": 400, "headers": {"Content-Type": "application/json"},
                 "body": json.dumps({"ok": False, "error": "nothing to send: no intro and no items"})}
+    try:
+        referral_emails = _pd_referral_client_emails(s3)
+    except Exception as e:
+        return _pd_abort_send("News mailer", f"{type(e).__name__}: {e}")
     rows, missing = _fetch_mailer_rows(search_id)
+    n_before = len(rows)
+    rows = [r for r in rows if r[1].strip().lower() not in referral_emails]
+    excluded = n_before - len(rows)
     progress_key = "news-send-" + datetime.now(timezone.utc).strftime("%Y-%m-%d") + ".json"
     already = set()
     try:
@@ -4840,6 +4856,7 @@ def _handle_news_send(body):
               + "\nSkipped (already sent today / no person id): " + str(skipped)
               + "\nFailed: " + str(failed)
               + "\nNo email on record: " + str(len(missing))
+              + "\nExcluded (Referral – Client): " + str(excluded)
               + "\nItems: " + str(len(content.get("items") or [])) + "\n")
     try:
         ses.send_email(
@@ -4851,7 +4868,8 @@ def _handle_news_send(body):
     except Exception as e:
         print(f"news send report failed: {e}")
     return {"statusCode": 200, "headers": {"Content-Type": "application/json"},
-            "body": json.dumps({"ok": True, "sent": sent, "failed": failed, "skipped": skipped})}
+            "body": json.dumps({"ok": True, "sent": sent, "failed": failed, "skipped": skipped,
+                                "excluded_referral_client": excluded})}
 
 
 NEWS_COMPOSER_SCRIPT = """
@@ -5038,7 +5056,14 @@ def _handle_mailer_send(body):
     if not sells and not buys:
         return {"statusCode": 400, "headers": {"Content-Type": "application/json"},
                 "body": json.dumps({"ok": False, "error": "nothing selected"})}
+    try:
+        referral_emails = _pd_referral_client_emails(s3)
+    except Exception as e:
+        return _pd_abort_send("Weekly mailer", f"{type(e).__name__}: {e}")
     rows, missing = _fetch_mailer_rows(search_id)
+    n_before = len(rows)
+    rows = [r for r in rows if r[1].strip().lower() not in referral_emails]
+    excluded = n_before - len(rows)
     lim_raw = str(body.get("limit") or "").strip()
     if lim_raw.isdigit() and int(lim_raw) > 0:
         rows = rows[:int(lim_raw)]
@@ -5095,6 +5120,7 @@ def _handle_mailer_send(body):
               + "\nSkipped (already sent today / no person id): " + str(skipped)
               + "\nFailed: " + str(failed)
               + "\nNo email on record: " + str(len(missing))
+              + "\nExcluded (Referral – Client): " + str(excluded)
               + "\nSell orders: " + str(len(sells)) + "  Buy companies: " + str(len(buys)) + "\n")
     try:
         ses.send_email(
@@ -5106,7 +5132,8 @@ def _handle_mailer_send(body):
     except Exception as e:
         print(f"mailer send report failed: {e}")
     return {"statusCode": 200, "headers": {"Content-Type": "application/json"},
-            "body": json.dumps({"ok": True, "sent": sent, "failed": failed, "skipped": skipped})}
+            "body": json.dumps({"ok": True, "sent": sent, "failed": failed, "skipped": skipped,
+                                "excluded_referral_client": excluded})}
 
 
 def _handle_mailer_test(body):
@@ -5375,6 +5402,217 @@ def _render_restricted_page(params):
             "body": html}
 
 
+# ── Partner Desk ──────────────────────────────────────────────────────────
+# access.json is the Partner Desk's view of who is an intermediary / referral;
+# the shared secret signs the ?gp= handoff on mailer clicks to trades deal pages.
+PD_ACCESS_KEY = "partner-desk/access.json"
+PD_SECRET_BUCKET = "pipeline-token"
+PD_SECRET_KEY = "partner-desk-secret.json"
+PD_HANDOFF_DAYS = 30
+CF_PARTNER_DESK_RESPONSE = "custom_label_4011837"
+PD_INTERMEDIARY_TT = {6577160, 6888332, 6888333}  # Co-Broker, Foreign Finder, Other
+PD_REFERRAL_CLIENT = 7218570
+REFERRAL_LOCKED = {7218526, 7218570}  # Referral – Registered, Referral – Client
+PD_RESPONSE_LABELS = {
+    7218523: "Investor",
+    7218524: "Not interested",
+    7218525: "Referral – Interested",
+    7218526: "Referral – Registered",
+    7218527: "Partner – Interested",
+    7218528: "Partner – Registered",
+    7218570: "Referral – Client",
+    7218529: "Revoked",
+}
+TRADES_DEAL_PREFIX = "https://trades.graciagroup.com/deal/"
+_PD_SECRET = None
+
+
+def _pd_norm_name(name):
+    return str(name or "").strip().rstrip("$#").strip().lower()
+
+
+def _pd_person_emails(p):
+    """Every value under any top-level key containing "email", lowercased, stripped, deduped."""
+    out = []
+
+    def _add(v):
+        if isinstance(v, dict):
+            v = v.get("address") or v.get("email") or v.get("value")
+        if isinstance(v, str):
+            e = v.strip().lower()
+            if e and e not in out:
+                out.append(e)
+
+    for k, v in (p or {}).items():
+        if "email" not in str(k).lower():
+            continue
+        for item in (v if isinstance(v, list) else [v]):
+            _add(item)
+    return out
+
+
+def _pd_buy_entry_names(s3, needed_ids=(), jwt=None):
+    """{Buying dropdown entry id: name} from agent-data.json security_ids, topped up
+    from the live field-3322093 labels when any needed id is missing."""
+    names = {}
+    try:
+        agent_data = json.loads(s3.get_object(Bucket="pipeline-token", Key="agent-data.json")["Body"].read())
+        for nm, v in (agent_data.get("security_ids") or {}).items():
+            if isinstance(v, dict) and v.get("b"):
+                names[int(v["b"])] = nm
+    except Exception as e:
+        print(f"pd access: agent-data.json security_ids unavailable: {e}")
+    if any(i not in names for i in needed_ids):
+        try:
+            labels_res = call_pipeline_api(
+                "GET", "/admin/custom_field_labels.json?conditions[entity_type]=person",
+                jwt=jwt or get_jwt())
+            body_l = labels_res.get("data") or {}
+            labels = (body_l.get("custom_field_labels") or body_l.get("entries")
+                      or body_l.get("data") or []) if isinstance(body_l, dict) else body_l
+            for label in labels:
+                if isinstance(label, dict) and label.get("id") == 3322093:
+                    for ent in (label.get("custom_field_label_dropdown_entries") or []):
+                        nm, eid = ent.get("name"), ent.get("id")
+                        if nm and eid:
+                            names[int(eid)] = nm
+                    break
+        except Exception as e:
+            print(f"pd access: live Buying label fetch failed: {e}")
+    return names
+
+
+def _pd_access_rows(people, entry_names):
+    rows = {}
+    for p in people:
+        pid = _normalize_id(p.get("id"))
+        if pid is None:
+            continue
+        tt = _cf_option_id(p, CF_TRANSACTOR_TYPE)
+        pd = _cf_option_id(p, CF_PARTNER_DESK_RESPONSE)
+        intermediary = tt in PD_INTERMEDIARY_TT
+        if not intermediary and pd is None:
+            continue
+        buying = []
+        for eid in sorted(_cf_option_ids(p, CF_PERSON_BUY_INTERESTS)):
+            nm = _pd_norm_name(entry_names.get(eid))
+            if nm and nm not in buying:
+                buying.append(nm)
+        rows[str(pid)] = {"tt": tt, "pd": pd, "intermediary": intermediary,
+                          "buying": buying, "emails": _pd_person_emails(p)}
+    return rows
+
+
+def build_partner_desk_access(s3):
+    """Rebuild s3://full-pipeline-cache/partner-desk/access.json from people.json.
+    Fail-soft: any error is logged and the previous file is left in place."""
+    try:
+        people = (_fetch_json(s3, "people.json") or {}).get("people", []) or []
+        if not people:
+            raise RuntimeError("people.json has no people")
+        needed = set()
+        for p in people:
+            if (_cf_option_id(p, CF_TRANSACTOR_TYPE) in PD_INTERMEDIARY_TT
+                    or _cf_option_id(p, CF_PARTNER_DESK_RESPONSE) is not None):
+                needed |= _cf_option_ids(p, CF_PERSON_BUY_INTERESTS)
+        rows = _pd_access_rows(people, _pd_buy_entry_names(s3, needed))
+        doc = {"built_at": datetime.now(timezone.utc).isoformat(), "people": rows}
+        s3.put_object(Bucket=S3_BUCKET, Key=PD_ACCESS_KEY,
+                      Body=json.dumps(doc, ensure_ascii=False).encode("utf-8"),
+                      ContentType="application/json")
+        pd_counts = {}
+        for r in rows.values():
+            if r["pd"] is not None:
+                pd_counts[r["pd"]] = pd_counts.get(r["pd"], 0) + 1
+        res = {"ok": True, "built_at": doc["built_at"], "total": len(rows),
+               "intermediaries": sum(1 for r in rows.values() if r["intermediary"]),
+               "pd_counts": pd_counts}
+        print(f"build_partner_desk_access: {json.dumps(res, default=str)}")
+        return res
+    except Exception as e:
+        print(f"ERROR build_partner_desk_access (previous file kept): {type(e).__name__}: {e}")
+        return {"ok": False, "reason": f"{type(e).__name__}: {e}"}
+
+
+def _render_pd_access_rebuild():
+    res = build_partner_desk_access(boto3.client("s3", region_name=S3_REGION))
+    if res.get("ok"):
+        pd_counts = res.get("pd_counts") or {}
+        lines = ("<li>" + escape(lbl) + " (" + str(oid) + "): " + str(pd_counts.get(oid, 0)) + "</li>"
+                 for oid, lbl in PD_RESPONSE_LABELS.items())
+        other = sum(n for oid, n in pd_counts.items() if oid not in PD_RESPONSE_LABELS)
+        body = ("<p>Rebuilt " + escape(str(res.get("built_at"))) + "</p>"
+                "<p>Total rows: " + str(res["total"]) + "<br>Intermediaries: " + str(res["intermediaries"]) + "</p>"
+                "<p>Partner Desk Response:</p><ul>" + "".join(lines)
+                + ("<li>Other option ids: " + str(other) + "</li>" if other else "") + "</ul>")
+    else:
+        body = "<p>Rebuild failed; previous file kept.</p><p>" + escape(str(res.get("reason"))) + "</p>"
+    return {"statusCode": 200 if res.get("ok") else 500,
+            "headers": {"Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store"},
+            "body": ('<!doctype html><html><head><meta charset="utf-8"><title>Partner Desk access</title>'
+                     "</head><body><h1>Partner Desk access</h1>" + body + "</body></html>")}
+
+
+def _pd_secret(s3):
+    global _PD_SECRET
+    if _PD_SECRET:
+        return _PD_SECRET
+    try:
+        obj = s3.get_object(Bucket=PD_SECRET_BUCKET, Key=PD_SECRET_KEY)
+        secret = str(json.loads(obj["Body"].read()).get("secret") or "")
+    except Exception as e:
+        if "NoSuchKey" not in str(e) and "Not Found" not in str(e) and "404" not in str(e):
+            raise
+        secret = ""
+    if not secret:
+        secret = secrets.token_hex(32)
+        s3.put_object(Bucket=PD_SECRET_BUCKET, Key=PD_SECRET_KEY,
+                      Body=json.dumps({"secret": secret}).encode("utf-8"),
+                      ContentType="application/json")
+    _PD_SECRET = secret
+    return secret
+
+
+def _pd_handoff(pid):
+    exp = int(datetime.now(timezone.utc).timestamp()) + PD_HANDOFF_DAYS * 86400
+    secret = _pd_secret(boto3.client("s3", region_name=S3_REGION))
+    sig = hmac.new(secret.encode("utf-8"), f"{pid}|{exp}".encode("utf-8"), hashlib.sha256).hexdigest()[:32]
+    return f"{pid}.{exp}.{sig}"
+
+
+def _pd_referral_client_emails(s3):
+    """Emails of every pd == Referral – Client person in access.json. Raises if the file
+    can't be read, so callers abort the send rather than risk mailing a referred client."""
+    obj = s3.get_object(Bucket=S3_BUCKET, Key=PD_ACCESS_KEY)
+    doc = json.loads(obj["Body"].read())
+    people = doc.get("people") if isinstance(doc, dict) else None
+    if not isinstance(people, dict):
+        raise RuntimeError("access.json has no people map")
+    out = set()
+    for r in people.values():
+        if isinstance(r, dict) and _normalize_id(r.get("pd")) == PD_REFERRAL_CLIENT:
+            out |= {str(e).strip().lower() for e in (r.get("emails") or []) if str(e).strip()}
+    return out
+
+
+def _pd_abort_send(kind, err):
+    msg = (kind + " send ABORTED — nothing was sent and nothing was written.\n\n"
+           "partner-desk/access.json could not be read, so Referral – Client recipients "
+           "could not be excluded.\n\nError: " + err + "\n\nRebuild it via ?view=pd-access-rebuild, then resend.\n")
+    print(f"{kind} send aborted: {err}")
+    try:
+        boto3.client("ses", region_name=SES_REGION).send_email(
+            Source=FROM_ADDR,
+            Destination={"ToAddresses": TO_ADDRS},
+            Message={"Subject": {"Data": kind + " send ABORTED: Partner Desk access file unreadable", "Charset": "UTF-8"},
+                     "Body": {"Text": {"Data": msg, "Charset": "UTF-8"}}},
+        )
+    except Exception as e:
+        print(f"{kind} abort notice failed: {e}")
+    return {"statusCode": 500, "headers": {"Content-Type": "application/json"},
+            "body": json.dumps({"ok": False, "error": "aborted: partner-desk/access.json unreadable: " + err})}
+
+
 def handle_http_request(event):
     params = event.get("queryStringParameters") or {}
     _method = ((event.get("requestContext") or {}).get("http") or {}).get("method", "GET")
@@ -5394,6 +5632,9 @@ def handle_http_request(event):
 
     if params.get("view") == "restricted":
         return _render_restricted_page(params)
+
+    if params.get("view") == "pd-access-rebuild":
+        return _render_pd_access_rebuild()
 
     method = ((event.get("requestContext") or {}).get("http") or {}).get("method", "GET")
     if method == "POST":
@@ -5539,6 +5780,8 @@ def lambda_handler(event, context):
             "Body": {"Html": {"Data": body_html, "Charset": "UTF-8"}},
         },
     )
+
+    build_partner_desk_access(boto3.client("s3", region_name=S3_REGION))
 
     return {
         "statusCode": 200,
