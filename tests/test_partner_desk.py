@@ -168,6 +168,40 @@ class ReferralLock(unittest.TestCase):
         self.assertIn("Buy Interest added", ses.sent[0]["Message"]["Body"]["Text"]["Data"])
 
 
+class ReferralLockCo(unittest.TestCase):
+    def _post(self, pd):
+        s3 = FakeS3({("pipeline-token", "agent-data.json"): json.dumps(AGENT_DATA).encode()})
+        ses = FakeSES()
+        person = {"id": 42, "first_name": "A", "last_name": "B", "email": "a@b.com",
+                  "custom_fields": {PD: [pd]} if pd else {}}
+        calls = []
+
+        def api(method, endpoint, payload=None, jwt=None, timeout=15):
+            calls.append((method, endpoint))
+            return {"status": 200, "data": person}
+
+        params = {"pid": "42", "co": "SpaceX", "t": lf._mailer_token("42", "c:SpaceX")}
+        with mock.patch.object(lf.boto3, "client", side_effect=lambda svc, **k: ses if svc == "ses" else s3), \
+                mock.patch.object(lf, "call_pipeline_api", side_effect=api), \
+                mock.patch.object(lf, "get_jwt", return_value="j"), \
+                mock.patch.object(lf, "_classify_click", return_value="human"):
+            res = lf._handle_mailer_click_co(params, "POST", {})
+        return calls, ses, res
+
+    def test_locked_skips_write(self):
+        for pd in (7218526, 7218570):
+            calls, ses, res = self._post(pd)
+            self.assertNotIn(("PUT", "/people/42.json"), calls)
+            self.assertEqual(res["statusCode"], 200)
+            self.assertIn("Buy Interest NOT added — referral-locked account",
+                          ses.sent[0]["Message"]["Body"]["Text"]["Data"])
+
+    def test_unlocked_writes(self):
+        calls, ses, _ = self._post(7218527)
+        self.assertIn(("PUT", "/people/42.json"), calls)
+        self.assertIn("Buy Interest added", ses.sent[0]["Message"]["Body"]["Text"]["Data"])
+
+
 class NeverMailReferralClient(unittest.TestCase):
     ACCESS = {"built_at": "x", "people": {
         "2": {"tt": None, "pd": 7218570, "intermediary": False, "buying": [],

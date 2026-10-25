@@ -4214,7 +4214,10 @@ def _handle_mailer_click_co(params, method="GET", meta=None):
         who = _person_full_name(person) or "Person " + str(pid)
         who_email = _person_email(person) or ""
         interest_status = "note only"
-        if cls == "human":
+        pd_resp = _cf_option_id(person, CF_PARTNER_DESK_RESPONSE)
+        if cls == "human" and pd_resp in REFERRAL_LOCKED:
+            interest_status = "Buy Interest NOT added — referral-locked account"
+        elif cls == "human":
             agent_obj = s3.get_object(Bucket="pipeline-token", Key="agent-data.json")
             agent_data = json.loads(agent_obj["Body"].read())
             sec_ids = agent_data.get("security_ids", {}) or {}
