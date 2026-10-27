@@ -4868,6 +4868,72 @@ def _handle_news_test(body):
             "body": json.dumps({"ok": True})}
 
 
+ARCHIVE_TO = "cgracia@rainmakersecurities.com"
+
+
+def _archive_csv_rows(all_rows, blocked_rows, excluded_rows, limited_rows, outcome):
+    """recipients.csv rows for every saved-search row. outcome maps lowercased
+    email -> (status, sent_at_utc) for rows the send loop reached."""
+    blocked = {r[1].lower() for r in blocked_rows}
+    excluded = {r[1].lower() for r in excluded_rows}
+    limited = {r[1].lower() for r in limited_rows}
+    out = []
+    for r in all_rows:
+        key = r[1].lower()
+        if key in blocked:
+            st, ts = "blocked", ""
+        elif key in excluded:
+            st, ts = "excluded", ""
+        elif key in limited:
+            st, ts = "not_sent_limit", ""
+        else:
+            st, ts = outcome.get(key, ("failed", ""))
+        out.append((r[0], r[1], r[2], st, ts))
+    return out
+
+
+def _send_bulk_archive(ses, mailer_label, subject, stats, render_html, csv_rows):
+    """One compliance archive email for a finished bulk send. render_html and
+    csv_rows are callables. Never raises: returns None on success, or the
+    failure reason."""
+    try:
+        import csv
+        import io
+        from email.mime.application import MIMEApplication
+        from email.mime.multipart import MIMEMultipart
+        from email.mime.text import MIMEText
+
+        stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
+        header = (
+            '<div style="font-family:Arial,sans-serif;font-size:14px;color:#111827;">'
+            '<p style="font-size:16px;font-weight:700;margin:0 0 8px 0;">Bulk send archive</p>'
+            + "".join('<div>' + escape(k) + ": " + escape(str(v)) + "</div>"
+                      for k, v in [("Mailer", mailer_label)] + list(stats))
+            + "</div>"
+        )
+        html = header + '<hr style="margin:16px 0;">' + render_html()
+        buf = io.StringIO()
+        w = csv.writer(buf)
+        w.writerow(["first_name", "email", "person_id", "status", "sent_at_utc"])
+        for row in csv_rows():
+            w.writerow(["" if v is None else v for v in row])
+        msg = MIMEMultipart("mixed")
+        msg["Subject"] = "Archive: " + subject + " — " + stamp
+        msg["From"] = FROM_ADDR
+        msg["To"] = ARCHIVE_TO
+        msg.attach(MIMEText(html, "html", "utf-8"))
+        att = MIMEApplication(buf.getvalue().encode("utf-8"), _subtype="csv")
+        att.add_header("Content-Disposition", "attachment", filename="recipients.csv")
+        msg.attach(att)
+        ses.send_raw_email(Source=FROM_ADDR, Destinations=[ARCHIVE_TO],
+                           RawMessage={"Data": msg.as_string()})
+        return None
+    except Exception as e:
+        reason = f"{type(e).__name__}: {e}"
+        print(f"bulk send archive failed ({mailer_label}): {reason}")
+        return reason
+
+
 def _handle_news_send(body):
     subject = str(body.get("subject") or "").strip()
     if not subject:
@@ -4885,11 +4951,13 @@ def _handle_news_send(body):
     except Exception as e:
         return _pd_abort_send("News mailer", f"{type(e).__name__}: {e}")
     rows, missing = _fetch_mailer_rows(search_id)
+    all_rows = list(rows)
     rows, blocked_rows = _split_blocked(rows)
     blocked = len(blocked_rows)
     for r in blocked_rows:
         print(f"mailer blocked: {r[1]}")
     n_before = len(rows)
+    excluded_rows = [r for r in rows if r[1].strip().lower() in referral_emails]
     rows = [r for r in rows if r[1].strip().lower() not in referral_emails]
     excluded = n_before - len(rows)
     progress_key = "news-send-" + datetime.now(timezone.utc).strftime("%Y-%m-%d") + ".json"
@@ -4902,6 +4970,7 @@ def _handle_news_send(body):
     ses = boto3.client("ses", region_name=SES_REGION)
     sent, failed, skipped = 0, 0, 0
     new_times = {}
+    outcome = {}
 
     def _flush():
         try:
@@ -4918,10 +4987,12 @@ def _handle_news_send(body):
         key = email.lower()
         if key in already:
             skipped += 1
+            outcome[key] = ("skipped_already_sent", "")
             continue
         npid = _normalize_id(pid)
         if npid is None:
             skipped += 1
+            outcome[key] = ("skipped_no_person_id", "")
             continue
         try:
             html = _render_news_email(first, npid, content)
@@ -4935,12 +5006,23 @@ def _handle_news_send(body):
             already.add(key)
             new_times[str(npid)] = datetime.now(timezone.utc).timestamp()
             sent += 1
+            outcome[key] = ("sent", datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"))
         except Exception as e:
             failed += 1
+            outcome[key] = ("failed", "")
             print(f"news send failed to {email}: {e}")
         if sent and sent % 25 == 0:
             _flush()
     _flush()
+    archive_err = None
+    if sent > 0:
+        archive_err = _send_bulk_archive(
+            ses, "News mailer", subject,
+            [("Sent", sent), ("Failed", failed), ("Blocked", blocked),
+             ("Excluded (Referral – Client)", excluded), ("Saved search", search_id),
+             ("Limit", "none")],
+            lambda: _render_news_email("Chad", MAILER_PREVIEW_PID, content),
+            lambda: _archive_csv_rows(all_rows, blocked_rows, excluded_rows, [], outcome))
     report = ("News mailer send complete.\n\nSubject: " + subject
               + "\nSaved search: " + str(search_id)
               + "\nSent: " + str(sent)
@@ -4949,7 +5031,8 @@ def _handle_news_send(body):
               + "\nNo email on record: " + str(len(missing))
               + "\nExcluded (Referral – Client): " + str(excluded)
               + "\nBlocked: " + str(blocked)
-              + "\nItems: " + str(len(content.get("items") or [])) + "\n")
+              + "\nItems: " + str(len(content.get("items") or [])) + "\n"
+              + ("ARCHIVE EMAIL FAILED: " + archive_err + "\n" if archive_err else ""))
     try:
         ses.send_email(
             Source=FROM_ADDR,
@@ -5153,15 +5236,19 @@ def _handle_mailer_send(body):
     except Exception as e:
         return _pd_abort_send("Weekly mailer", f"{type(e).__name__}: {e}")
     rows, missing = _fetch_mailer_rows(search_id)
+    all_rows = list(rows)
     rows, blocked_rows = _split_blocked(rows)
     blocked = len(blocked_rows)
     for r in blocked_rows:
         print(f"mailer blocked: {r[1]}")
     n_before = len(rows)
+    excluded_rows = [r for r in rows if r[1].strip().lower() in referral_emails]
     rows = [r for r in rows if r[1].strip().lower() not in referral_emails]
     excluded = n_before - len(rows)
     lim_raw = str(body.get("limit") or "").strip()
+    limited_rows = []
     if lim_raw.isdigit() and int(lim_raw) > 0:
+        limited_rows = rows[int(lim_raw):]
         rows = rows[:int(lim_raw)]
     progress_key = "mailer-send-" + datetime.now(timezone.utc).strftime("%Y-%m-%d") + ".json"
     already = set()
@@ -5173,6 +5260,7 @@ def _handle_mailer_send(body):
     ses = boto3.client("ses", region_name=SES_REGION)
     sent, failed, skipped = 0, 0, 0
     new_times = {}
+    outcome = {}
 
     def _flush():
         try:
@@ -5189,10 +5277,12 @@ def _handle_mailer_send(body):
         key = email.lower()
         if key in already:
             skipped += 1
+            outcome[key] = ("skipped_already_sent", "")
             continue
         npid = _normalize_id(pid)
         if npid is None:
             skipped += 1
+            outcome[key] = ("skipped_no_person_id", "")
             continue
         try:
             html = _render_mailer_email(first, npid, sells, buys, counts, True)
@@ -5206,12 +5296,23 @@ def _handle_mailer_send(body):
             already.add(key)
             new_times[str(npid)] = datetime.now(timezone.utc).timestamp()
             sent += 1
+            outcome[key] = ("sent", datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"))
         except Exception as e:
             failed += 1
+            outcome[key] = ("failed", "")
             print(f"mailer send failed to {email}: {e}")
         if sent and sent % 25 == 0:
             _flush()
     _flush()
+    archive_err = None
+    if sent > 0:
+        archive_err = _send_bulk_archive(
+            ses, "Weekly newsletter", subject,
+            [("Sent", sent), ("Failed", failed), ("Blocked", blocked),
+             ("Excluded (Referral – Client)", excluded), ("Saved search", search_id),
+             ("Limit", lim_raw if lim_raw.isdigit() and int(lim_raw) > 0 else "none")],
+            lambda: _render_mailer_email("Chad", MAILER_PREVIEW_PID, sells, buys, counts, True),
+            lambda: _archive_csv_rows(all_rows, blocked_rows, excluded_rows, limited_rows, outcome))
     report = ("Weekly mailer send complete.\n\nSubject: " + subject
               + "\nSent: " + str(sent)
               + "\nSkipped (already sent today / no person id): " + str(skipped)
@@ -5219,7 +5320,8 @@ def _handle_mailer_send(body):
               + "\nNo email on record: " + str(len(missing))
               + "\nExcluded (Referral – Client): " + str(excluded)
               + "\nBlocked: " + str(blocked)
-              + "\nSell orders: " + str(len(sells)) + "  Buy companies: " + str(len(buys)) + "\n")
+              + "\nSell orders: " + str(len(sells)) + "  Buy companies: " + str(len(buys)) + "\n"
+              + ("ARCHIVE EMAIL FAILED: " + archive_err + "\n" if archive_err else ""))
     try:
         ses.send_email(
             Source=FROM_ADDR,

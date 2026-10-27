@@ -83,7 +83,9 @@ class Sends(unittest.TestCase):
         self.assertEqual([m["Destination"]["ToAddresses"][0] for m in bulk], SENT)
         self.assertEqual(json.loads(res["body"])["blocked"], 5)
         # no click tokens rendered for blocked people (pid is the 2nd render arg)
-        self.assertEqual(sorted(c.args[1] for c in render.call_args_list), [5, 6, 8])
+        # (the compliance archive renders once more for Chad's own pid)
+        self.assertEqual(sorted(c.args[1] for c in render.call_args_list
+                                if c.args[1] != lf.MAILER_PREVIEW_PID), [5, 6, 8])
         self.assertEqual(sorted(times), ["5", "6", "8"])
         progress = [json.loads(p["Body"]) for p in s3.puts if "-send-" in p["Key"]]
         self.assertEqual(progress[-1]["sent"], sorted(SENT))
