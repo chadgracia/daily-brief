@@ -4328,6 +4328,8 @@ def _handle_mailer_click_co(params, method="GET", meta=None):
     if method != "POST":
         if blocked:
             return _click_no_solicit_page()
+        if _pd_gated(pid):
+            return _click_interstitial(_pd_desk_url(pid))
         if email_mode:
             return _click_email_page(co_name)
         return _click_interstitial(
@@ -4341,6 +4343,9 @@ def _handle_mailer_click_co(params, method="GET", meta=None):
         cls = _classify_click(s3, meta, pid)
         if blocked:
             return redirect
+        gated = _pd_gated(pid)
+        if gated:
+            redirect = {"statusCode": 302, "headers": {"Location": _pd_desk_url(pid)}, "body": ""}
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         jwt = get_jwt()
         cur = call_pipeline_api("GET", f"/people/{pid}.json", jwt=jwt)
@@ -4417,6 +4422,7 @@ def _handle_mailer_click_co(params, method="GET", meta=None):
                      + ("requested info on " + co_name + " via the news mailer.\n\n" if email_mode
                         else "clicked " + co_name + " buy order in the weekly mailer.\n\n")
                      + interest_status + "\n\n"
+                     + ("→ sent to Partner Desk\n\n" if gated else "")
                      + "Person: https://app.pipelinecrm.com/people/" + str(pid) + "\n")
             boto3.client("ses", region_name=SES_REGION).send_email(
                 Source=FROM_ADDR,
@@ -4454,6 +4460,8 @@ def _handle_mailer_click(params, method="GET", meta=None):
                 co_name = _company_name(deal) or _deal_title(deal)
                 dest = ("https://7u6sphgup5gjuywcvpuwzhruiq0asgdz.lambda-url.us-east-1.on.aws/"
                         "?name=" + urllib.parse.quote(co_name) + "&side=sell")
+                if _pd_gated(pid):
+                    dest = _pd_desk_url(pid)
         except Exception as e:
             print(f"mailer click interstitial dest failed did={did}: {e}")
         if dest.startswith(TRADES_DEAL_PREFIX):
@@ -4479,7 +4487,10 @@ def _handle_mailer_click(params, method="GET", meta=None):
         co_name = _company_name(deal) or _deal_title(deal)
         if _is_no_solicit(co_name):
             return redirect
-        if side == "BUY":
+        gated = side == "BUY" and _pd_gated(pid)
+        if gated:
+            redirect = {"statusCode": 302, "headers": {"Location": _pd_desk_url(pid)}, "body": ""}
+        elif side == "BUY":
             redirect = {"statusCode": 302,
                         "headers": {"Location": "https://7u6sphgup5gjuywcvpuwzhruiq0asgdz.lambda-url.us-east-1.on.aws/"
                                     "?name=" + urllib.parse.quote(co_name) + "&side=sell"},
@@ -4557,6 +4568,7 @@ def _handle_mailer_click(params, method="GET", meta=None):
         if cls == "human":
             alert = (who + " (" + who_email + ") clicked " + co_name + " " + side.lower()
                      + " order in the weekly mailer.\n\n" + interest_status + "\n\n"
+                     + ("→ sent to Partner Desk\n\n" if gated else "")
                      + "Person: https://app.pipelinecrm.com/people/" + str(pid) + "\n"
                      + "Deal: https://app.pipelinecrm.com/deals/" + str(did) + "\n")
             boto3.client("ses", region_name=SES_REGION).send_email(
@@ -6053,6 +6065,42 @@ def _pd_handoff(pid):
     secret = _pd_secret(boto3.client("s3", region_name=S3_REGION))
     sig = hmac.new(secret.encode("utf-8"), f"{pid}|{exp}".encode("utf-8"), hashlib.sha256).hexdigest()[:32]
     return f"{pid}.{exp}.{sig}"
+
+
+PD_DESK_URL = "https://trades.graciagroup.com/?view=partner-desk"
+PD_ACCESS_TTL = 15 * 60
+PD_GATE_EXEMPT = {7218523, 7218528}  # Investor, Partner – Registered
+_PD_ACCESS_CACHE = {"people": None, "at": 0.0}
+
+
+def _pd_gated(pid):
+    """True when access.json marks pid as an intermediary whose pd is not Investor or
+    Partner – Registered. Unreadable file or unknown pid -> False (not gated)."""
+    now = datetime.now(timezone.utc).timestamp()
+    people = _PD_ACCESS_CACHE["people"]
+    if people is None or now - _PD_ACCESS_CACHE["at"] >= PD_ACCESS_TTL:
+        try:
+            obj = boto3.client("s3", region_name=S3_REGION).get_object(Bucket=S3_BUCKET, Key=PD_ACCESS_KEY)
+            doc = json.loads(obj["Body"].read())
+            people = doc.get("people") if isinstance(doc, dict) else None
+            if not isinstance(people, dict):
+                raise ValueError("no people map")
+            _PD_ACCESS_CACHE.update({"people": people, "at": now})
+        except Exception as e:
+            print(f"pd gate: access.json unreadable, not gating pid={pid}: {e}")
+            return False
+    r = people.get(str(pid))
+    return (isinstance(r, dict) and r.get("intermediary") is True
+            and _normalize_id(r.get("pd")) not in PD_GATE_EXEMPT)
+
+
+def _pd_desk_url(pid):
+    """Partner Desk URL with a gp handoff; without gp if the handoff fails."""
+    try:
+        return PD_DESK_URL + "&gp=" + _pd_handoff(pid)
+    except Exception as e:
+        print(f"pd gate: gp handoff failed pid={pid}: {e}")
+        return PD_DESK_URL
 
 
 def _pd_referral_client_emails(s3):
