@@ -4280,12 +4280,18 @@ def _handle_mailer_click_co(params, method="GET", meta=None):
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         jwt = get_jwt()
         cur = call_pipeline_api("GET", f"/people/{pid}.json", jwt=jwt)
-        person = cur["data"] if cur.get("status") == 200 and isinstance(cur.get("data"), dict) else {}
+        read_ok = cur.get("status") == 200 and isinstance(cur.get("data"), dict)
+        person = cur["data"] if read_ok else {}
+        intermediary = _cf_option_id(person, CF_TRANSACTOR_TYPE) in PD_INTERMEDIARY_TT
         who = _person_full_name(person) or "Person " + str(pid)
         who_email = _person_email(person) or ""
         interest_status = "note only"
         pd_resp = _cf_option_id(person, CF_PARTNER_DESK_RESPONSE)
-        if cls == "human" and pd_resp in REFERRAL_LOCKED:
+        if cls == "human" and not read_ok:
+            interest_status = "Buy Interest NOT added — person record could not be read"
+        elif cls == "human" and intermediary:
+            interest_status = "Buy Interest NOT added — intermediary"
+        elif cls == "human" and pd_resp in REFERRAL_LOCKED:
             interest_status = "Buy Interest NOT added — referral-locked account"
         elif cls == "human":
             agent_obj = s3.get_object(Bucket="pipeline-token", Key="agent-data.json")
@@ -4351,8 +4357,9 @@ def _handle_mailer_click_co(params, method="GET", meta=None):
             boto3.client("ses", region_name=SES_REGION).send_email(
                 Source=FROM_ADDR,
                 Destination={"ToAddresses": TO_ADDRS},
-                Message={"Subject": {"Data": ("Info request: " + who + " — " + co_name) if email_mode
-                                     else ("Mailer click: " + who + " — " + co_name + " (buy)"),
+                Message={"Subject": {"Data": ("[Intermediary] " if intermediary else "")
+                                     + (("Info request: " + who + " — " + co_name) if email_mode
+                                        else ("Mailer click: " + who + " — " + co_name + " (buy)")),
                                      "Charset": "UTF-8"},
                          "Body": {"Text": {"Data": alert, "Charset": "UTF-8"}}},
             )
@@ -4416,12 +4423,18 @@ def _handle_mailer_click(params, method="GET", meta=None):
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         jwt = get_jwt()
         cur = call_pipeline_api("GET", f"/people/{pid}.json", jwt=jwt)
-        person = cur["data"] if cur.get("status") == 200 and isinstance(cur.get("data"), dict) else {}
+        read_ok = cur.get("status") == 200 and isinstance(cur.get("data"), dict)
+        person = cur["data"] if read_ok else {}
+        intermediary = _cf_option_id(person, CF_TRANSACTOR_TYPE) in PD_INTERMEDIARY_TT
         who = (_person_full_name(person) or "Person " + str(pid))
         who_email = _person_email(person) or ""
         interest_status = "note only"
         pd_resp = _cf_option_id(person, CF_PARTNER_DESK_RESPONSE)
-        if side == "SELL" and cls == "human" and pd_resp in REFERRAL_LOCKED:
+        if side == "SELL" and cls == "human" and not read_ok:
+            interest_status = "Buy Interest NOT added — person record could not be read"
+        elif side == "SELL" and cls == "human" and intermediary:
+            interest_status = "Buy Interest NOT added — intermediary"
+        elif side == "SELL" and cls == "human" and pd_resp in REFERRAL_LOCKED:
             interest_status = "Buy Interest NOT added — referral-locked account"
         elif side == "SELL" and cls == "human":
             agent_obj = s3.get_object(Bucket="pipeline-token", Key="agent-data.json")
@@ -4485,7 +4498,7 @@ def _handle_mailer_click(params, method="GET", meta=None):
             boto3.client("ses", region_name=SES_REGION).send_email(
                 Source=FROM_ADDR,
                 Destination={"ToAddresses": TO_ADDRS},
-                Message={"Subject": {"Data": "Mailer click: " + who + " — " + co_name + " (" + side.lower() + ")", "Charset": "UTF-8"},
+                Message={"Subject": {"Data": ("[Intermediary] " if intermediary else "") + "Mailer click: " + who + " — " + co_name + " (" + side.lower() + ")", "Charset": "UTF-8"},
                          "Body": {"Text": {"Data": alert, "Charset": "UTF-8"}}},
             )
     except Exception as e:
