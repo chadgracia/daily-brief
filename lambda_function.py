@@ -3843,6 +3843,10 @@ SCANNER_UA_MARKERS = ("bot", "scan", "crawl", "spider", "preview", "proofpoint",
                       "barracuda", "mimecast", "safelink", "urldefense", "python-requests",
                       "curl", "wget", "headlesschrome", "phantomjs", "validator", "monitor")
 _SCANNER_SET_KEY = "mailer-scanner-pids.json"
+_SCANNER_EVENTS_KEY = "_events"   # {pid: [{"ip", "ts", "reason"}]} — last 24h of flags
+_SCANNER_LEGACY_KEY = "_legacy"   # {day: [pids]} flagged before ip/ts were recorded
+_SCANNER_SAME_IP_SECS = 86400
+_SCANNER_ANY_IP_SECS = 600
 _VELOCITY_PREFIX = "click-velocity/"
 
 
@@ -3870,6 +3874,43 @@ def _load_scanner_set(s3):
         return set()
 
 
+def _scanner_prev_reason(s3, pid, ip, now):
+    """Reason string if this person was flagged from the same IP in the last 24h or from
+    any IP in the last 10 min (old entries without ip/ts count as same IP for their day),
+    else None."""
+    try:
+        data = json.loads(s3.get_object(Bucket=S3_BUCKET, Key=_SCANNER_SET_KEY)["Body"].read())
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    day = _scanner_day_key()
+    events = data.get(_SCANNER_EVENTS_KEY)
+    legacy = data.get(_SCANNER_LEGACY_KEY) if isinstance(data.get(_SCANNER_LEGACY_KEY), dict) else {}
+    if not isinstance(events, dict):
+        # Old-format file: every pid on today's list is a legacy entry.
+        legacy = {day: data.get(day, [])}
+        events = {}
+    ip = str(ip or "").strip()
+    for e in events.get(str(pid)) or []:
+        try:
+            age = now - float(e.get("ts"))
+        except Exception:
+            continue
+        if 0 <= age < _SCANNER_SAME_IP_SECS and str(e.get("ip") or "").strip() == ip:
+            return "previously flagged (same IP)"
+    for e in events.get(str(pid)) or []:
+        try:
+            age = now - float(e.get("ts"))
+        except Exception:
+            continue
+        if 0 <= age < _SCANNER_ANY_IP_SECS:
+            return "previously flagged (<10 min)"
+    if any(str(p) == str(pid) for p in (legacy.get(day) or [])):
+        return "previously flagged (same IP)"
+    return None
+
+
 def _flag_scanner(s3, pid, reason, meta=None, alert=True):
     day = _scanner_day_key()
     try:
@@ -3878,14 +3919,35 @@ def _flag_scanner(s3, pid, reason, meta=None, alert=True):
             data = json.loads(obj["Body"].read())
         except Exception:
             data = {}
+        if not isinstance(data, dict):
+            data = {}
         pids = set(data.get(day, []))
-        if pid in pids:
-            return
+        is_new = pid not in pids
         pids.add(pid)
+        now = datetime.now(timezone.utc).timestamp()
+        events = data.get(_SCANNER_EVENTS_KEY)
+        legacy = data.get(_SCANNER_LEGACY_KEY)
+        if not isinstance(legacy, dict):
+            legacy = {}
+        if not isinstance(events, dict):
+            # Old-format file (day lists only): today's pids have no ip/ts, so keep them
+            # as legacy entries that stay "same IP" for the rest of their day.
+            events = {}
+            if data.get(day):
+                legacy[day] = sorted(set(legacy.get(day, [])) | set(data.get(day, [])))
+        events = {k: [e for e in v if isinstance(e, dict) and now - float(e.get("ts") or 0) < 86400][-50:]
+                  for k, v in events.items() if isinstance(v, list)}
+        events = {k: v for k, v in events.items() if v}
+        events.setdefault(str(pid), []).append(
+            {"ip": str((meta or {}).get("ip") or "").strip(), "ts": now, "reason": reason})
+        legacy = {d: v for d, v in legacy.items() if d == day}
+        out = {day: sorted(pids), _SCANNER_EVENTS_KEY: events}
+        if legacy:
+            out[_SCANNER_LEGACY_KEY] = legacy
         s3.put_object(Bucket=S3_BUCKET, Key=_SCANNER_SET_KEY,
-                      Body=json.dumps({day: sorted(pids)}).encode("utf-8"),
+                      Body=json.dumps(out).encode("utf-8"),
                       ContentType="application/json")
-        if alert:
+        if alert and is_new:
             ua = (meta or {}).get("ua", "")
             ip = (meta or {}).get("ip", "")
             boto3.client("ses", region_name=SES_REGION).send_email(
@@ -3893,7 +3955,7 @@ def _flag_scanner(s3, pid, reason, meta=None, alert=True):
                 Message={"Subject": {"Data": "Mailer scanner flagged: person " + str(pid), "Charset": "UTF-8"},
                          "Body": {"Text": {"Data": ("Person " + str(pid) + " classified as automated ("
                                   + reason + ").\nUA: " + ua + "\nIP: " + ip
-                                  + "\nFurther clicks from this mailbox today are logged but not counted.\n"
+                                  + "\nFurther clicks from this IP (24h) or any IP (10 min) are logged but not counted.\n"
                                   + "Person: https://app.pipelinecrm.com/people/" + str(pid) + "\n"),
                                   "Charset": "UTF-8"}}})
     except Exception as e:
@@ -3992,7 +4054,8 @@ def _log_click(s3, pid, did, meta, verdict, reason, secs_since_send, org):
 
 
 def _classify_click(s3, meta, pid, did=None):
-    """Return 'human' or 'scanner'. Layers, in order: already-flagged, scanner UA,
+    """Return 'human' or 'scanner'. Layers, in order: previously flagged (same IP in 24h
+    or any IP in 10 min), scanner UA,
     data-center / security-vendor IP, time-to-click (<20s after this recipient's own
     delivery), per-IP fan-out (5+ recipients in 15 min), per-person velocity
     (4+ clicks in 10s). Every click is logged to S3 with its verdict."""
@@ -4004,8 +4067,9 @@ def _classify_click(s3, meta, pid, did=None):
         st = _load_send_times(s3).get(str(pid))
         if st is not None:
             secs = round(now - float(st), 1)
-        if pid in _load_scanner_set(s3):
-            verdict, reason = "scanner", "previously flagged today"
+        prev = _scanner_prev_reason(s3, pid, ip, now)
+        if prev:
+            verdict, reason = "scanner", prev
         elif meta is not None and _ua_is_automated(ua):
             verdict, reason = "scanner", "scanner user-agent"
             _flag_scanner(s3, pid, reason, meta, alert=False)
@@ -4057,14 +4121,14 @@ def _classify_click(s3, meta, pid, did=None):
     return verdict
 
 
-def _handle_mailer_honeypot(params):
+def _handle_mailer_honeypot(params, meta=None):
     pid_raw = str(params.get("pid") or "").strip()
     token = str(params.get("t") or "").strip()
     if not pid_raw.isdigit() or not hmac.compare_digest(token, _mailer_token(pid_raw, "hp")):
         return {"statusCode": 400, "body": ""}
     try:
         s3 = boto3.client("s3", region_name=S3_REGION)
-        _flag_scanner(s3, int(pid_raw), "honeypot link fetched", alert=False)
+        _flag_scanner(s3, int(pid_raw), "honeypot link fetched", meta, alert=False)
     except Exception as e:
         print(f"honeypot flag failed: {e}")
     return {"statusCode": 204, "headers": {}, "body": ""}
@@ -6176,7 +6240,7 @@ def handle_http_request(event):
     _meta = _http_meta(event)
     if isinstance(params, dict) and params.get("view") == "click":
         if params.get("hp"):
-            return _handle_mailer_honeypot(params)
+            return _handle_mailer_honeypot(params, _meta)
         if params.get("co"):
             return _handle_mailer_click_co(params, _method, _meta)
         return _handle_mailer_click(params, _method, _meta)
@@ -6288,6 +6352,11 @@ def handle_http_request(event):
         _day = _scanner_day_key()
         _pids = [p for p in _data.get(_day, []) if str(p) != pid_raw]
         _data[_day] = _pids
+        if isinstance(_data.get(_SCANNER_EVENTS_KEY), dict):
+            _data[_SCANNER_EVENTS_KEY].pop(pid_raw, None)
+        if isinstance(_data.get(_SCANNER_LEGACY_KEY), dict):
+            _data[_SCANNER_LEGACY_KEY] = {d: [p for p in v if str(p) != pid_raw]
+                                          for d, v in _data[_SCANNER_LEGACY_KEY].items()}
         _s3u.put_object(Bucket=S3_BUCKET, Key=_SCANNER_SET_KEY,
                         Body=json.dumps(_data).encode("utf-8"), ContentType="application/json")
         try:
