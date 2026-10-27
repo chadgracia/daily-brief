@@ -5898,7 +5898,8 @@ def build_partner_desk_access(s3):
 
 
 def _render_pd_access_rebuild():
-    res = build_partner_desk_access(boto3.client("s3", region_name=S3_REGION))
+    s3 = boto3.client("s3", region_name=S3_REGION)
+    res = build_partner_desk_access(s3)
     if res.get("ok"):
         pd_counts = res.get("pd_counts") or {}
         lines = ("<li>" + escape(lbl) + " (" + str(oid) + "): " + str(pd_counts.get(oid, 0)) + "</li>"
@@ -5910,30 +5911,77 @@ def _render_pd_access_rebuild():
                 + ("<li>Other option ids: " + str(other) + "</li>" if other else "") + "</ul>")
     else:
         body = "<p>Rebuild failed; previous file kept.</p><p>" + escape(str(res.get("reason"))) + "</p>"
+    try:
+        _, sec_status = _pd_secret_ensure(s3)
+    except Exception as e:
+        sec_status = "FAIL (" + type(e).__name__ + ": " + str(e)[:200] + ")"
+    body += "<p>Partner Desk secret: " + escape(sec_status) + "</p>"
     return {"statusCode": 200 if res.get("ok") else 500,
             "headers": {"Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store"},
             "body": ('<!doctype html><html><head><meta charset="utf-8"><title>Partner Desk access</title>'
                      "</head><body><h1>Partner Desk access</h1>" + body + "</body></html>")}
 
 
-def _pd_secret(s3):
-    global _PD_SECRET
-    if _PD_SECRET:
-        return _PD_SECRET
+def _pd_s3_err(e):
+    """(error code, HTTP status) for a boto ClientError, falling back to the message text."""
+    resp = getattr(e, "response", None) or {}
+    code = str((resp.get("Error") or {}).get("Code") or "")
+    status = (resp.get("ResponseMetadata") or {}).get("HTTPStatusCode")
+    msg = str(e)
+    if not code:
+        for c in ("NoSuchKey", "PreconditionFailed", "ConditionalRequestConflict", "AccessDenied"):
+            if c in msg:
+                code = c
+                break
+    if status is None:
+        status = 404 if ("Not Found" in msg or "404" in msg) else 412 if "412" in msg else None
+    return code, status
+
+
+def _pd_secret_read(s3):
+    """Stored secret, or None if the file does not exist. Any other error raises."""
     try:
         obj = s3.get_object(Bucket=PD_SECRET_BUCKET, Key=PD_SECRET_KEY)
-        secret = str(json.loads(obj["Body"].read()).get("secret") or "")
     except Exception as e:
-        if "NoSuchKey" not in str(e) and "Not Found" not in str(e) and "404" not in str(e):
-            raise
-        secret = ""
+        code, status = _pd_s3_err(e)
+        if code in ("NoSuchKey", "404", "NotFound") or status == 404:
+            return None
+        raise
+    secret = str(json.loads(obj["Body"].read()).get("secret") or "")
     if not secret:
-        secret = secrets.token_hex(32)
-        s3.put_object(Bucket=PD_SECRET_BUCKET, Key=PD_SECRET_KEY,
-                      Body=json.dumps({"secret": secret}).encode("utf-8"),
-                      ContentType="application/json")
-    _PD_SECRET = secret
+        # File exists but holds no secret: never overwrite it; fail loudly instead.
+        raise RuntimeError("partner-desk-secret.json exists but has no secret")
     return secret
+
+
+def _pd_secret_ensure(s3):
+    """(secret, "existed" | "created"). Creates the file only if absent (IfNoneMatch='*');
+    never overwrites. On a 412/409 race, re-reads and uses the stored secret."""
+    global _PD_SECRET
+    if _PD_SECRET:
+        return _PD_SECRET, "existed"
+    secret = _pd_secret_read(s3)
+    status = "existed"
+    if secret is None:
+        new = secrets.token_hex(32)
+        try:
+            s3.put_object(Bucket=PD_SECRET_BUCKET, Key=PD_SECRET_KEY,
+                          Body=json.dumps({"secret": new}).encode("utf-8"),
+                          ContentType="application/json", IfNoneMatch="*")
+            secret, status = new, "created"
+        except Exception as e:
+            code, http = _pd_s3_err(e)
+            if code not in ("PreconditionFailed", "ConditionalRequestConflict") and http not in (412, 409):
+                raise
+            secret = _pd_secret_read(s3)
+            if secret is None:
+                raise RuntimeError("secret create lost a race but the file is still missing")
+    _PD_SECRET = secret
+    return secret, status
+
+
+def _pd_secret(s3):
+    return _pd_secret_ensure(s3)[0]
 
 
 def _pd_handoff(pid):
