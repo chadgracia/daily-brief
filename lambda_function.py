@@ -5539,6 +5539,169 @@ def build_restricted():
             "restricted_count": len(restricted)}
 
 
+CLICKS_PAGE_MAX = 2000
+PIPELINE_PERSON_LINK = "https://app.pipelinecrm.com/people/{}"
+PIPELINE_DEAL_LINK = "https://app.pipelinecrm.com/deals/{}"
+
+
+def _kyiv_tz():
+    try:
+        from zoneinfo import ZoneInfo
+        return ZoneInfo("Europe/Kyiv"), "Kyiv"
+    except Exception:
+        return timezone(timedelta(hours=2)), "Kyiv (UTC+2)"
+
+
+def _render_clicks_page(params):
+    """Read-only ?view=clicks: one UTC day of click-log records, newest first."""
+    key = params.get("key") or ""
+    today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    day = (params.get("date") or "").strip() or today
+    try:
+        if not re.fullmatch(r"\d{4}-\d{2}-\d{2}", day):
+            raise ValueError(day)
+        datetime.strptime(day, "%Y-%m-%d")
+    except ValueError:
+        return {"statusCode": 400, "headers": {"Content-Type": "text/plain"},
+                "body": "Bad date: use YYYY-MM-DD"}
+    pid_filter = (params.get("pid") or "").strip()
+    if pid_filter and not pid_filter.isdigit():
+        return {"statusCode": 400, "headers": {"Content-Type": "text/plain"},
+                "body": "Bad pid: digits only"}
+
+    s3 = boto3.client("s3", region_name=S3_REGION)
+    prefix = _CLICK_LOG_PREFIX + day + "/"
+    keys, token = [], None
+    while True:
+        kw = {"Bucket": S3_BUCKET, "Prefix": prefix}
+        if token:
+            kw["ContinuationToken"] = token
+        resp = s3.list_objects_v2(**kw)
+        keys.extend(o["Key"] for o in resp.get("Contents") or [])
+        token = resp.get("NextContinuationToken") if resp.get("IsTruncated") else None
+        if not token:
+            break
+    if pid_filter:
+        keys = [k for k in keys if k.endswith("-" + pid_filter + ".json")]
+    # Key names are HHMMSSffffff-<pid>.json: name order is time order. Cap before reading.
+    keys.sort(key=lambda k: k.rsplit("/", 1)[-1], reverse=True)
+    total_keys = len(keys)
+    keys = keys[:CLICKS_PAGE_MAX]
+
+    def _read(k):
+        try:
+            rec = json.loads(s3.get_object(Bucket=S3_BUCKET, Key=k)["Body"].read())
+            return rec if isinstance(rec, dict) else None
+        except Exception:
+            return None
+    with concurrent.futures.ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(_read, keys))
+    recs = [r for r in results if r is not None]
+    skipped = len(results) - len(recs)
+
+    access_ok = True
+    try:
+        pd_people = (_fetch_json(s3, PD_ACCESS_KEY) or {}).get("people") or {}
+        if not isinstance(pd_people, dict):
+            raise ValueError("people is not an object")
+    except Exception:
+        pd_people, access_ok = {}, False
+
+    def _is_intermediary(pid):
+        info = pd_people.get(str(pid))
+        return isinstance(info, dict) and info.get("intermediary") is True
+
+    kyiv, kyiv_label = _kyiv_tz()
+    td = 'style="padding:4px 10px 4px 0; vertical-align:top; white-space:nowrap;"'
+    link = 'style="color:#2563eb; text-decoration:none;"'
+    n_human = n_scanner = n_inter_human = 0
+    rows = []
+    for r in recs:
+        verdict = str(r.get("verdict") or "")
+        inter = _is_intermediary(r.get("pid"))
+        n_human += verdict == "human"
+        n_scanner += verdict == "scanner"
+        n_inter_human += verdict == "human" and inter
+        ts_raw = str(r.get("ts") or "")
+        try:
+            ts = datetime.fromisoformat(ts_raw)
+            if ts.tzinfo is None:
+                ts = ts.replace(tzinfo=timezone.utc)
+            utc_s = ts.astimezone(timezone.utc).strftime("%H:%M:%S")
+            k = ts.astimezone(kyiv)
+            kyiv_s = k.strftime("%H:%M:%S") + ("" if k.strftime("%Y-%m-%d") == day else k.strftime(" (%m-%d)"))
+        except (ValueError, TypeError):
+            utc_s, kyiv_s = ts_raw, ""
+        pid, did = r.get("pid"), r.get("did")
+        pid_html = ('<a href="' + escape(PIPELINE_PERSON_LINK.format(pid), quote=True)
+                    + '" target="_blank" rel="noopener" ' + link + '>' + escape(str(pid)) + '</a>'
+                    if pid not in (None, "") else "")
+        if inter:
+            pid_html += (' <span style="font-size:11px; color:#7c3aed; border:1px solid #c4b5fd; '
+                         'border-radius:4px; padding:0 4px;">Intermediary</span>')
+        did_html = ('<a href="' + escape(PIPELINE_DEAL_LINK.format(did), quote=True)
+                    + '" target="_blank" rel="noopener" ' + link + '>' + escape(str(did)) + '</a>'
+                    if did not in (None, "") else '<span style="color:#6b7280;">company link</span>')
+        ua = str(r.get("ua") or "")
+        secs = r.get("secs_since_send")
+        vcolor = "#15803d" if verdict == "human" else ("#b91c1c" if verdict == "scanner" else "#374151")
+        rows.append(
+            "<tr>"
+            f"<td {td}>{escape(utc_s)}</td><td {td}>{escape(kyiv_s)}</td>"
+            f"<td {td}>{pid_html}</td><td {td}>{did_html}</td>"
+            f'<td {td}><span style="color:{vcolor}; font-weight:600;">{escape(verdict)}</span></td>'
+            f"<td {td}>{escape(str(r.get('reason') or ''))}</td>"
+            f"<td {td}>{escape('' if secs is None else str(secs))}</td>"
+            '<td style="padding:4px 10px 4px 0; vertical-align:top;">' + escape(str(r.get("org") or "")) + "</td>"
+            '<td style="padding:4px 0; vertical-align:top;" title="' + escape(ua, quote=True) + '">'
+            + escape(ua[:60]) + "</td></tr>")
+
+    summary = (f"{len(recs)} clicks &middot; {n_human} human &middot; {n_scanner} scanner"
+               f" &middot; {n_inter_human} intermediary human")
+    if skipped:
+        summary += f" &middot; {skipped} skipped (unreadable)"
+    notes = ""
+    if total_keys > CLICKS_PAGE_MAX:
+        notes += (f'<p style="color:#b45309; font-size:13px; margin:0 0 8px 0;">Showing the newest '
+                  f'{CLICKS_PAGE_MAX:,} of {total_keys:,} clicks.</p>')
+    if not access_ok:
+        notes += ('<p style="color:#6b7280; font-size:13px; margin:0 0 8px 0;">Partner Desk '
+                  'access.json could not be read; intermediary tags are not shown.</p>')
+    form = (
+        '<form method="get" style="margin:0 0 14px 0; font-size:14px;">'
+        '<input type="hidden" name="view" value="clicks">'
+        '<input type="hidden" name="key" value="' + escape(key, quote=True) + '">'
+        '<label>Date (UTC) <input type="date" name="date" value="' + escape(day, quote=True) + '"></label> '
+        '<label style="margin-left:10px;">Person id <input type="text" name="pid" size="10" value="'
+        + escape(pid_filter, quote=True) + '"></label> '
+        '<button type="submit">Show</button>'
+        + (' <a href="?view=clicks&key=' + escape(quote(key, safe=""), quote=True) + '&date='
+           + escape(day, quote=True) + '" ' + link + '>clear pid</a>' if pid_filter else "")
+        + '</form>')
+    th = 'style="text-align:left; padding:4px 10px 4px 0;"'
+    table = (
+        '<table style="font-size:13px; border-collapse:collapse;">'
+        f"<tr><th {th}>UTC</th><th {th}>{escape(kyiv_label)}</th><th {th}>Person</th>"
+        f"<th {th}>Deal</th><th {th}>Verdict</th><th {th}>Reason</th><th {th}>Secs since send</th>"
+        f"<th {th}>Org</th><th {th}>User agent</th></tr>"
+        + ("".join(rows) or '<tr><td colspan="9" style="padding:4px 0; color:#6b7280;">No clicks.</td></tr>')
+        + "</table>")
+    html = (
+        '<!doctype html><html><head><meta charset="utf-8">'
+        '<meta name="viewport" content="width=device-width, initial-scale=1">'
+        '<title>Clicks</title>'
+        f'<link rel="stylesheet" href="{escape(MASTER_CSS_URL, quote=True)}"></head>'
+        f'<body style="{BODY_STYLE}"><div style="max-width:1400px; margin:0 auto; padding:24px;">'
+        f'<h1 style="{H1_STYLE}">Clicks &mdash; {escape(day)}'
+        + (f" &middot; person {escape(pid_filter)}" if pid_filter else "") + '</h1>'
+        + form
+        + f'<p style="font-size:14px; margin:0 0 8px 0;"><b>{summary}</b></p>'
+        + notes + table + '</div></body></html>')
+    return {"statusCode": 200,
+            "headers": {"Content-Type": "text/html; charset=utf-8"},
+            "body": html}
+
+
 def _render_restricted_page(params):
     key = params.get("key") or ""
     page_url = "?view=restricted&key=" + quote(key, safe="")
@@ -5980,6 +6143,9 @@ def handle_http_request(event):
 
     if params.get("view") == "restricted":
         return _render_restricted_page(params)
+
+    if params.get("view") == "clicks":
+        return _render_clicks_page(params)
 
     if params.get("view") == "pd-access-rebuild":
         return _render_pd_access_rebuild()
