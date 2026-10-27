@@ -3327,6 +3327,50 @@ MAILER_SEARCH_ID = 19530439
 PIPELINE_API_KEY = "ZRMHN4uJotjRDcZa8hKi"
 PIPELINE_APP_KEY = "571978be28bd3b5b515a2cc5db96b674"
 MAILER_MAX_PAGES = 25
+MAILER_BLOCK_DOMAINS = {"rainmakersecurities.com", "rainmakerapac.com"}
+MAILER_BLOCK_EMAILS = {
+    "cvq@sternventures.com", "christian@belucaventures.com", "ch@acceleratesportsbusiness.com",
+    "daniel@kellscapital.com", "gselz@outsetpartners.com", "gcapello@premieralts.com",
+    "isubel@marulacap.com", "jack@hamiagroup.com", "js@acceleratesportsbusiness.com",
+    "kgilboy@outsetpartners.com", "lh@lab-137.com", "mcaccavo@bomboraadvisory.com",
+    "marko@catalytic-life.com", "beards@internetsec.com", "michael@ballardcap.com",
+    "pstriebel@outsetpartners.com", "sean@alphalavin.com", "staylor@spry.vc",
+    "tbarnes@axisgroupventures.com", "tom@impacts.capital", "wplatt@marulacap.com",
+    "yoram@pacificoakscapital.com",
+}
+
+
+def _mailer_blocked(emails):
+    """True if any of a recipient's addresses is on the bulk-send blocklist.
+    Blank or malformed values are ignored."""
+    for e in emails or ():
+        if not isinstance(e, str):
+            continue
+        e = e.strip().lower()
+        if e.count("@") != 1:
+            continue
+        if e in MAILER_BLOCK_EMAILS:
+            return True
+        domain = e.split("@", 1)[1]
+        if not domain:
+            continue
+        for bd in MAILER_BLOCK_DOMAINS:
+            if domain == bd or domain.endswith("." + bd):
+                return True
+    return False
+
+
+def _mailer_row_emails(row):
+    """Send-to address plus any other email columns carried on a mailer row."""
+    return [row[1]] + list(row[3] if len(row) > 3 else ())
+
+
+def _split_blocked(rows):
+    """(sendable_rows, blocked_rows) for bulk mailer recipient rows."""
+    keep, blocked = [], []
+    for r in rows:
+        (blocked if _mailer_blocked(_mailer_row_emails(r)) else keep).append(r)
+    return keep, blocked
 
 
 def _fetch_mailer_page(page, search_id=MAILER_SEARCH_ID):
@@ -3353,6 +3397,8 @@ def _collect_mailer_entries(data, seen, rows, missing):
     i_first = cols.index("person_first_name")
     i_email = cols.index("person_email")
     i_pid = cols.index("id")  # "id" = Person ID primary-key column
+    i_alts = [i for i, c in enumerate(cols)
+              if i != i_email and "email" in str(c or "").lower()]
     for entry in (data.get("entries") or []):
         if not isinstance(entry, list) or len(entry) <= max(i_first, i_email, i_pid):
             continue
@@ -3366,7 +3412,9 @@ def _collect_mailer_entries(data, seen, rows, missing):
         seen.add(dedupe_key)
         if not first:
             missing.append(email)
-        rows.append((first, email, entry[i_pid]))
+        alts = tuple(entry[i] for i in i_alts
+                     if i < len(entry) and isinstance(entry[i], str) and entry[i].strip())
+        rows.append((first, email, entry[i_pid], alts))
 
 
 def _fetch_mailer_rows(search_id=MAILER_SEARCH_ID):
@@ -3431,7 +3479,8 @@ def _render_mailer_page(search_id=MAILER_SEARCH_ID):
             "body": "Could not build the mailer list: " + str(exc),
         }
 
-    tsv = "\n".join(f + "\t" + e for f, e, _pid in rows)
+    rows, blocked = _split_blocked(rows)
+    tsv = "\n".join(r[0] + "\t" + r[1] for r in rows)
 
     out = []
     out.append(
@@ -3503,15 +3552,35 @@ def _render_mailer_page(search_id=MAILER_SEARCH_ID):
         '<th style="border:1px solid #e5e7eb;padding:6px 10px;'
         'text-align:left;background:#f9fafb;">Email</th></tr>'
     )
-    for first, email, _pid in rows:
+    for r in rows:
         out.append(
             '<tr><td style="border:1px solid #e5e7eb;padding:6px 10px;">'
-            + escape(first)
+            + escape(r[0])
             + '</td><td style="border:1px solid #e5e7eb;padding:6px 10px;">'
-            + escape(email)
+            + escape(r[1])
             + "</td></tr>"
         )
     out.append("</table>")
+    if blocked:
+        out.append(
+            '<h2 id="blocked" style="font-size:16px;margin:24px 0 4px 0;">Blocked (not sent)</h2>'
+            '<p style="color:#6b7280;margin:0 0 8px 0;">' + str(len(blocked))
+            + " blocked recipients</p>"
+            '<table style="border-collapse:collapse;width:100%;font-size:14px;">'
+            '<tr><th style="border:1px solid #e5e7eb;padding:6px 10px;'
+            'text-align:left;background:#f9fafb;">First Name</th>'
+            '<th style="border:1px solid #e5e7eb;padding:6px 10px;'
+            'text-align:left;background:#f9fafb;">Email</th></tr>'
+        )
+        for r in blocked:
+            out.append(
+                '<tr><td style="border:1px solid #e5e7eb;padding:6px 10px;">'
+                + escape(r[0])
+                + '</td><td style="border:1px solid #e5e7eb;padding:6px 10px;">'
+                + escape(", ".join(dict.fromkeys(_mailer_row_emails(r))))
+                + "</td></tr>"
+            )
+        out.append("</table>")
     out.append(MAILER_SCRIPT)
     out.append("</body></html>")
 
@@ -4803,6 +4872,10 @@ def _handle_news_send(body):
     except Exception as e:
         return _pd_abort_send("News mailer", f"{type(e).__name__}: {e}")
     rows, missing = _fetch_mailer_rows(search_id)
+    rows, blocked_rows = _split_blocked(rows)
+    blocked = len(blocked_rows)
+    for r in blocked_rows:
+        print(f"mailer blocked: {r[1]}")
     n_before = len(rows)
     rows = [r for r in rows if r[1].strip().lower() not in referral_emails]
     excluded = n_before - len(rows)
@@ -4827,7 +4900,8 @@ def _handle_news_send(body):
         _merge_send_times(s3, new_times)
         new_times.clear()
 
-    for first, email, pid in rows:
+    for row in rows:
+        first, email, pid = row[:3]
         key = email.lower()
         if key in already:
             skipped += 1
@@ -4861,6 +4935,7 @@ def _handle_news_send(body):
               + "\nFailed: " + str(failed)
               + "\nNo email on record: " + str(len(missing))
               + "\nExcluded (Referral – Client): " + str(excluded)
+              + "\nBlocked: " + str(blocked)
               + "\nItems: " + str(len(content.get("items") or [])) + "\n")
     try:
         ses.send_email(
@@ -4873,7 +4948,7 @@ def _handle_news_send(body):
         print(f"news send report failed: {e}")
     return {"statusCode": 200, "headers": {"Content-Type": "application/json"},
             "body": json.dumps({"ok": True, "sent": sent, "failed": failed, "skipped": skipped,
-                                "excluded_referral_client": excluded})}
+                                "excluded_referral_client": excluded, "blocked": blocked})}
 
 
 NEWS_COMPOSER_SCRIPT = """
@@ -5065,6 +5140,10 @@ def _handle_mailer_send(body):
     except Exception as e:
         return _pd_abort_send("Weekly mailer", f"{type(e).__name__}: {e}")
     rows, missing = _fetch_mailer_rows(search_id)
+    rows, blocked_rows = _split_blocked(rows)
+    blocked = len(blocked_rows)
+    for r in blocked_rows:
+        print(f"mailer blocked: {r[1]}")
     n_before = len(rows)
     rows = [r for r in rows if r[1].strip().lower() not in referral_emails]
     excluded = n_before - len(rows)
@@ -5092,7 +5171,8 @@ def _handle_mailer_send(body):
         _merge_send_times(s3, new_times)
         new_times.clear()
 
-    for first, email, pid in rows:
+    for row in rows:
+        first, email, pid = row[:3]
         key = email.lower()
         if key in already:
             skipped += 1
@@ -5125,6 +5205,7 @@ def _handle_mailer_send(body):
               + "\nFailed: " + str(failed)
               + "\nNo email on record: " + str(len(missing))
               + "\nExcluded (Referral – Client): " + str(excluded)
+              + "\nBlocked: " + str(blocked)
               + "\nSell orders: " + str(len(sells)) + "  Buy companies: " + str(len(buys)) + "\n")
     try:
         ses.send_email(
@@ -5137,7 +5218,7 @@ def _handle_mailer_send(body):
         print(f"mailer send report failed: {e}")
     return {"statusCode": 200, "headers": {"Content-Type": "application/json"},
             "body": json.dumps({"ok": True, "sent": sent, "failed": failed, "skipped": skipped,
-                                "excluded_referral_client": excluded})}
+                                "excluded_referral_client": excluded, "blocked": blocked})}
 
 
 def _handle_mailer_test(body):
