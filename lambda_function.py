@@ -4689,10 +4689,15 @@ MAILER_COMPOSER_SCRIPT = """
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({action: 'mailer_send', subject: subj, search_id: sid, limit: lim})
-    }).then(function (r) { return r.json(); }).then(function (j) {
-      snd.textContent = j.ok ? ('Sent to ' + j.sent + ' ✓') : ('Failed: ' + (j.error || 'try again'));
+    }).then(function (r) {
+      return r.json().then(function (j) { j._status = r.status; return j; });
+    }).then(function (j) {
+      snd.textContent = j.ok ? ('Sent to ' + j.sent + ' ✓')
+        : (j._status === 409 ? j.error : ('Failed: ' + (j.error || 'try again')));
       snd.disabled = false;
-    }).catch(function () { snd.textContent = 'Failed — try again'; snd.disabled = false; });
+    }).catch(function () {
+      snd.textContent = 'Connection lost — the send may still be running. Check your send report email before doing anything.';
+    });
   });
   var clr = document.getElementById('clear-sel');
   if (clr) clr.addEventListener('click', function () {
@@ -5010,6 +5015,74 @@ def _send_bulk_archive(ses, mailer_label, subject, stats, render_html, csv_rows)
         return reason
 
 
+SEND_LOCK_KEY = "mailer-send-lock.json"
+SEND_LOCK_STALE_SECS = 30 * 60
+
+
+def _send_progress_key(kind, subject):
+    """Per-subject dedupe file: a resend with the same subject skips everyone in it."""
+    h = hashlib.sha256((kind + "|" + subject.strip().lower()).encode("utf-8")).hexdigest()[:12]
+    return "mailer-send-" + h + ".json"
+
+
+def _send_lock_conflict(started_at):
+    try:
+        shown = datetime.fromisoformat(started_at).astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M")
+    except Exception:
+        shown = str(started_at)
+    return {"statusCode": 409, "headers": {"Content-Type": "application/json"},
+            "body": json.dumps({"ok": False, "error": "A send is already running (started " + shown
+                                + " UTC). Check your send report email before trying again."})}
+
+
+def _acquire_send_lock(s3, kind, subject):
+    """Take the bulk-send lock. Returns (started_at, None) when held, or (None, response)
+    to return instead of sending (409 while another send is running)."""
+    started_at = datetime.now(timezone.utc).isoformat()
+    body = json.dumps({"kind": kind, "subject": subject, "started_at": started_at}).encode("utf-8")
+    for _attempt in range(2):
+        try:
+            s3.put_object(Bucket=S3_BUCKET, Key=SEND_LOCK_KEY, Body=body,
+                          ContentType="application/json", IfNoneMatch="*")
+            return started_at, None
+        except Exception as e:
+            code, http = _pd_s3_err(e)
+            if code not in ("PreconditionFailed", "ConditionalRequestConflict") and http not in (412, 409):
+                return None, {"statusCode": 503, "headers": {"Content-Type": "application/json"},
+                              "body": json.dumps({"ok": False, "error": "Could not take the send lock ("
+                                                  + type(e).__name__ + "); nothing was sent."})}
+        try:
+            obj = s3.get_object(Bucket=S3_BUCKET, Key=SEND_LOCK_KEY)
+        except Exception:
+            continue  # released between our put and get: try to create it again
+        try:
+            held = json.loads(obj["Body"].read()).get("started_at")
+            age = datetime.now(timezone.utc).timestamp() - datetime.fromisoformat(held).timestamp()
+        except Exception:
+            held, age = None, SEND_LOCK_STALE_SECS  # unreadable lock: treat as stale
+        if age < SEND_LOCK_STALE_SECS:
+            return None, _send_lock_conflict(held)
+        try:
+            kw = {"IfMatch": obj["ETag"]} if obj.get("ETag") else {}
+            s3.put_object(Bucket=S3_BUCKET, Key=SEND_LOCK_KEY, Body=body,
+                          ContentType="application/json", **kw)
+            print(f"send lock: took over stale lock started {held}")
+            return started_at, None
+        except Exception:
+            return None, _send_lock_conflict(held)  # someone else took it over first
+    return None, _send_lock_conflict(None)
+
+
+def _release_send_lock(s3, started_at):
+    """Delete the lock if it is still ours (a stale takeover may have replaced it)."""
+    try:
+        held = json.loads(s3.get_object(Bucket=S3_BUCKET, Key=SEND_LOCK_KEY)["Body"].read())
+        if held.get("started_at") == started_at:
+            s3.delete_object(Bucket=S3_BUCKET, Key=SEND_LOCK_KEY)
+    except Exception as e:
+        print(f"send lock release failed: {e}")
+
+
 def _handle_news_send(body):
     subject = str(body.get("subject") or "").strip()
     if not subject:
@@ -5026,101 +5099,108 @@ def _handle_news_send(body):
         referral_emails = _pd_referral_client_emails(s3)
     except Exception as e:
         return _pd_abort_send("News mailer", f"{type(e).__name__}: {e}")
-    rows, missing = _fetch_mailer_rows(search_id)
-    all_rows = list(rows)
-    rows, blocked_rows = _split_blocked(rows)
-    blocked = len(blocked_rows)
-    for r in blocked_rows:
-        print(f"mailer blocked: {r[1]}")
-    n_before = len(rows)
-    excluded_rows = [r for r in rows if r[1].strip().lower() in referral_emails]
-    rows = [r for r in rows if r[1].strip().lower() not in referral_emails]
-    excluded = n_before - len(rows)
-    progress_key = "news-send-" + datetime.now(timezone.utc).strftime("%Y-%m-%d") + ".json"
-    already = set()
+    lock_at, lock_resp = _acquire_send_lock(s3, "news", subject)
+    if lock_resp:
+        return lock_resp
     try:
-        obj = s3.get_object(Bucket=S3_BUCKET, Key=progress_key)
-        already = set(json.loads(obj["Body"].read()).get("sent", []))
-    except Exception:
-        pass
-    ses = boto3.client("ses", region_name=SES_REGION)
-    sent, failed, skipped = 0, 0, 0
-    new_times = {}
-    outcome = {}
-
-    def _flush():
+        rows, missing = _fetch_mailer_rows(search_id)
+        all_rows = list(rows)
+        rows, blocked_rows = _split_blocked(rows)
+        blocked = len(blocked_rows)
+        for r in blocked_rows:
+            print(f"mailer blocked: {r[1]}")
+        n_before = len(rows)
+        excluded_rows = [r for r in rows if r[1].strip().lower() in referral_emails]
+        rows = [r for r in rows if r[1].strip().lower() not in referral_emails]
+        excluded = n_before - len(rows)
+        progress_key = _send_progress_key("news", subject)
+        already = set()
         try:
-            s3.put_object(Bucket=S3_BUCKET, Key=progress_key,
-                          Body=json.dumps({"sent": sorted(already)}).encode("utf-8"),
-                          ContentType="application/json")
-        except Exception as e:
-            print(f"news send progress write failed: {e}")
-        _merge_send_times(s3, new_times)
-        new_times.clear()
+            obj = s3.get_object(Bucket=S3_BUCKET, Key=progress_key)
+            already = set(json.loads(obj["Body"].read()).get("sent", []))
+        except Exception:
+            pass
+        ses = boto3.client("ses", region_name=SES_REGION)
+        sent, failed, skipped = 0, 0, 0
+        new_times = {}
+        outcome = {}
 
-    for row in rows:
-        first, email, pid = row[:3]
-        key = email.lower()
-        if key in already:
-            skipped += 1
-            outcome[key] = ("skipped_already_sent", "")
-            continue
-        npid = _normalize_id(pid)
-        if npid is None:
-            skipped += 1
-            outcome[key] = ("skipped_no_person_id", "")
-            continue
+        def _flush():
+            try:
+                s3.put_object(Bucket=S3_BUCKET, Key=progress_key,
+                              Body=json.dumps({"sent": sorted(already)}).encode("utf-8"),
+                              ContentType="application/json")
+            except Exception as e:
+                print(f"news send progress write failed: {e}")
+            _merge_send_times(s3, new_times)
+            new_times.clear()
+
+        for row in rows:
+            first, email, pid = row[:3]
+            key = email.lower()
+            if key in already:
+                skipped += 1
+                outcome[key] = ("skipped_already_sent", "")
+                continue
+            npid = _normalize_id(pid)
+            if npid is None:
+                skipped += 1
+                outcome[key] = ("skipped_no_person_id", "")
+                continue
+            try:
+                html = _render_news_email(first, npid, content)
+                ses.send_email(
+                    Source=MAILER_FROM,
+                    Destination={"ToAddresses": [email]},
+                    ReplyToAddresses=["cgracia@rainmakersecurities.com"],
+                    Message={"Subject": {"Data": subject, "Charset": "UTF-8"},
+                             "Body": {"Html": {"Data": html, "Charset": "UTF-8"}}},
+                )
+                already.add(key)
+                new_times[str(npid)] = datetime.now(timezone.utc).timestamp()
+                sent += 1
+                outcome[key] = ("sent", datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"))
+            except Exception as e:
+                failed += 1
+                outcome[key] = ("failed", "")
+                print(f"news send failed to {email}: {e}")
+            if sent and sent % 10 == 0:
+                _flush()
+        _flush()
+        archive_err = None
+        if sent > 0:
+            archive_err = _send_bulk_archive(
+                ses, "News mailer", subject,
+                [("Sent", sent), ("Failed", failed), ("Blocked", blocked),
+                 ("Excluded (Referral – Client)", excluded), ("Saved search", search_id), ("Dedupe file", progress_key),
+                 ("Limit", "none")],
+                lambda: _render_news_email("Chad", MAILER_PREVIEW_PID, content),
+                lambda: _archive_csv_rows(all_rows, blocked_rows, excluded_rows, [], outcome))
+        report = ("News mailer send complete.\n\nSubject: " + subject
+                  + "\nSaved search: " + str(search_id)
+                  + "\nSent: " + str(sent)
+                  + "\nSkipped (already sent today / no person id): " + str(skipped)
+                  + "\nFailed: " + str(failed)
+                  + "\nNo email on record: " + str(len(missing))
+                  + "\nExcluded (Referral – Client): " + str(excluded)
+                  + "\nBlocked: " + str(blocked)
+                  + "\nItems: " + str(len(content.get("items") or [])) + "\n"
+                  + "Dedupe file: " + progress_key + "\n"
+                  + ("ARCHIVE EMAIL FAILED: " + archive_err + "\n" if archive_err else ""))
         try:
-            html = _render_news_email(first, npid, content)
             ses.send_email(
-                Source=MAILER_FROM,
-                Destination={"ToAddresses": [email]},
-                ReplyToAddresses=["cgracia@rainmakersecurities.com"],
-                Message={"Subject": {"Data": subject, "Charset": "UTF-8"},
-                         "Body": {"Html": {"Data": html, "Charset": "UTF-8"}}},
+                Source=FROM_ADDR,
+                Destination={"ToAddresses": TO_ADDRS},
+                Message={"Subject": {"Data": "News mailer sent: " + str(sent) + " recipients", "Charset": "UTF-8"},
+                         "Body": {"Text": {"Data": report, "Charset": "UTF-8"}}},
             )
-            already.add(key)
-            new_times[str(npid)] = datetime.now(timezone.utc).timestamp()
-            sent += 1
-            outcome[key] = ("sent", datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"))
         except Exception as e:
-            failed += 1
-            outcome[key] = ("failed", "")
-            print(f"news send failed to {email}: {e}")
-        if sent and sent % 25 == 0:
-            _flush()
-    _flush()
-    archive_err = None
-    if sent > 0:
-        archive_err = _send_bulk_archive(
-            ses, "News mailer", subject,
-            [("Sent", sent), ("Failed", failed), ("Blocked", blocked),
-             ("Excluded (Referral – Client)", excluded), ("Saved search", search_id),
-             ("Limit", "none")],
-            lambda: _render_news_email("Chad", MAILER_PREVIEW_PID, content),
-            lambda: _archive_csv_rows(all_rows, blocked_rows, excluded_rows, [], outcome))
-    report = ("News mailer send complete.\n\nSubject: " + subject
-              + "\nSaved search: " + str(search_id)
-              + "\nSent: " + str(sent)
-              + "\nSkipped (already sent today / no person id): " + str(skipped)
-              + "\nFailed: " + str(failed)
-              + "\nNo email on record: " + str(len(missing))
-              + "\nExcluded (Referral – Client): " + str(excluded)
-              + "\nBlocked: " + str(blocked)
-              + "\nItems: " + str(len(content.get("items") or [])) + "\n"
-              + ("ARCHIVE EMAIL FAILED: " + archive_err + "\n" if archive_err else ""))
-    try:
-        ses.send_email(
-            Source=FROM_ADDR,
-            Destination={"ToAddresses": TO_ADDRS},
-            Message={"Subject": {"Data": "News mailer sent: " + str(sent) + " recipients", "Charset": "UTF-8"},
-                     "Body": {"Text": {"Data": report, "Charset": "UTF-8"}}},
-        )
-    except Exception as e:
-        print(f"news send report failed: {e}")
-    return {"statusCode": 200, "headers": {"Content-Type": "application/json"},
-            "body": json.dumps({"ok": True, "sent": sent, "failed": failed, "skipped": skipped,
-                                "excluded_referral_client": excluded, "blocked": blocked})}
+            print(f"news send report failed: {e}")
+        return {"statusCode": 200, "headers": {"Content-Type": "application/json"},
+                "body": json.dumps({"ok": True, "sent": sent, "failed": failed, "skipped": skipped,
+                                    "excluded_referral_client": excluded, "blocked": blocked})}
+    finally:
+        _release_send_lock(s3, lock_at)
 
 
 NEWS_COMPOSER_SCRIPT = """
@@ -5158,10 +5238,15 @@ NEWS_COMPOSER_SCRIPT = """
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
       body: JSON.stringify({action: 'news_send', subject: subj, search_id: sid})
-    }).then(function (r) { return r.json(); }).then(function (j) {
-      snd.textContent = j.ok ? ('Sent to ' + j.sent + ' ✓') : ('Failed: ' + (j.error || 'try again'));
+    }).then(function (r) {
+      return r.json().then(function (j) { j._status = r.status; return j; });
+    }).then(function (j) {
+      snd.textContent = j.ok ? ('Sent to ' + j.sent + ' ✓')
+        : (j._status === 409 ? j.error : ('Failed: ' + (j.error || 'try again')));
       snd.disabled = false;
-    }).catch(function () { snd.textContent = 'Failed — try again'; snd.disabled = false; });
+    }).catch(function () {
+      snd.textContent = 'Connection lost — the send may still be running. Check your send report email before doing anything.';
+    });
   });
   var tst = document.getElementById('news-test');
   if (tst) tst.addEventListener('click', function () {
@@ -5311,105 +5396,112 @@ def _handle_mailer_send(body):
         referral_emails = _pd_referral_client_emails(s3)
     except Exception as e:
         return _pd_abort_send("Weekly mailer", f"{type(e).__name__}: {e}")
-    rows, missing = _fetch_mailer_rows(search_id)
-    all_rows = list(rows)
-    rows, blocked_rows = _split_blocked(rows)
-    blocked = len(blocked_rows)
-    for r in blocked_rows:
-        print(f"mailer blocked: {r[1]}")
-    n_before = len(rows)
-    excluded_rows = [r for r in rows if r[1].strip().lower() in referral_emails]
-    rows = [r for r in rows if r[1].strip().lower() not in referral_emails]
-    excluded = n_before - len(rows)
-    lim_raw = str(body.get("limit") or "").strip()
-    limited_rows = []
-    if lim_raw.isdigit() and int(lim_raw) > 0:
-        limited_rows = rows[int(lim_raw):]
-        rows = rows[:int(lim_raw)]
-    progress_key = "mailer-send-" + datetime.now(timezone.utc).strftime("%Y-%m-%d") + ".json"
-    already = set()
+    lock_at, lock_resp = _acquire_send_lock(s3, "weekly", subject)
+    if lock_resp:
+        return lock_resp
     try:
-        obj = s3.get_object(Bucket=S3_BUCKET, Key=progress_key)
-        already = set(json.loads(obj["Body"].read()).get("sent", []))
-    except Exception:
-        pass
-    ses = boto3.client("ses", region_name=SES_REGION)
-    sent, failed, skipped = 0, 0, 0
-    new_times = {}
-    outcome = {}
-
-    def _flush():
+        rows, missing = _fetch_mailer_rows(search_id)
+        all_rows = list(rows)
+        rows, blocked_rows = _split_blocked(rows)
+        blocked = len(blocked_rows)
+        for r in blocked_rows:
+            print(f"mailer blocked: {r[1]}")
+        n_before = len(rows)
+        excluded_rows = [r for r in rows if r[1].strip().lower() in referral_emails]
+        rows = [r for r in rows if r[1].strip().lower() not in referral_emails]
+        excluded = n_before - len(rows)
+        lim_raw = str(body.get("limit") or "").strip()
+        limited_rows = []
+        if lim_raw.isdigit() and int(lim_raw) > 0:
+            limited_rows = rows[int(lim_raw):]
+            rows = rows[:int(lim_raw)]
+        progress_key = _send_progress_key("weekly", subject)
+        already = set()
         try:
-            s3.put_object(Bucket=S3_BUCKET, Key=progress_key,
-                          Body=json.dumps({"sent": sorted(already)}).encode("utf-8"),
-                          ContentType="application/json")
-        except Exception as e:
-            print(f"mailer send progress write failed: {e}")
-        _merge_send_times(s3, new_times)
-        new_times.clear()
+            obj = s3.get_object(Bucket=S3_BUCKET, Key=progress_key)
+            already = set(json.loads(obj["Body"].read()).get("sent", []))
+        except Exception:
+            pass
+        ses = boto3.client("ses", region_name=SES_REGION)
+        sent, failed, skipped = 0, 0, 0
+        new_times = {}
+        outcome = {}
 
-    for row in rows:
-        first, email, pid = row[:3]
-        key = email.lower()
-        if key in already:
-            skipped += 1
-            outcome[key] = ("skipped_already_sent", "")
-            continue
-        npid = _normalize_id(pid)
-        if npid is None:
-            skipped += 1
-            outcome[key] = ("skipped_no_person_id", "")
-            continue
+        def _flush():
+            try:
+                s3.put_object(Bucket=S3_BUCKET, Key=progress_key,
+                              Body=json.dumps({"sent": sorted(already)}).encode("utf-8"),
+                              ContentType="application/json")
+            except Exception as e:
+                print(f"mailer send progress write failed: {e}")
+            _merge_send_times(s3, new_times)
+            new_times.clear()
+
+        for row in rows:
+            first, email, pid = row[:3]
+            key = email.lower()
+            if key in already:
+                skipped += 1
+                outcome[key] = ("skipped_already_sent", "")
+                continue
+            npid = _normalize_id(pid)
+            if npid is None:
+                skipped += 1
+                outcome[key] = ("skipped_no_person_id", "")
+                continue
+            try:
+                html = _render_mailer_email(first, npid, sells, buys, counts, True)
+                ses.send_email(
+                    Source=MAILER_FROM,
+                    Destination={"ToAddresses": [email]},
+                    ReplyToAddresses=["cgracia@rainmakersecurities.com"],
+                    Message={"Subject": {"Data": subject, "Charset": "UTF-8"},
+                             "Body": {"Html": {"Data": html, "Charset": "UTF-8"}}},
+                )
+                already.add(key)
+                new_times[str(npid)] = datetime.now(timezone.utc).timestamp()
+                sent += 1
+                outcome[key] = ("sent", datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"))
+            except Exception as e:
+                failed += 1
+                outcome[key] = ("failed", "")
+                print(f"mailer send failed to {email}: {e}")
+            if sent and sent % 10 == 0:
+                _flush()
+        _flush()
+        archive_err = None
+        if sent > 0:
+            archive_err = _send_bulk_archive(
+                ses, "Weekly newsletter", subject,
+                [("Sent", sent), ("Failed", failed), ("Blocked", blocked),
+                 ("Excluded (Referral – Client)", excluded), ("Saved search", search_id), ("Dedupe file", progress_key),
+                 ("Limit", lim_raw if lim_raw.isdigit() and int(lim_raw) > 0 else "none")],
+                lambda: _render_mailer_email("Chad", MAILER_PREVIEW_PID, sells, buys, counts, True),
+                lambda: _archive_csv_rows(all_rows, blocked_rows, excluded_rows, limited_rows, outcome))
+        report = ("Weekly mailer send complete.\n\nSubject: " + subject
+                  + "\nSent: " + str(sent)
+                  + "\nSkipped (already sent today / no person id): " + str(skipped)
+                  + "\nFailed: " + str(failed)
+                  + "\nNo email on record: " + str(len(missing))
+                  + "\nExcluded (Referral – Client): " + str(excluded)
+                  + "\nBlocked: " + str(blocked)
+                  + "\nSell orders: " + str(len(sells)) + "  Buy companies: " + str(len(buys)) + "\n"
+                  + "Dedupe file: " + progress_key + "\n"
+                  + ("ARCHIVE EMAIL FAILED: " + archive_err + "\n" if archive_err else ""))
         try:
-            html = _render_mailer_email(first, npid, sells, buys, counts, True)
             ses.send_email(
-                Source=MAILER_FROM,
-                Destination={"ToAddresses": [email]},
-                ReplyToAddresses=["cgracia@rainmakersecurities.com"],
-                Message={"Subject": {"Data": subject, "Charset": "UTF-8"},
-                         "Body": {"Html": {"Data": html, "Charset": "UTF-8"}}},
+                Source=FROM_ADDR,
+                Destination={"ToAddresses": TO_ADDRS},
+                Message={"Subject": {"Data": "Weekly mailer sent: " + str(sent) + " recipients", "Charset": "UTF-8"},
+                         "Body": {"Text": {"Data": report, "Charset": "UTF-8"}}},
             )
-            already.add(key)
-            new_times[str(npid)] = datetime.now(timezone.utc).timestamp()
-            sent += 1
-            outcome[key] = ("sent", datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M:%S"))
         except Exception as e:
-            failed += 1
-            outcome[key] = ("failed", "")
-            print(f"mailer send failed to {email}: {e}")
-        if sent and sent % 25 == 0:
-            _flush()
-    _flush()
-    archive_err = None
-    if sent > 0:
-        archive_err = _send_bulk_archive(
-            ses, "Weekly newsletter", subject,
-            [("Sent", sent), ("Failed", failed), ("Blocked", blocked),
-             ("Excluded (Referral – Client)", excluded), ("Saved search", search_id),
-             ("Limit", lim_raw if lim_raw.isdigit() and int(lim_raw) > 0 else "none")],
-            lambda: _render_mailer_email("Chad", MAILER_PREVIEW_PID, sells, buys, counts, True),
-            lambda: _archive_csv_rows(all_rows, blocked_rows, excluded_rows, limited_rows, outcome))
-    report = ("Weekly mailer send complete.\n\nSubject: " + subject
-              + "\nSent: " + str(sent)
-              + "\nSkipped (already sent today / no person id): " + str(skipped)
-              + "\nFailed: " + str(failed)
-              + "\nNo email on record: " + str(len(missing))
-              + "\nExcluded (Referral – Client): " + str(excluded)
-              + "\nBlocked: " + str(blocked)
-              + "\nSell orders: " + str(len(sells)) + "  Buy companies: " + str(len(buys)) + "\n"
-              + ("ARCHIVE EMAIL FAILED: " + archive_err + "\n" if archive_err else ""))
-    try:
-        ses.send_email(
-            Source=FROM_ADDR,
-            Destination={"ToAddresses": TO_ADDRS},
-            Message={"Subject": {"Data": "Weekly mailer sent: " + str(sent) + " recipients", "Charset": "UTF-8"},
-                     "Body": {"Text": {"Data": report, "Charset": "UTF-8"}}},
-        )
-    except Exception as e:
-        print(f"mailer send report failed: {e}")
-    return {"statusCode": 200, "headers": {"Content-Type": "application/json"},
-            "body": json.dumps({"ok": True, "sent": sent, "failed": failed, "skipped": skipped,
-                                "excluded_referral_client": excluded, "blocked": blocked})}
+            print(f"mailer send report failed: {e}")
+        return {"statusCode": 200, "headers": {"Content-Type": "application/json"},
+                "body": json.dumps({"ok": True, "sent": sent, "failed": failed, "skipped": skipped,
+                                    "excluded_referral_client": excluded, "blocked": blocked})}
+    finally:
+        _release_send_lock(s3, lock_at)
 
 
 def _handle_mailer_test(body):

@@ -5,7 +5,6 @@ import json
 import os
 import sys
 import unittest
-from datetime import datetime, timezone
 from unittest import mock
 
 sys.path.insert(0, os.path.dirname(__file__))
@@ -50,12 +49,12 @@ def _render(first, pid, *a, **k):
 
 class Archive(unittest.TestCase):
     def _run(self, fn, body, rows=ROWS, ses=None):
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-        prefix = "news-send-" if fn is lf._handle_news_send else "mailer-send-"
+        progress = lf._send_progress_key("news" if fn is lf._handle_news_send else "weekly",
+                                         body.get("subject") or "")
         s3 = FakeS3({
             ("full-pipeline-cache", "news-mailer.json"): json.dumps({"intro": "hi", "items": []}).encode(),
             ("full-pipeline-cache", "partner-desk/access.json"): json.dumps(ACCESS).encode(),
-            ("full-pipeline-cache", prefix + today + ".json"): json.dumps({"sent": ["old@x.com"]}).encode(),
+            ("full-pipeline-cache", progress): json.dumps({"sent": ["old@x.com"]}).encode(),
         })
         ses = ses or RawSES(fail_to={"bounce@x.com"})
         with mock.patch.object(lf.boto3, "client", side_effect=lambda svc, **k: ses if svc == "ses" else s3), \
@@ -145,7 +144,9 @@ class Archive(unittest.TestCase):
             ses = RawSES(raw_error=RuntimeError("throttled"), fail_to={"bounce@x.com"})
             res, s3, ses, _ = self._run(fn, {"subject": "S"}, ses=ses)
             self.assertEqual(res, ok_res)
-            self.assertEqual([p["Body"] for p in s3.puts], [p["Body"] for p in ok_s3.puts])
+            def _bodies(puts):
+                return [p["Body"] for p in puts if p["Key"] != lf.SEND_LOCK_KEY]
+            self.assertEqual(_bodies(s3.puts), _bodies(ok_s3.puts))
             report = ses.sent[-1]
             self.assertEqual(report["Destination"]["ToAddresses"], lf.TO_ADDRS)
             text = report["Message"]["Body"]["Text"]["Data"]
