@@ -6,6 +6,7 @@ import json
 import os
 import re
 import secrets
+import uuid
 import urllib.error
 import urllib.request
 from datetime import datetime, timedelta, timezone
@@ -862,6 +863,89 @@ def _log_completion(owner, kind, key, done=True):
         Body=json.dumps(data, ensure_ascii=False).encode("utf-8"),
         ContentType="application/json",
     )
+
+
+TODOS_KEY = "daily-brief-todos.json"
+TODOS_SEED = [
+    "Prepare large mailing for Gecko",
+    "Call Matvei about Apptronik",
+    "Fix security flaw",
+    "Work on Radiant for Grant, set up call",
+]
+
+
+def _save_todos(data):
+    boto3.client("s3").put_object(
+        Bucket=S3_BUCKET, Key=TODOS_KEY,
+        Body=json.dumps(data, ensure_ascii=False).encode("utf-8"),
+        ContentType="application/json",
+    )
+
+
+def _load_todos():
+    """Read the to-do list {"items": [...]}. Never raises; seeds on first load."""
+    try:
+        obj = boto3.client("s3").get_object(Bucket=S3_BUCKET, Key=TODOS_KEY)
+    except Exception as e:
+        code = ((getattr(e, "response", None) or {}).get("Error") or {}).get("Code")
+        if code not in ("NoSuchKey", "404") and "NoSuchKey" not in str(e):
+            return {"items": []}
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        data = {"items": [{"id": uuid.uuid4().hex, "text": t, "done": False,
+                           "created": today, "done_at": None} for t in TODOS_SEED]}
+        try:
+            _save_todos(data)
+        except Exception:
+            pass
+        return data
+    try:
+        data = json.loads(obj["Body"].read().decode("utf-8"))
+        items = data.get("items") if isinstance(data, dict) else None
+        if not isinstance(items, list):
+            return {"items": []}
+        return {"items": [i for i in items if isinstance(i, dict) and i.get("id")]}
+    except Exception:
+        return {"items": []}
+
+
+def _handle_todo(body):
+    def err(code, msg):
+        return {"statusCode": code, "headers": {"Content-Type": "application/json"},
+                "body": json.dumps({"ok": False, "error": msg})}
+    op = body.get("op")
+    data = _load_todos()
+    items = data["items"]
+    if op == "add":
+        text = str(body.get("text") or "").strip()
+        if not text:
+            return err(400, "missing text")
+        if len(text) > 300:
+            return err(400, "text too long (max 300 chars)")
+        items.append({"id": uuid.uuid4().hex, "text": text, "done": False,
+                      "created": datetime.now(timezone.utc).strftime("%Y-%m-%d"),
+                      "done_at": None})
+    elif op in ("toggle", "delete"):
+        tid = str(body.get("id") or "")
+        item = next((i for i in items if i.get("id") == tid), None)
+        if not tid or item is None:
+            return err(400, "unknown id")
+        if op == "toggle":
+            done = body.get("done")
+            if not isinstance(done, bool):
+                return err(400, "done must be true or false")
+            item["done"] = done
+            item["done_at"] = (datetime.now(timezone.utc).strftime("%Y-%m-%d")
+                               if done else None)
+        else:
+            items.remove(item)
+    else:
+        return err(400, "unknown op")
+    try:
+        _save_todos(data)
+    except Exception as e:
+        return err(500, f"save failed: {e}")
+    return {"statusCode": 200, "headers": {"Content-Type": "application/json"},
+            "body": json.dumps({"ok": True, "items": items})}
 
 
 def _handle_row_done(body):
@@ -2107,6 +2191,123 @@ QUEUE_H1_STYLE_TOP = (
     " margin:56px 0 12px 0;"
 )
 
+TODOS_SHOW_DONE_DAYS = 14
+
+TODOS_JS = """
+<script>
+(function() {
+  const box = document.getElementById("todo-box");
+  if (!box) return;
+  const showDays = parseInt(box.getAttribute("data-show-days"), 10) || 14;
+  let items = [];
+  try { items = JSON.parse(box.getAttribute("data-items") || "[]"); } catch (e) {}
+  function esc(s) {
+    return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#39;");
+  }
+  function cutoff() {
+    const d = new Date(Date.now() - showDays * 86400000);
+    return d.toISOString().slice(0, 10);
+  }
+  function row(it) {
+    const style = it.done ? "text-decoration:line-through; color:#9ca3af;" : "color:#111827;";
+    return '<div class="todo-row" data-id="' + esc(it.id) + '" style="display:flex; align-items:center; gap:10px; padding:6px 0; border-bottom:1px solid #f3f4f6;">'
+      + '<input type="checkbox" class="todo-check"' + (it.done ? " checked" : "") + ' style="margin:0; flex:0 0 auto;">'
+      + '<span style="flex:1 1 auto; font-size:15px; ' + style + '">' + esc(it.text) + '</span>'
+      + '<a href="#" class="todo-del" target="_self" title="Delete" style="color:#9ca3af; text-decoration:none; font-size:16px; padding:0 4px;">&times;</a>'
+      + '</div>';
+  }
+  function render() {
+    const open = items.filter(i => !i.done);
+    const cut = cutoff();
+    const done = items.filter(i => i.done && (!i.done_at || i.done_at >= cut));
+    const doneOpen = box.querySelector("details.todo-done");
+    const wasOpen = doneOpen ? doneOpen.open : false;
+    box.querySelector(".todo-open").innerHTML = open.length ? open.map(row).join("")
+      : '<div style="font-size:14px; color:#9ca3af; padding:6px 0;">Nothing open.</div>';
+    const dw = box.querySelector(".todo-done-wrap");
+    dw.innerHTML = done.length
+      ? '<details class="todo-done"' + (wasOpen ? " open" : "") + ' style="margin-top:12px;">'
+        + '<summary style="cursor:pointer; font-size:13px; color:#6b7280;">Done (' + done.length + ')</summary>'
+        + done.map(row).join("") + '</details>'
+      : "";
+  }
+  function post(payload, onFail) {
+    return fetch(window.location.pathname + window.location.search, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(Object.assign({ action: "todo" }, payload))
+    }).then(r => r.json()).then(d => {
+      if (d && d.ok) { items = d.items || []; render(); return true; }
+      alert("Failed: " + ((d && d.error) || "unknown error"));
+      if (onFail) onFail();
+      return false;
+    }).catch(e => {
+      alert("Failed: " + e);
+      if (onFail) onFail();
+      return false;
+    });
+  }
+  box.addEventListener("change", function(ev) {
+    const cb = ev.target.closest("input.todo-check");
+    if (!cb) return;
+    const id = cb.closest(".todo-row").getAttribute("data-id");
+    const want = cb.checked;
+    post({ op: "toggle", id: id, done: want }, () => { cb.checked = !want; });
+  });
+  box.addEventListener("click", function(ev) {
+    const del = ev.target.closest("a.todo-del");
+    if (!del) return;
+    ev.preventDefault();
+    if (!confirm("Delete this to-do?")) return;
+    post({ op: "delete", id: del.closest(".todo-row").getAttribute("data-id") });
+  });
+  const input = box.querySelector("input.todo-input");
+  const btn = box.querySelector("button.todo-add");
+  function add() {
+    const text = input.value.trim();
+    if (!text) return;
+    btn.disabled = true;
+    post({ op: "add", text: text }).then(ok => {
+      btn.disabled = false;
+      if (ok) input.value = "";
+    });
+  }
+  btn.addEventListener("click", add);
+  input.addEventListener("keydown", function(ev) {
+    if (ev.key === "Enter") { ev.preventDefault(); add(); }
+  });
+  render();
+})();
+</script>
+"""
+
+
+def _render_todos_box():
+    """Interactive-only personal to-do box; rendered client-side from data-items."""
+    items = _load_todos().get("items", [])
+    return (
+        f'<div id="todo-box" data-show-days="{TODOS_SHOW_DONE_DAYS}"'
+        f' data-items="{escape(json.dumps(items, ensure_ascii=False), quote=True)}">'
+        f'<h1 style="{QUEUE_H1_STYLE_TOP}">To-dos</h1>'
+        '<div style="border:1px solid #e5e7eb; border-radius:8px;'
+        ' padding:12px 18px 16px 18px; margin:0 0 12px 0; background:#ffffff;">'
+        '<div class="todo-open"></div>'
+        '<div style="display:flex; gap:8px; margin-top:12px;">'
+        '<input type="text" class="todo-input" maxlength="300" placeholder="Add a to-do…"'
+        ' style="flex:1 1 auto; font-size:14px; padding:6px 10px;'
+        ' border:1px solid #d1d5db; border-radius:6px;">'
+        '<button type="button" class="todo-add"'
+        ' style="font-size:14px; padding:6px 14px; border:1px solid #d1d5db;'
+        ' border-radius:6px; background:#f9fafb; cursor:pointer;">Add</button>'
+        '</div>'
+        '<div class="todo-done-wrap"></div>'
+        '</div>'
+        '</div>'
+        + TODOS_JS
+    )
+
+
 DISMISS_BANNER_HTML = (
     '<p id="dismiss-counter" style="font-size:13px; color:#4b5563;'
     ' margin:8px 0 24px 0; display:none;">'
@@ -2513,6 +2714,10 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
                 f' style="{LINK_STYLE_500}">'
                 'View interactive web version &rarr;</a></p>'
             )
+
+    # ── To-dos (website only) ─────────────────────────────────────────────
+    if interactive:
+        out.append(_render_todos_box())
 
     # ── Daily actions (website only) ──────────────────────────────────────
     if interactive:
@@ -6418,6 +6623,8 @@ def handle_http_request(event):
             return _handle_crm_confirm(body)
         if body.get("action") == "row_done":
             return _handle_row_done(body)
+        if body.get("action") == "todo":
+            return _handle_todo(body)
         if body.get("action") == "lead_email":
             return _handle_lead_email(body)
         if body.get("action") == "mailer_test":
