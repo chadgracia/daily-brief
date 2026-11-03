@@ -1,0 +1,29 @@
+name: diag-mailer-status
+on:
+  push:
+    branches: [diag/mailer-status-1103]
+permissions:
+  id-token: write
+  contents: read
+jobs:
+  status:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::271378210266:role/github-actions-deploy
+          aws-region: us-east-1
+      - name: Lock file
+        run: aws s3api head-object --bucket full-pipeline-cache --key mailer-send-lock.json && aws s3 cp s3://full-pipeline-cache/mailer-send-lock.json - || echo "NO LOCK FILE"
+      - name: Dedupe file
+        run: |
+          aws s3api head-object --bucket full-pipeline-cache --key mailer-send-edefd21c38c6.json || echo "NO DEDUPE FILE"
+          aws s3 cp s3://full-pipeline-cache/mailer-send-edefd21c38c6.json /tmp/d.json && python3 -c "import json;print('SENT COUNT:',len(json.load(open('/tmp/d.json'))['sent']))" || true
+          aws s3 ls s3://full-pipeline-cache/ | grep mailer-send || true
+      - name: Lambda config
+        run: aws lambda get-function-configuration --function-name daily-brief --query '{Timeout:Timeout,Mem:MemorySize,Role:Role}' || true
+      - name: Lambda logs
+        run: |
+          aws logs filter-log-events --log-group-name /aws/lambda/daily-brief --start-time 1793642400000 --end-time 1793692800000 \
+            --filter-pattern '?"send lock" ?"Task timed out" ?"mailer send" ?"mailer blocked" ?REPORT ?ERROR ?Traceback' \
+            --query 'events[].[timestamp,message]' --output text | grep -v "mailer blocked" | tail -80 || true
