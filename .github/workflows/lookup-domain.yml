@@ -1,0 +1,132 @@
+name: lookup-domain
+# Read-only diagnosis: finds people whose email(s) contain a substring and the deals they're linked to.
+# Never writes to S3 or Pipeline.
+on:
+  workflow_dispatch:
+    inputs:
+      needle:
+        description: "Case-insensitive substring to match in email / emails"
+        required: false
+        default: "teamignite"
+permissions:
+  id-token: write
+  contents: read
+jobs:
+  lookup:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: arn:aws:iam::271378210266:role/github-actions-deploy
+          aws-region: us-east-1
+      - name: Object metadata
+        run: |
+          echo "people.json:"; aws s3api head-object --bucket full-pipeline-cache --key people.json --query '{LastModified:LastModified,Size:ContentLength}' --output json
+          echo "deals.json:";  aws s3api head-object --bucket full-pipeline-cache --key deals.json  --query '{LastModified:LastModified,Size:ContentLength}' --output json
+      - name: Download (read-only)
+        run: |
+          aws s3 cp s3://full-pipeline-cache/people.json /tmp/people.json --only-show-errors
+          aws s3 cp s3://full-pipeline-cache/deals.json /tmp/deals.json --only-show-errors
+      - name: Find people and linked deals
+        shell: python
+        env:
+          NEEDLE: ${{ inputs.needle || 'teamignite' }}
+        run: |
+          import json, os
+          needle = os.environ["NEEDLE"].lower()
+
+          def nid(v):
+              try: return int(v)
+              except (TypeError, ValueError): return v
+
+          def records(doc, *keys):
+              if isinstance(doc, list): return doc
+              for k in keys:
+                  if isinstance(doc.get(k), list): return doc[k]
+              return []
+
+          people_doc = json.load(open("/tmp/people.json"))
+          people = records(people_doc, "people", "entries")
+          print(f"people.json top-level: {type(people_doc).__name__} keys={list(people_doc)[:10] if isinstance(people_doc, dict) else '-'} records={len(people)}")
+
+          def addr(e):
+              if isinstance(e, dict): return str(e.get("address") or e.get("email") or "")
+              return str(e or "")
+
+          matches = []
+          for p in people:
+              if not isinstance(p, dict): continue
+              em = p.get("email")
+              ems = p.get("emails") or []
+              if not isinstance(ems, list): ems = [ems]
+              vals = [addr(em)] + [addr(e) for e in ems]
+              if any(needle in v.lower() for v in vals if v):
+                  matches.append(p)
+
+          print("=" * 70)
+          print(f"PEOPLE matching '{needle}': {len(matches)}")
+          print("=" * 70)
+          for p in matches:
+              name = p.get("full_name") or f"{p.get('first_name','')} {p.get('last_name','')}".strip()
+              co = p.get("company") if isinstance(p.get("company"), dict) else {}
+              print(f"id:           {p.get('id')}")
+              print(f"name:         {name}")
+              print(f"company_id:   {p.get('company_id') or co.get('id')}")
+              print(f"company_name: {p.get('company_name') or co.get('name')}")
+              print(f"email:        {json.dumps(p.get('email'))}")
+              print(f"emails:       {json.dumps(p.get('emails'))}")
+              print("-" * 70)
+
+          deals_doc = json.load(open("/tmp/deals.json"))
+          deals = records(deals_doc, "deals", "entries")
+          print(f"deals.json top-level: {type(deals_doc).__name__} keys={list(deals_doc)[:10] if isinstance(deals_doc, dict) else '-'} records={len(deals)}")
+
+          def linked_ids(d):
+              ids, how = set(), {}
+              def add(pid, src):
+                  pid = nid(pid)
+                  if pid is None: return
+                  ids.add(pid); how.setdefault(pid, []).append(src)
+              add(d.get("primary_contact_id"), "primary_contact_id")
+              pc = d.get("primary_contact")
+              if isinstance(pc, dict): add(pc.get("id"), "primary_contact")
+              for x in (d.get("people") or []):
+                  add(x.get("id") if isinstance(x, dict) else x, "people")
+              for x in (d.get("person_ids") or []):
+                  add(x, "person_ids")
+              return ids, how
+
+          def is_sell(d):
+              v = (d.get("custom_fields") or {}).get("custom_label_1958")
+              items = v if isinstance(v, list) else [v]
+              out = []
+              for i in items:
+                  if isinstance(i, dict): i = i.get("option_id") or i.get("id") or i.get("value")
+                  out.append(nid(i))
+              return 5011675 in out, v
+
+          def stage(d):
+              s = d.get("deal_stage")
+              if isinstance(s, dict): return f"{s.get('name')} (id {s.get('id')})"
+              return f"{s} (deal_stage_id {d.get('deal_stage_id')})"
+
+          print("=" * 70)
+          print("LINKED DEALS")
+          print("=" * 70)
+          for p in matches:
+              pid = nid(p.get("id"))
+              hits = []
+              for d in deals:
+                  if not isinstance(d, dict): continue
+                  ids, how = linked_ids(d)
+                  if pid in ids: hits.append((d, how[pid]))
+              print(f"person {pid}: {len(hits)} deal(s)")
+              for d, via in hits:
+                  sell, raw = is_sell(d)
+                  print(f"  deal id:            {d.get('id')}")
+                  print(f"  name:               {d.get('name')}")
+                  print(f"  stage:              {stage(d)}")
+                  print(f"  1958 has Sell 5011675: {sell}   (raw: {json.dumps(raw)})")
+                  print(f"  primary_contact_id: {d.get('primary_contact_id')}")
+                  print(f"  linked via:         {via}")
+                  print("  " + "-" * 40)
