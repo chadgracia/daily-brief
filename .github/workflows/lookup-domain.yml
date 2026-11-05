@@ -1,7 +1,10 @@
 name: lookup-domain
 # Read-only diagnosis: finds people whose email(s) contain a substring and the deals they're linked to.
-# Never writes to S3 or Pipeline.
+# Never writes to S3 or Pipeline. Also runs on push to diag/lookup-domain (so it can be
+# triggered without the Actions UI); main pushes never run it.
 on:
+  push:
+    branches: [diag/lookup-domain]
   workflow_dispatch:
     inputs:
       needle:
@@ -48,6 +51,14 @@ jobs:
           people_doc = json.load(open("/tmp/people.json"))
           people = records(people_doc, "people", "entries")
           print(f"people.json top-level: {type(people_doc).__name__} keys={list(people_doc)[:10] if isinstance(people_doc, dict) else '-'} records={len(people)}")
+          from collections import Counter
+          keyc = Counter(k for p in people if isinstance(p, dict) for k in p)
+          print("ALL PERSON KEYS (count of records having it):")
+          for k, c in sorted(keyc.items()): print(f"  {k}: {c}")
+          for k in sorted(keyc):
+              if "type" in k.lower() or "lead" in k.lower() or "contact" in k.lower() or k.lower() in ("kind", "status", "category"):
+                  vals = Counter(json.dumps(p.get(k), sort_keys=True)[:80] for p in people if isinstance(p, dict) and k in p)
+                  print(f"DISTINCT {k} ({len(vals)} values): {vals.most_common(15)}")
 
           def addr(e):
               if isinstance(e, dict): return str(e.get("address") or e.get("email") or "")
@@ -75,6 +86,9 @@ jobs:
               print(f"company_name: {p.get('company_name') or co.get('name')}")
               print(f"email:        {json.dumps(p.get('email'))}")
               print(f"emails:       {json.dumps(p.get('emails'))}")
+              for k in sorted(p):
+                  if "type" in k.lower() or "lead" in k.lower() or "contact" in k.lower():
+                      print(f"{k+':':<14}{json.dumps(p.get(k))}")
               print("-" * 70)
 
           deals_doc = json.load(open("/tmp/deals.json"))
