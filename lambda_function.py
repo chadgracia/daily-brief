@@ -5221,7 +5221,8 @@ def _send_bulk_archive(ses, mailer_label, subject, stats, render_html, csv_rows)
 
 
 SEND_LOCK_KEY = "mailer-send-lock.json"
-SEND_LOCK_STALE_SECS = 30 * 60
+SEND_LOCK_STALE_SECS = 30 * 60  # backstop: any lock this old is free
+SEND_LOCK_DEAD_SECS = 5 * 60  # unreleased lock with no heartbeat for this long is dead
 
 
 def _send_progress_key(kind, subject):
@@ -5230,14 +5231,50 @@ def _send_progress_key(kind, subject):
     return "mailer-send-" + h + ".json"
 
 
-def _send_lock_conflict(started_at):
+def _lock_ts(iso):
     try:
-        shown = datetime.fromisoformat(started_at).astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M")
+        return datetime.fromisoformat(iso).timestamp()
     except Exception:
-        shown = str(started_at)
+        return None
+
+
+def _lock_progress_ts(held):
+    """Last sign of life: heartbeat_at, else started_at (None if neither parses)."""
+    return _lock_ts(held.get("heartbeat_at")) or _lock_ts(held.get("started_at"))
+
+
+def _hhmm(iso, tz):
+    try:
+        return datetime.fromisoformat(iso).astimezone(tz).strftime("%H:%M")
+    except Exception:
+        return "?"
+
+
+def _send_lock_conflict(held):
+    held = held if isinstance(held, dict) else {}
+    started = held.get("started_at")
+    progress = held.get("heartbeat_at") or started
+    msg = ("A send is already running (started " + _hhmm(started, timezone.utc) + " UTC, last progress "
+           + _hhmm(progress, timezone.utc) + " UTC, " + str(held.get("sent_so_far") or 0)
+           + " sent so far). Check your send report email before trying again.")
     return {"statusCode": 409, "headers": {"Content-Type": "application/json"},
-            "body": json.dumps({"ok": False, "error": "A send is already running (started " + shown
-                                + " UTC). Check your send report email before trying again."})}
+            "body": json.dumps({"ok": False, "error": msg})}
+
+
+def _send_lock_free(held, now_ts):
+    """Why an existing lock may be taken ("released"/"dead"/"stale"/"unreadable"), or None if it is live."""
+    if not isinstance(held, dict):
+        return "unreadable"
+    if held.get("released"):
+        return "released"
+    started = _lock_ts(held.get("started_at"))
+    if started is None:
+        return "unreadable"
+    if now_ts - started >= SEND_LOCK_STALE_SECS:
+        return "stale"
+    if now_ts - (_lock_progress_ts(held) or started) >= SEND_LOCK_DEAD_SECS:
+        return "dead"
+    return None
 
 
 def _acquire_send_lock(s3, kind, subject):
@@ -5259,33 +5296,94 @@ def _acquire_send_lock(s3, kind, subject):
         try:
             obj = s3.get_object(Bucket=S3_BUCKET, Key=SEND_LOCK_KEY)
         except Exception:
-            continue  # released between our put and get: try to create it again
+            continue  # vanished between our put and get: try to create it again
         try:
-            held = json.loads(obj["Body"].read()).get("started_at")
-            age = datetime.now(timezone.utc).timestamp() - datetime.fromisoformat(held).timestamp()
+            held = json.loads(obj["Body"].read())
         except Exception:
-            held, age = None, SEND_LOCK_STALE_SECS  # unreadable lock: treat as stale
-        if age < SEND_LOCK_STALE_SECS:
+            held = None
+        why = _send_lock_free(held, datetime.now(timezone.utc).timestamp())
+        if not why:
             return None, _send_lock_conflict(held)
         try:
             kw = {"IfMatch": obj["ETag"]} if obj.get("ETag") else {}
             s3.put_object(Bucket=S3_BUCKET, Key=SEND_LOCK_KEY, Body=body,
                           ContentType="application/json", **kw)
-            print(f"send lock: took over stale lock started {held}")
+            prev = held.get("started_at") if isinstance(held, dict) else None
+            print(f"send lock: took over {why} lock started {prev}")
             return started_at, None
         except Exception:
             return None, _send_lock_conflict(held)  # someone else took it over first
     return None, _send_lock_conflict(None)
 
 
-def _release_send_lock(s3, started_at):
-    """Delete the lock if it is still ours (a stale takeover may have replaced it)."""
+def _rewrite_send_lock(s3, started_at, **fields):
+    """Overwrite the lock with extra fields if it is still ours (same started_at), conditional
+    on the ETag just read. Returns "ok", "not_ours", or raises on any S3 error."""
+    obj = s3.get_object(Bucket=S3_BUCKET, Key=SEND_LOCK_KEY)
+    held = json.loads(obj["Body"].read())
+    if held.get("started_at") != started_at:
+        return "not_ours"
+    doc = {"kind": held.get("kind"), "subject": held.get("subject"), "started_at": started_at,
+           "heartbeat_at": held.get("heartbeat_at") or started_at,
+           "sent_so_far": held.get("sent_so_far") or 0}
+    doc.update(fields)
+    kw = {"IfMatch": obj["ETag"]} if obj.get("ETag") else {}
+    s3.put_object(Bucket=S3_BUCKET, Key=SEND_LOCK_KEY, Body=json.dumps(doc).encode("utf-8"),
+                  ContentType="application/json", **kw)
+    return "ok"
+
+
+def _heartbeat_send_lock(s3, started_at, sent):
+    """Record progress on our lock. Failures are printed only."""
     try:
-        held = json.loads(s3.get_object(Bucket=S3_BUCKET, Key=SEND_LOCK_KEY)["Body"].read())
-        if held.get("started_at") == started_at:
-            s3.delete_object(Bucket=S3_BUCKET, Key=SEND_LOCK_KEY)
+        if _rewrite_send_lock(s3, started_at, heartbeat_at=datetime.now(timezone.utc).isoformat(),
+                              sent_so_far=sent) == "not_ours":
+            print("send lock heartbeat skipped: lock no longer ours")
+    except Exception as e:
+        print(f"send lock heartbeat failed: {e}")
+
+
+def _release_send_lock(s3, started_at, sent=None):
+    """Mark the lock released (overwrite, never delete) if it is still ours.
+    Returns True on success (or when it is no longer ours), False on any failure."""
+    try:
+        now = datetime.now(timezone.utc).isoformat()
+        fields = {"released": True, "released_at": now}
+        if sent is not None:
+            fields.update(heartbeat_at=now, sent_so_far=sent)
+        if _rewrite_send_lock(s3, started_at, **fields) == "not_ours":
+            print("send lock release: lock no longer ours, left as is")
+        return True
     except Exception as e:
         print(f"send lock release failed: {e}")
+        return False
+
+
+SEND_LOCK_WARNING = "WARNING: send lock was NOT released — the next send will be refused for up to 5 minutes."
+
+
+def _send_lock_status_html(s3):
+    """One grey line under the composer send row describing the last bulk send (read-only)."""
+    try:
+        held = json.loads(s3.get_object(Bucket=S3_BUCKET, Key=SEND_LOCK_KEY)["Body"].read())
+        started = held["started_at"]
+        if _lock_ts(started) is None:
+            raise ValueError("bad started_at")
+        tz, _label = _kyiv_tz()
+        progress = held.get("heartbeat_at") or started
+        if held.get("released"):
+            state = "Finished"
+        else:
+            age = datetime.now(timezone.utc).timestamp() - (_lock_progress_ts(held) or _lock_ts(started))
+            state = ("Running" if age < SEND_LOCK_DEAD_SECS
+                     else "Stopped — no progress for " + str(int(age // 60)) + " min")
+        text = ("Last send: " + str(held.get("subject") or "") + " · started " + _hhmm(started, tz)
+                + " Kyiv · last progress " + _hhmm(progress, tz) + " Kyiv · "
+                + str(held.get("sent_so_far") or 0) + " sent · " + state)
+    except Exception:
+        text = "No send recorded yet."
+    return ('<p id="send-lock-status" style="color:#6b7280;font-size:12px;margin:-4px 0 12px 0;">'
+            + escape(text) + "</p>")
 
 
 def _handle_news_send(body):
@@ -5307,6 +5405,7 @@ def _handle_news_send(body):
     lock_at, lock_resp = _acquire_send_lock(s3, "news", subject)
     if lock_resp:
         return lock_resp
+    lock_released = None
     try:
         rows, missing = _fetch_mailer_rows(search_id)
         all_rows = list(rows)
@@ -5339,6 +5438,7 @@ def _handle_news_send(body):
                 print(f"news send progress write failed: {e}")
             _merge_send_times(s3, new_times)
             new_times.clear()
+            _heartbeat_send_lock(s3, lock_at, sent)
 
         for row in rows:
             first, email, pid = row[:3]
@@ -5381,7 +5481,9 @@ def _handle_news_send(body):
                  ("Limit", "none")],
                 lambda: _render_news_email("Chad", MAILER_PREVIEW_PID, content),
                 lambda: _archive_csv_rows(all_rows, blocked_rows, excluded_rows, [], outcome))
-        report = ("News mailer send complete.\n\nSubject: " + subject
+        lock_released = _release_send_lock(s3, lock_at, sent)
+        report = (("" if lock_released else SEND_LOCK_WARNING + "\n\n")
+                  + "News mailer send complete.\n\nSubject: " + subject
                   + "\nSaved search: " + str(search_id)
                   + "\nSent: " + str(sent)
                   + "\nSkipped (already sent today / no person id): " + str(skipped)
@@ -5396,7 +5498,8 @@ def _handle_news_send(body):
             ses.send_email(
                 Source=FROM_ADDR,
                 Destination={"ToAddresses": TO_ADDRS},
-                Message={"Subject": {"Data": "News mailer sent: " + str(sent) + " recipients", "Charset": "UTF-8"},
+                Message={"Subject": {"Data": "News mailer sent: " + str(sent) + " recipients"
+                                     + ("" if lock_released else " (lock not released)"), "Charset": "UTF-8"},
                          "Body": {"Text": {"Data": report, "Charset": "UTF-8"}}},
             )
         except Exception as e:
@@ -5405,7 +5508,8 @@ def _handle_news_send(body):
                 "body": json.dumps({"ok": True, "sent": sent, "failed": failed, "skipped": skipped,
                                     "excluded_referral_client": excluded, "blocked": blocked})}
     finally:
-        _release_send_lock(s3, lock_at)
+        if lock_released is None:  # safety net: an exception skipped the normal release
+            _release_send_lock(s3, lock_at)
 
 
 NEWS_COMPOSER_SCRIPT = """
@@ -5520,6 +5624,7 @@ def _render_news_composer(pid):
         "border:1px solid #b91c1c;background:#b91c1c;color:#ffffff;font-size:14px;font-weight:700;"
         'border-radius:6px;cursor:pointer;font-family:inherit;">Send to list</button>'
         "</div>"
+        + _send_lock_status_html(s3) +
         '<p style="color:#6b7280;font-size:13px;margin:0 0 8px 0;">Preview as recipient</p>'
         '<div style="background:#ffffff;border:1px solid #e5e7eb;border-radius:6px;">'
         + email_html + "</div></div>"
@@ -5604,6 +5709,7 @@ def _handle_mailer_send(body):
     lock_at, lock_resp = _acquire_send_lock(s3, "weekly", subject)
     if lock_resp:
         return lock_resp
+    lock_released = None
     try:
         rows, missing = _fetch_mailer_rows(search_id)
         all_rows = list(rows)
@@ -5641,6 +5747,7 @@ def _handle_mailer_send(body):
                 print(f"mailer send progress write failed: {e}")
             _merge_send_times(s3, new_times)
             new_times.clear()
+            _heartbeat_send_lock(s3, lock_at, sent)
 
         for row in rows:
             first, email, pid = row[:3]
@@ -5683,7 +5790,9 @@ def _handle_mailer_send(body):
                  ("Limit", lim_raw if lim_raw.isdigit() and int(lim_raw) > 0 else "none")],
                 lambda: _render_mailer_email("Chad", MAILER_PREVIEW_PID, sells, buys, counts, True),
                 lambda: _archive_csv_rows(all_rows, blocked_rows, excluded_rows, limited_rows, outcome))
-        report = ("Weekly mailer send complete.\n\nSubject: " + subject
+        lock_released = _release_send_lock(s3, lock_at, sent)
+        report = (("" if lock_released else SEND_LOCK_WARNING + "\n\n")
+                  + "Weekly mailer send complete.\n\nSubject: " + subject
                   + "\nSent: " + str(sent)
                   + "\nSkipped (already sent today / no person id): " + str(skipped)
                   + "\nFailed: " + str(failed)
@@ -5697,7 +5806,8 @@ def _handle_mailer_send(body):
             ses.send_email(
                 Source=FROM_ADDR,
                 Destination={"ToAddresses": TO_ADDRS},
-                Message={"Subject": {"Data": "Weekly mailer sent: " + str(sent) + " recipients", "Charset": "UTF-8"},
+                Message={"Subject": {"Data": "Weekly mailer sent: " + str(sent) + " recipients"
+                                     + ("" if lock_released else " (lock not released)"), "Charset": "UTF-8"},
                          "Body": {"Text": {"Data": report, "Charset": "UTF-8"}}},
             )
         except Exception as e:
@@ -5706,7 +5816,8 @@ def _handle_mailer_send(body):
                 "body": json.dumps({"ok": True, "sent": sent, "failed": failed, "skipped": skipped,
                                     "excluded_referral_client": excluded, "blocked": blocked})}
     finally:
-        _release_send_lock(s3, lock_at)
+        if lock_released is None:  # safety net: an exception skipped the normal release
+            _release_send_lock(s3, lock_at)
 
 
 def _handle_mailer_test(body):
@@ -5778,6 +5889,7 @@ def _render_mailer_composer(pid):
         "border:1px solid #b91c1c;background:#b91c1c;color:#ffffff;font-size:14px;font-weight:700;"
         'border-radius:6px;cursor:pointer;font-family:inherit;">Send to all recipients</button>'
         "</div>"
+        + _send_lock_status_html(s3) +
         '<div style="display:flex;gap:24px;flex-wrap:wrap;background:#ffffff;border:1px solid #e5e7eb;'
         'border-radius:6px;padding:16px;margin-bottom:24px;">'
         + _mailer_composer_column("Sell orders (" + str(len(sells_all)) + ")", sells_all, selected,

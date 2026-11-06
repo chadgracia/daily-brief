@@ -87,7 +87,8 @@ class Sends(unittest.TestCase):
         self.assertEqual(sorted(c.args[1] for c in render.call_args_list
                                 if c.args[1] != lf.MAILER_PREVIEW_PID), [5, 6, 8])
         self.assertEqual(sorted(times), ["5", "6", "8"])
-        progress = [json.loads(p["Body"]) for p in s3.puts if "-send-" in p["Key"]]
+        progress = [json.loads(p["Body"]) for p in s3.puts
+                    if "-send-" in p["Key"] and p["Key"] != lf.SEND_LOCK_KEY]
         self.assertEqual(progress[-1]["sent"], sorted(SENT))
         # report to Chad (cgracia@rainmakersecurities.com) still goes out
         report = ses.sent[-1]
