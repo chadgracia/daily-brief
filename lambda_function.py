@@ -6,6 +6,8 @@ import json
 import os
 import re
 import secrets
+import threading
+import time
 import uuid
 import urllib.error
 import urllib.request
@@ -3529,8 +3531,6 @@ def _build_brief_html(interactive):
 
 
 MAILER_SEARCH_ID = 19530439
-PIPELINE_API_KEY = "ZRMHN4uJotjRDcZa8hKi"
-PIPELINE_APP_KEY = "571978be28bd3b5b515a2cc5db96b674"
 MAILER_MAX_PAGES = 25
 MAILER_BLOCK_DOMAINS = {"rainmakersecurities.com", "rainmakerapac.com"}
 MAILER_BLOCK_EMAILS = {
@@ -3578,15 +3578,33 @@ def _split_blocked(rows):
     return keep, blocked
 
 
+_MAILER_JWT_CACHE = {"jwt": None, "ts": 0.0}
+_MAILER_JWT_LOCK = threading.Lock()
+_MAILER_JWT_TTL = 600  # seconds; per warm container
+
+
+def _mailer_jwt():
+    """Pipeline JWT from get_jwt(), cached per container for 10 minutes."""
+    with _MAILER_JWT_LOCK:
+        now = time.time()
+        if (_MAILER_JWT_CACHE["jwt"]
+                and now - _MAILER_JWT_CACHE["ts"] < _MAILER_JWT_TTL):
+            return _MAILER_JWT_CACHE["jwt"]
+        jwt = get_jwt()
+        _MAILER_JWT_CACHE.update(jwt=jwt, ts=now)
+        return jwt
+
+
 def _fetch_mailer_page(page, search_id=MAILER_SEARCH_ID):
     url = (
         "https://api.pipelinecrm.com/api/v3/searches/"
         + str(search_id)
         + "/perform.json?per_page=200&page=" + str(page)
-        + "&api_key=" + PIPELINE_API_KEY
-        + "&app_key=" + PIPELINE_APP_KEY
     )
-    req = urllib.request.Request(url, headers={"Accept": "application/json"})
+    req = urllib.request.Request(url, headers={
+        "Accept": "application/json",
+        "Authorization": f"Bearer {_mailer_jwt()}",
+    })
     with urllib.request.urlopen(req, timeout=20) as resp:
         return json.loads(resp.read().decode())
 
