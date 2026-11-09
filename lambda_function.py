@@ -368,9 +368,97 @@ def _deal_type(deal):
     return str(dt).strip().lower() if dt else ""
 
 
+# Sell-deal roles (same rule as Blockbook/syndicate-dash): the primary
+# contact is the seller; people at the primary's firm are sellers too; any
+# other linked person is the buyer (1:1 match). Rainmaker/Gracia staff get
+# no role. _build_brief_html points _ROLE_PEOPLE_BY_ID at its people_by_id
+# so the primary contact resolves to the full people.json record.
+ROLE_STAFF_DOMAINS = frozenset({"rainmakersecurities.com", "graciagroup.com"})
+ROLE_FREE_MAIL_DOMAINS = frozenset({
+    "gmail.com", "yahoo.com", "hotmail.com", "outlook.com", "icloud.com", "me.com",
+    "aol.com", "proton.me", "protonmail.com", "live.com", "msn.com",
+})
+_ROLE_PEOPLE_BY_ID = {}
+
+
+def _role_emails(p):
+    """Every lowercased email on a person record/snapshot."""
+    if not isinstance(p, dict):
+        return []
+    out = []
+    raw = [p.get("email")]
+    emails = p.get("emails") or []
+    if isinstance(emails, list):
+        raw += [e.get("address") if isinstance(e, dict) else e for e in emails]
+    for e in raw:
+        if isinstance(e, str) and "@" in e:
+            e = e.strip().lower()
+            if e not in out:
+                out.append(e)
+    return out
+
+
+def _role_domains(p):
+    return {e.rsplit("@", 1)[1] for e in _role_emails(p)}
+
+
+def _deal_primary_id(deal):
+    pid = _normalize_id(deal.get("primary_contact_id"))
+    if pid is None:
+        pc = deal.get("primary_contact") or {}
+        if isinstance(pc, dict):
+            pid = _normalize_id(pc.get("id"))
+    return pid
+
+
+def _deal_primary_record(deal, pid):
+    """The primary contact as a merged dict: people.json record (when
+    loaded), then the deal's people entry, then the primary_contact
+    snapshot -- earlier sources win per field."""
+    rec = {}
+    sources = [(_ROLE_PEOPLE_BY_ID or {}).get(pid)]
+    for p in deal.get("people") or []:
+        if isinstance(p, dict) and _normalize_id(p.get("id")) == pid:
+            sources.append(p)
+    pc = deal.get("primary_contact")
+    if isinstance(pc, dict) and _normalize_id(pc.get("id")) == pid:
+        sources.append(pc)
+    for src in sources:
+        if isinstance(src, dict):
+            for k, v in src.items():
+                if v not in (None, "", []) and k not in rec:
+                    rec[k] = v
+    return rec
+
+
+def _sell_deal_role(deal, person):
+    """" (s)" / " (b)" / "" for a person on a Sell deal, or None when the
+    deal has no primary contact (caller keeps the legacy behavior)."""
+    if _role_domains(person) & ROLE_STAFF_DOMAINS:
+        return ""
+    primary_id = _deal_primary_id(deal)
+    if primary_id is None:
+        return None
+    if _normalize_id((person or {}).get("id")) == primary_id:
+        return " (s)"
+    primary = _deal_primary_record(deal, primary_id)
+    p_cid = _normalize_id((person or {}).get("company_id"))
+    pr_cid = _normalize_id(primary.get("company_id"))
+    if p_cid is not None and pr_cid is not None:
+        if p_cid == pr_cid:
+            return " (s)"
+    elif (_role_domains(person) - ROLE_FREE_MAIL_DOMAINS) & (_role_domains(primary) - ROLE_FREE_MAIL_DOMAINS):
+        return " (s)"
+    return " (b)"
+
+
 def _buyer_seller_annotation(deal, person):
     if deal is None:
         return ""
+    if _deal_side(deal) == "SELL" or _deal_type(deal) == "sell":
+        role = _sell_deal_role(deal, person)
+        if role is not None:
+            return role
     cid = _normalize_id(_company_id(deal))
     if person and cid is not None:
         if cid in _cf_option_ids(person, CF_PERSON_BUY_INTERESTS):
@@ -3472,6 +3560,8 @@ def _build_brief_html(interactive):
         nid = _normalize_id(p.get("id"))
         if nid is not None:
             people_by_id[nid] = p
+    global _ROLE_PEOPLE_BY_ID
+    _ROLE_PEOPLE_BY_ID = people_by_id
     companies_by_id = {}
     for c in companies:
         cid = _normalize_id(c.get("id"))
