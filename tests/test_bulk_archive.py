@@ -145,7 +145,7 @@ class Archive(unittest.TestCase):
             res, s3, ses, _ = self._run(fn, {"subject": "S"}, ses=ses)
             self.assertEqual(res, ok_res)
             def _bodies(puts):
-                return [p["Body"] for p in puts if p["Key"] != lf.SEND_LOCK_KEY]
+                return [p["Body"] for p in puts if p["Key"] not in (lf.SEND_LOCK_KEY, lf.WEEKLY_NOTE_KEY)]
             self.assertEqual(_bodies(s3.puts), _bodies(ok_s3.puts))
             report = ses.sent[-1]
             self.assertEqual(report["Destination"]["ToAddresses"], lf.TO_ADDRS)

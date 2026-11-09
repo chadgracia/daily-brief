@@ -4105,7 +4105,33 @@ def _mailer_buy_table(title, companies, person_id, buyer_counts=None, logos=None
     return "".join(out)
 
 
-def _render_mailer_email(first_name, person_id, sells, buys, buyer_counts=None, logos=None):
+WEEKLY_NOTE_KEY = "weekly-note.json"
+
+
+def _load_weekly_note(s3):
+    try:
+        return str(_fetch_json(s3, WEEKLY_NOTE_KEY).get("note") or "")
+    except Exception:
+        return ""
+
+
+def _save_weekly_note(s3, note):
+    """Best effort: a failed write is logged and never blocks a send (the note in hand is still used)."""
+    try:
+        s3.put_object(Bucket=S3_BUCKET, Key=WEEKLY_NOTE_KEY,
+                      Body=json.dumps({"note": note, "saved_at": datetime.now(timezone.utc).isoformat()}).encode("utf-8"),
+                      ContentType="application/json")
+    except Exception as e:
+        print(f"weekly note save failed: {e}")
+
+
+def _weekly_note_html(note):
+    paras = [p.strip() for p in re.split(r"\n[ \t]*\n", (note or "").replace("\r\n", "\n").replace("\r", "\n"))]
+    return "".join('<p style="font-size:15px;margin:0 0 16px 0;">'
+                   + escape(p).replace("\n", "<br>") + "</p>" for p in paras if p)
+
+
+def _render_mailer_email(first_name, person_id, sells, buys, buyer_counts=None, logos=None, note=""):
     greet = "Hello " + escape(first_name) + "," if first_name else "Hello,"
     return (
         '<div style="font-family:-apple-system,BlinkMacSystemFont,\'Segoe UI\',Roboto,'
@@ -4116,28 +4142,15 @@ def _render_mailer_email(first_name, person_id, sells, buys, buyer_counts=None, 
         '<h1 style="font-size:18px;margin:0 0 18px 0;color:#111827;">Pre-IPO Secondary '
         "Opportunities from the Gracia Group</h1>"
         '<table role="presentation" width="100%" style="border-collapse:collapse;margin:0 0 20px 0;"><tr>'
-        '<td valign="top" style="padding-right:18px;">'
+        '<td valign="top">'
         '<p style="font-size:15px;margin:0 0 16px 0;">' + greet + "</p>"
+        + _weekly_note_html(note) +
         '<p style="font-size:15px;margin:0 0 16px 0;">See this week&rsquo;s trades for '
         "accredited investors below. If you are looking for something that isn&rsquo;t listed, "
         "just let me know.</p>"
         '<p style="font-size:15px;margin:0;">Live orders this week. '
         "Click any company to see full details.</p>"
         "</td>"
-        '<td valign="top" width="280">'
-        '<div style="border:1px solid #cdc9c0;border-left:4px solid #3d5a73;background:#f7f6f3;'
-        'border-radius:6px;padding:14px 18px;">'
-        '<p style="font-size:11px;letter-spacing:.08em;text-transform:uppercase;'
-        'color:#3d5a73;font-weight:700;margin:0 0 6px 0;">New &mdash; Daily Highlight</p>'
-        '<p style="font-size:13px;margin:0 0 10px 0;">One trade that stands out, in your inbox '
-        "each day: a recent news item, a distressed seller, limited supply &mdash; or a deal that "
-        "for various reasons is not published in our main books. Be among the first to see these "
-        "opportunities. Stop any time.</p>"
-        '<a href="https://bddpwqsqvt32ritxpjqlqwhaim0ykbol.lambda-url.us-east-1.on.aws/'
-        '?view=daily&amp;pid=' + str(person_id) + "&amp;t=" + _mailer_token(person_id, "daily")
-        + '" style="display:inline-block;background:#3d5a73;color:#ffffff;font-size:13px;'
-        'font-weight:600;padding:8px 14px;border-radius:6px;text-decoration:none;">'
-        "Get the Daily Highlight</a></div></td>"
         "</tr></table>"
         + _mailer_table("Sell orders — current availability", sells, person_id, None, logos)
         + _mailer_buy_table("Buy orders — active demand", buys, person_id, buyer_counts, logos)
@@ -4981,7 +4994,7 @@ MAILER_COMPOSER_SCRIPT = """
     fetch(window.location.href, {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({action: 'mailer_test', subject: (document.getElementById('send-subject').value || '').trim()})
+      body: JSON.stringify({action: 'mailer_test', subject: (document.getElementById('send-subject').value || '').trim(), note: (document.getElementById('send-note') || {}).value || ''})
     }).then(function (r) { return r.json(); }).then(function (j) {
       tst.textContent = j.ok ? 'Test sent ✓' : 'Failed — try again';
       tst.disabled = false;
@@ -5001,7 +5014,7 @@ MAILER_COMPOSER_SCRIPT = """
     fetch(window.location.href, {
       method: 'POST',
       headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({action: 'mailer_send', subject: subj, search_id: sid, limit: lim})
+      body: JSON.stringify({action: 'mailer_send', subject: subj, search_id: sid, limit: lim, note: (document.getElementById('send-note') || {}).value || ''})
     }).then(function (r) {
       return r.json().then(function (j) { j._status = r.status; return j; });
     }).then(function (j) {
@@ -5819,6 +5832,8 @@ def _handle_mailer_send(body):
         return lock_resp
     lock_released = None
     try:
+        note = str(body.get("note") or "")
+        _save_weekly_note(s3, note)
         rows, missing = _fetch_mailer_rows(search_id)
         all_rows = list(rows)
         rows, blocked_rows = _split_blocked(rows)
@@ -5870,7 +5885,7 @@ def _handle_mailer_send(body):
                 outcome[key] = ("skipped_no_person_id", "")
                 continue
             try:
-                html = _render_mailer_email(first, npid, sells, buys, counts, True)
+                html = _render_mailer_email(first, npid, sells, buys, counts, True, note)
                 ses.send_email(
                     Source=MAILER_FROM,
                     Destination={"ToAddresses": [email]},
@@ -5896,7 +5911,7 @@ def _handle_mailer_send(body):
                 [("Sent", sent), ("Failed", failed), ("Blocked", blocked),
                  ("Excluded (Referral – Client)", excluded), ("Saved search", search_id), ("Dedupe file", progress_key),
                  ("Limit", lim_raw if lim_raw.isdigit() and int(lim_raw) > 0 else "none")],
-                lambda: _render_mailer_email("Chad", MAILER_PREVIEW_PID, sells, buys, counts, True),
+                lambda: _render_mailer_email("Chad", MAILER_PREVIEW_PID, sells, buys, counts, True, note),
                 lambda: _archive_csv_rows(all_rows, blocked_rows, excluded_rows, limited_rows, outcome))
         lock_released = _release_send_lock(s3, lock_at, sent)
         report = (("" if lock_released else SEND_LOCK_WARNING + "\n\n")
@@ -5939,7 +5954,9 @@ def _handle_mailer_test(body):
     sells = [d for d in sells_all if str(d.get("id")) in selected]
     selected_lc = {str(x).lower() for x in selected}
     buys = [(nm, n) for nm, n in _mailer_buy_companies(s3, counts) if ("c:" + nm).lower() in selected_lc]
-    email_html = _render_mailer_email("Chad", pid, sells, buys, counts, True)
+    note = str(body.get("note") or "")
+    _save_weekly_note(s3, note)
+    email_html = _render_mailer_email("Chad", pid, sells, buys, counts, True, note)
     boto3.client("ses", region_name=SES_REGION).send_email(
         Source=MAILER_FROM,
         Destination={"ToAddresses": ["cgracia@rainmakersecurities.com"]},
@@ -5963,7 +5980,8 @@ def _render_mailer_composer(pid):
     sells = [d for d in sells_all if str(d.get("id")) in selected]
     selected_lc = {str(x).lower() for x in selected}
     buys = [(nm, n) for nm, n in buy_cos if ("c:" + nm).lower() in selected_lc]
-    email_html = _render_mailer_email("Chad", pid, sells, buys, counts, True)
+    note = _load_weekly_note(s3)
+    email_html = _render_mailer_email("Chad", pid, sells, buys, counts, True, note)
 
     html = (
         '<!doctype html><html lang="en"><head><meta charset="utf-8">'
@@ -5998,6 +6016,13 @@ def _render_mailer_composer(pid):
         'border-radius:6px;cursor:pointer;font-family:inherit;">Send to all recipients</button>'
         "</div>"
         + _send_lock_status_html(s3) +
+        '<div style="margin:0 0 12px 0;">'
+        '<label for="send-note" style="display:block;font-size:13px;color:#374151;margin:0 0 4px 0;">'
+        "Note above the deal list (optional)</label>"
+        '<textarea id="send-note" rows="4" style="padding:8px 10px;border:1px solid #d1d5db;'
+        'border-radius:6px;font-size:14px;font-family:inherit;width:700px;max-width:100%;'
+        'box-sizing:border-box;">' + escape(note) + "</textarea>"
+        "</div>"
         '<div style="display:flex;gap:24px;flex-wrap:wrap;background:#ffffff;border:1px solid #e5e7eb;'
         'border-radius:6px;padding:16px;margin-bottom:24px;">'
         + _mailer_composer_column("Sell orders (" + str(len(sells_all)) + ")", sells_all, selected,
