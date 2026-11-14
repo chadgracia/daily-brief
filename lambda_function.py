@@ -2891,6 +2891,10 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
                 'View interactive web version &rarr;</a></p>'
             )
 
+    # ── Deal access queue (website only; hidden when empty) ──────────────
+    if interactive:
+        out.append(_render_access_queue_section())
+
     # ── To-dos (website only) ─────────────────────────────────────────────
     if interactive:
         out.append(_render_todos_box())
@@ -6969,6 +6973,245 @@ def _handle_pd_event(event, method, meta):
     return {"statusCode": 204, "body": ""}
 
 
+# ── Deal access queue (deal gate) ─────────────────────────────────────────────
+# trades writes s3://full-pipeline-cache/deal-gate/queue.json (self-confirmations and
+# first signed-in gated visits). Chad approves or declines here (online page only):
+#   Approve: Pipeline PUT Investor Level = Substantive FIRST; only on success add the
+#            person to deal-gate/approved.json (trades / CRMDealDetails clear them for
+#            3 h, until people-slim is rebuilt) and drop the queue item.
+#   Decline: Investor Level = Hold when the person exists, drop the item, record the
+#            email under "declined" (trades only re-queues it after a self-confirm).
+# No email is ever sent to the person. Buttons are POST forms behind the page key.
+DAQ_QUEUE_KEY = "deal-gate/queue.json"
+DAQ_APPROVED_KEY = "deal-gate/approved.json"
+DAQ_APPROVED_KEEP = 7 * 86400          # entries older than this are pruned on write
+DAQ_SLIM_KEY = "syndicate-dash/people-slim.json"
+DAQ_SLIM_TTL = 15 * 60
+DAQ_IL_FIELD = "custom_label_3923758"
+DAQ_IL_SUBSTANTIVE = 7162165
+DAQ_IL_HOLD = 7161646
+DAQ_IL_LABELS = {"6950561": "Unknown", "7161646": "Hold: Screen for Substantive",
+                 "6950562": "Non-Accredited", "7162165": "Substantive",
+                 "7223459": "Self-Confirmed Accredited", "6950563": "Accredited Investor",
+                 "7209227": "Qualified Client", "6950564": "Qualified Purchaser"}
+_daq_slim_cache = {"etag": None, "checked_at": 0.0, "by_email": None, "by_id": None}
+
+
+def _daq_option_ids(value):
+    out = set()
+    for item in (value if isinstance(value, list) else [value]):
+        if isinstance(item, dict):
+            item = item.get("option_id") or item.get("id") or item.get("value")
+        if item not in (None, ""):
+            out.add(str(item).split(".")[0])
+    return out
+
+
+def _daq_emails(p):
+    out = set()
+    for k, v in p.items():
+        if not isinstance(k, str) or not k.lower().startswith("email"):
+            continue
+        for item in (v if isinstance(v, list) else [v]):
+            if isinstance(item, dict):
+                item = item.get("email") or item.get("address") or item.get("value")
+            if isinstance(item, str) and "@" in item:
+                out.add(item.strip().lower())
+    return out
+
+
+def _daq_people(s3=None):
+    """(by_email {email: [pid]}, by_id {pid: (name, company, level ids)}) from
+    people-slim.json (never people.json), cached by ETag. None on failure."""
+    now = time.time()
+    c = _daq_slim_cache
+    if c["by_id"] is not None and now - c["checked_at"] < DAQ_SLIM_TTL:
+        return c["by_email"], c["by_id"]
+    try:
+        s3 = s3 or boto3.client("s3", region_name=S3_REGION)
+        etag = s3.head_object(Bucket=S3_BUCKET, Key=DAQ_SLIM_KEY).get("ETag")
+        if c["by_id"] is not None and etag and etag == c["etag"]:
+            c["checked_at"] = now
+            return c["by_email"], c["by_id"]
+        data = json.loads(s3.get_object(Bucket=S3_BUCKET, Key=DAQ_SLIM_KEY)["Body"].read())
+        by_email, by_id = {}, {}
+        for p in (data.get("people") or []) if isinstance(data, dict) else []:
+            if not isinstance(p, dict) or p.get("id") is None:
+                continue
+            pid = str(p["id"])
+            cf = p.get("custom_fields") if isinstance(p.get("custom_fields"), dict) else {}
+            name = p.get("full_name") or p.get("name") or " ".join(
+                x for x in ((p.get("first_name") or "").strip(), (p.get("last_name") or "").strip()) if x)
+            co = p.get("company") if isinstance(p.get("company"), dict) else {}
+            company = co.get("name") or p.get("company_name") or ""
+            by_id[pid] = (str(name or "").strip(), str(company or "").strip(),
+                          frozenset(_daq_option_ids(cf.get(DAQ_IL_FIELD))))
+            for em in _daq_emails(p):
+                by_email.setdefault(em, []).append(pid)
+        c.update({"etag": etag, "checked_at": now, "by_email": by_email, "by_id": by_id})
+        return by_email, by_id
+    except Exception as e:
+        print(f"access-queue: people-slim unreadable ({type(e).__name__})")
+        return None
+
+
+def _daq_read(s3, key):
+    try:
+        data = json.loads(s3.get_object(Bucket=S3_BUCKET, Key=key)["Body"].read())
+        return data if isinstance(data, dict) else {}
+    except Exception as e:
+        if "NoSuchKey" in type(e).__name__ or "NoSuchKey" in str(e):
+            return {}
+        raise
+
+
+def _daq_write(s3, key, data):
+    s3.put_object(Bucket=S3_BUCKET, Key=key, ContentType="application/json",
+                  Body=json.dumps(data).encode("utf-8"))
+
+
+def _daq_level_label(ids):
+    ids = sorted(ids or ())
+    return " / ".join(DAQ_IL_LABELS.get(i, f"Other ({i})") for i in ids) if ids else "Blank"
+
+
+def _daq_resolve(email, item, people):
+    """(pid or None, name, company, level label) for a queue item, by email."""
+    if not people:
+        return None, "", "", "unknown (people index unreadable)"
+    by_email, by_id = people
+    pids = sorted(by_email.get(email) or [])
+    if not pids:
+        return None, "", "", "not in CRM yet"
+    want = str((item or {}).get("person_id") or "")
+    pid = want if want in pids else pids[0]
+    name, company, levels = by_id.get(pid) or ("", "", frozenset())
+    return pid, name, company, _daq_level_label(levels)
+
+
+def _render_access_queue_section(s3=None):
+    """'Deal access queue (N)' for the online brief; '' when empty or unreadable."""
+    try:
+        s3 = s3 or boto3.client("s3", region_name=S3_REGION)
+        items = _daq_read(s3, DAQ_QUEUE_KEY).get("items") or {}
+    except Exception as e:
+        print(f"access-queue: queue unreadable ({type(e).__name__})")
+        return ""
+    if not isinstance(items, dict) or not items:
+        return ""
+    people = _daq_people(s3)
+    key = os.environ.get("BRIEF_PAGE_KEY", "")
+    action = escape("?view=access-queue&key=" + quote(key, safe=""), quote=True)
+
+    def btn(email, act, label, color):
+        return (f'<form method="post" action="{action}" style="display:inline;margin:0 4px 0 0">'
+                f'<input type="hidden" name="act" value="{act}">'
+                f'<input type="hidden" name="email" value="{escape(email, quote=True)}">'
+                f'<button type="submit" style="padding:4px 10px;font-size:13px;border:1px solid {color};'
+                f'background:#fff;color:{color};border-radius:4px;cursor:pointer">{label}</button></form>')
+
+    rows = []
+    for email in sorted(items, key=lambda e: str((items[e] or {}).get("last_at") or ""), reverse=True):
+        it = items[email] if isinstance(items[email], dict) else {}
+        pid, name, company, level = _daq_resolve(email, it, people)
+        when = str(it.get("last_at") or it.get("first_at") or "")[:10]
+        who = escape(name or "(no name)")
+        if pid:
+            who = (f'<a href="https://app.pipelinecrm.com/people/{escape(pid)}" target="_blank" '
+                   f'rel="noopener" style="{LINK_STYLE_500}">{who}</a>')
+        buttons = (btn(email, "approve", "Approve", "#15803d") if pid else "") + btn(email, "decline", "Decline", "#b91c1c")
+        rows.append(
+            f'<tr><td style="{TD_STYLE}">{who}</td><td style="{TD_STYLE}">{escape(company)}</td>'
+            f'<td style="{TD_STYLE}">{escape(email)}</td><td style="{TD_STYLE}">{escape(level)}</td>'
+            f'<td style="{TD_STYLE}">{escape(str(it.get("reason") or ""))}</td>'
+            f'<td style="{TD_STYLE}">{escape(when)}</td><td style="{TD_STYLE}">{buttons}</td></tr>')
+    head = "".join(f'<th style="text-align:left;padding:6px 8px;font-size:12px;color:#6b7280">{h}</th>'
+                   for h in ("Name", "Company", "Email", "Investor Level", "Reason", "Date", ""))
+    return (f'<div id="access-queue" data-owner="chad" style="border:1px solid #e5e7eb;border-radius:8px;'
+            f'padding:16px 18px;margin:0 0 16px 0;background:#ffffff">'
+            f'<h2 style="{H2_STYLE}">Deal access queue ({len(rows)})</h2>'
+            '<p style="margin:0 0 8px;font-size:13px;color:#6b7280">Approve sets Investor Level to '
+            'Substantive and unlocks offer terms within a minute. Decline sets Hold. Nobody is emailed.</p>'
+            f'<table style="width:100%;border-collapse:collapse"><tr>{head}</tr>{"".join(rows)}</table></div>')
+
+
+def _daq_form(event):
+    raw = event.get("body") or ""
+    if event.get("isBase64Encoded"):
+        try:
+            raw = base64.b64decode(raw).decode("utf-8", "replace")
+        except Exception:
+            raw = ""
+    from urllib.parse import parse_qs
+    return {k: v[0] for k, v in parse_qs(raw, keep_blank_values=True).items()}
+
+
+def _daq_page(msg):
+    key = os.environ.get("BRIEF_PAGE_KEY", "")
+    back = escape("?key=" + quote(key, safe="") + "#access-queue", quote=True)
+    return {"statusCode": 200, "headers": {"Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store"},
+            "body": (f'<html><body style="font-family:Arial,sans-serif;max-width:560px;margin:40px auto">'
+                     f'<p>{escape(msg)}</p><p><a href="{back}">Back to the brief</a></p></body></html>')}
+
+
+def _handle_access_queue_post(event, s3=None, jwt=None, now=None):
+    """POST ?view=access-queue (page key already checked): approve / decline one item."""
+    f = _daq_form(event)
+    act = (f.get("act") or "").strip()
+    email = (f.get("email") or "").strip().lower()
+    if act not in ("approve", "decline") or not email:
+        return _daq_page("Nothing changed: unknown request.")
+    now = time.time() if now is None else now
+    iso = datetime.fromtimestamp(now, timezone.utc).isoformat(timespec="seconds")
+    try:
+        s3 = s3 or boto3.client("s3", region_name=S3_REGION)
+        queue = _daq_read(s3, DAQ_QUEUE_KEY)
+    except Exception as e:
+        print(f"access-queue: queue unreadable ({type(e).__name__})")
+        return _daq_page("Nothing changed: the queue could not be read.")
+    items = queue.get("items") if isinstance(queue.get("items"), dict) else {}
+    declined = queue.get("declined") if isinstance(queue.get("declined"), dict) else {}
+    if email not in items:
+        return _daq_page("Nothing changed: that entry is no longer in the queue.")
+    pid, _name, _co, _lvl = _daq_resolve(email, items[email], _daq_people(s3))
+    if act == "approve" and not pid:
+        return _daq_page("Not approved: this person is not in the CRM yet.")
+    if pid:
+        level = DAQ_IL_SUBSTANTIVE if act == "approve" else DAQ_IL_HOLD
+        try:
+            res = call_pipeline_api("PUT", f"/people/{pid}.json",
+                                    {"person": {"custom_fields": {DAQ_IL_FIELD: level}}}, jwt=jwt or get_jwt())
+        except Exception as e:
+            res = {"status": type(e).__name__}
+        if res.get("status") != 200:
+            print(f"access-queue: {act} Pipeline write failed ({res.get('status')})")
+            return _daq_page(f"Nothing changed: Pipeline did not accept the update ({res.get('status')}).")
+    try:
+        if act == "approve":
+            approved = _daq_read(s3, DAQ_APPROVED_KEY)
+            keep = {}
+            for k, v in approved.items():
+                try:
+                    if now - datetime.fromisoformat(str(v)).timestamp() <= DAQ_APPROVED_KEEP:
+                        keep[k] = v
+                except (TypeError, ValueError):
+                    continue
+            keep[str(pid)] = iso
+            _daq_write(s3, DAQ_APPROVED_KEY, keep)
+        items.pop(email, None)
+        if act == "decline":
+            declined[email] = iso
+        _daq_write(s3, DAQ_QUEUE_KEY, {"items": items, "declined": declined})
+    except Exception as e:
+        print(f"access-queue: {act} S3 write failed ({type(e).__name__})")
+        return _daq_page(f"Pipeline was updated, but the queue could not be saved ({type(e).__name__}). "
+                         "Try again; the Pipeline value is already set.")
+    print(f"access-queue: {act}d one entry")
+    key = os.environ.get("BRIEF_PAGE_KEY", "")
+    return {"statusCode": 303, "headers": {"Location": "?key=" + quote(key, safe="") + "#access-queue",
+                                           "Cache-Control": "no-store"}, "body": ""}
+
+
 def handle_http_request(event):
     params = event.get("queryStringParameters") or {}
     _method = ((event.get("requestContext") or {}).get("http") or {}).get("method", "GET")
@@ -6998,6 +7241,8 @@ def handle_http_request(event):
         return _render_pd_access_rebuild()
 
     method = ((event.get("requestContext") or {}).get("http") or {}).get("method", "GET")
+    if method == "POST" and params.get("view") == "access-queue":
+        return _handle_access_queue_post(event)
     if method == "POST":
         try:
             body = json.loads(event.get("body") or "{}")
