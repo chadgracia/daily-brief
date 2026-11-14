@@ -2873,17 +2873,17 @@ def _render_html(crossed, tight, to_close, to_invoice, leads,
             f'<div style="{CONTAINER_STYLE}">'
             f'<h1 style="{H1_STYLE}">Daily Brief — {escape(date_str)}</h1>'
         )
-        out.append(
-            f'<p style="font-family:{FONT_STACK}; font-size:14px; margin:0 0 24px 0;">'
-            '<a href="https://bddpwqsqvt32ritxpjqlqwhaim0ykbol.lambda-url.us-east-1.on.aws/?key=alkj%2A707q235-qjdf" '
-            'style="color:#2563eb; text-decoration:none; font-weight:500;">'
-            'Open the interactive Daily Brief &rarr;</a></p>'
-        )
         web_base = os.environ.get("BRIEF_PAGE_URL")
         web_key = os.environ.get("BRIEF_PAGE_KEY")
         if web_base and web_key:
             sep = "&" if "?" in web_base else "?"
             web_url = f"{web_base}{sep}key={quote(web_key, safe='')}"
+            out.append(
+                f'<p style="font-family:{FONT_STACK}; font-size:14px; margin:0 0 24px 0;">'
+                f'<a href="{escape(web_url, quote=True)}" '
+                'style="color:#2563eb; text-decoration:none; font-weight:500;">'
+                'Open the interactive Daily Brief &rarr;</a></p>'
+            )
             out.append(
                 '<p style="font-size:14px; margin:0 0 24px 0;">'
                 f'<a href="{escape(web_url, quote=True)}"'
