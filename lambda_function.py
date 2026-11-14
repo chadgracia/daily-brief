@@ -1208,6 +1208,79 @@ def _fetch_json(s3, key):
     return json.loads(obj["Body"].read())
 
 
+# ── Deal visibility (Pipeline deal field "Visibility") ──────────────────────
+# Blank/unknown = All Investors. Private and Interested-only deals never go out in
+# the weekly or news mailer; Chad's own brief shows them with a small tag.
+VISIBILITY_FIELD = "custom_label_4013323"
+VIS_ALL = 7223456          # "All Investors"
+VIS_INTERESTED = 7223457   # "Interested investors only"
+VIS_PRIVATE = 7223458      # "Private"
+VIS_NO_MAILER = (VIS_INTERESTED, VIS_PRIVATE)
+VIS_LABELS = {VIS_INTERESTED: "Interested only", VIS_PRIVATE: "Private"}
+VISIBILITY_OVERRIDES_KEY = "visibility-overrides.json"
+_VIS_OVERRIDES_TTL = 60
+_vis_overrides_cache = {"at": 0.0, "data": None}
+
+
+def _norm_visibility(v):
+    """Pipeline dropdown value (int, "7223458", "7223458.0", [7223458]) -> option id; else VIS_ALL."""
+    if isinstance(v, (list, tuple)):
+        v = v[0] if v else None
+    if v is None or isinstance(v, bool):
+        return VIS_ALL
+    try:
+        n = int(float(str(v).strip()))
+    except (TypeError, ValueError, OverflowError):
+        return VIS_ALL
+    return n if n in VIS_NO_MAILER else VIS_ALL
+
+
+def _deal_visibility_raw(deal):
+    cf = deal.get("custom_fields") if isinstance(deal, dict) else None
+    return _norm_visibility((cf or {}).get(VISIBILITY_FIELD) if isinstance(cf, dict) else None)
+
+
+def _load_visibility_overrides(s3):
+    """{str(deal_id): option_id} from visibility-overrides.json, cached 60s. Missing file = {}.
+    Any other read/parse error raises (callers fall back)."""
+    now = time.time()
+    if _vis_overrides_cache["data"] is not None and now - _vis_overrides_cache["at"] < _VIS_OVERRIDES_TTL:
+        return _vis_overrides_cache["data"]
+    try:
+        doc = json.loads(s3.get_object(Bucket=S3_BUCKET, Key=VISIBILITY_OVERRIDES_KEY)["Body"].read())
+    except Exception as e:
+        code = ((getattr(e, "response", None) or {}).get("Error") or {}).get("Code")
+        if code != "NoSuchKey" and "NoSuchKey" not in str(e):
+            raise
+        doc = {}
+    if not isinstance(doc, dict):
+        raise ValueError("visibility-overrides.json is not an object")
+    data = {str(k): _norm_visibility(v.get("v")) for k, v in doc.items() if isinstance(v, dict)}
+    _vis_overrides_cache["at"], _vis_overrides_cache["data"] = now, data
+    return data
+
+
+def _visibility_map(deals, s3):
+    """{str(deal_id): option_id} from the deals' own custom_fields, overrides on top (override wins).
+    Overrides unreadable -> one log line, custom_fields only. Never raises."""
+    out = {}
+    for d in deals or []:
+        if isinstance(d, dict) and d.get("id") not in (None, ""):
+            out[str(_normalize_id(d.get("id")))] = _deal_visibility_raw(d)
+    try:
+        out.update(_load_visibility_overrides(s3))
+    except Exception as e:
+        print(f"visibility: overrides unreadable; using deals.json only: {type(e).__name__}")
+    return out
+
+
+def _deal_visibility(deal, vis_map=None):
+    did = str(_normalize_id(deal.get("id"))) if isinstance(deal, dict) else ""
+    if vis_map is not None and did in vis_map:
+        return vis_map[did]
+    return _deal_visibility_raw(deal)
+
+
 def _load_security_names(s3):
     try:
         obj = s3.get_object(Bucket=S3_BUCKET, Key="security_names.json")
@@ -1358,6 +1431,19 @@ def _deal_title(d):
     return d.get("name") or d.get("title") or f"Deal {d.get('id', '')}"
 
 
+# Visibility map for Chad's own brief; _build_brief_html sets it per render.
+_BRIEF_VIS_MAP = None
+
+
+def _vis_tag(deal):
+    """Small "Private" / "Interested only" tag for Chad's brief; "" for All Investors."""
+    label = VIS_LABELS.get(_deal_visibility(deal, _BRIEF_VIS_MAP))
+    if not label:
+        return ""
+    return (' <span style="font-size:11px;font-weight:600;color:#6b7280;border:1px solid #d1d5db;'
+            'border-radius:4px;padding:0 4px;white-space:nowrap;">' + escape(label) + "</span>")
+
+
 def _deal_link(deal, interactive=False):
     did = deal.get("id")
     if did in (None, ""):
@@ -1365,8 +1451,8 @@ def _deal_link(deal, interactive=False):
     s = str(did)
     href = PIPELINE_DEAL_URL.format(escape(s, quote=True))
     if interactive:
-        return f'<a href="{href}">{escape(s)}</a>'
-    return f'<a href="{href}" style="{LINK_STYLE}">{escape(s)}</a>'
+        return f'<a href="{href}">{escape(s)}</a>' + _vis_tag(deal)
+    return f'<a href="{href}" style="{LINK_STYLE}">{escape(s)}</a>' + _vis_tag(deal)
 
 
 def _deal_title_link(deal, interactive=False):
@@ -1376,8 +1462,8 @@ def _deal_title_link(deal, interactive=False):
         return escape(title)
     href = PIPELINE_DEAL_URL.format(escape(str(did), quote=True))
     if interactive:
-        return f'<a href="{href}">{escape(title)}</a>'
-    return f'<a href="{href}" style="{LINK_STYLE_500}">{escape(title)}</a>'
+        return f'<a href="{href}">{escape(title)}</a>' + _vis_tag(deal)
+    return f'<a href="{href}" style="{LINK_STYLE_500}">{escape(title)}</a>' + _vis_tag(deal)
 
 
 def _resolve_person(snapshot, people_by_id):
@@ -3560,8 +3646,9 @@ def _build_brief_html(interactive):
         nid = _normalize_id(p.get("id"))
         if nid is not None:
             people_by_id[nid] = p
-    global _ROLE_PEOPLE_BY_ID
+    global _ROLE_PEOPLE_BY_ID, _BRIEF_VIS_MAP
     _ROLE_PEOPLE_BY_ID = people_by_id
+    _BRIEF_VIS_MAP = _visibility_map(deals, s3)
     companies_by_id = {}
     for c in companies:
         cid = _normalize_id(c.get("id"))
@@ -3949,10 +4036,13 @@ def _mailer_size(deal):
     return "—"
 
 
-def _mailer_eligible(deals, buyer_counts=None):
+def _mailer_eligible(deals, buyer_counts=None, s3=None):
     sells, buys = [], []
+    vis = _visibility_map(deals, s3) if s3 is not None else None
     for d in deals:
         if _stage_id(d) not in (STAGE_FIRM, STAGE_INQUIRY):
+            continue
+        if _deal_visibility(d, vis) in VIS_NO_MAILER:
             continue
         if _is_no_solicit(_company_name(d) or _deal_title(d)):
             continue
@@ -5144,6 +5234,36 @@ def _news_send_content(content):
     return dict(content, items=kept), len(items) - len(kept)
 
 
+def _news_visibility_blocks(s3, content):
+    """[(deal_id, company, label)] for news items whose deal is Private or Interested-only.
+    None if the visibility lookup failed (callers keep current behaviour)."""
+    items = [it for it in (content.get("items") or [])
+             if isinstance(it, dict) and str(it.get("deal_id") or "").strip()]
+    if not items:
+        return []
+    try:
+        deals = (_fetch_json(s3, "deals.json") or {}).get("deals", []) or []
+        vis = _visibility_map(deals, s3)
+    except Exception as e:
+        print(f"visibility: lookup failed; no visibility filtering: {type(e).__name__}")
+        return None
+    out = []
+    for it in items:
+        did = str(_normalize_id(str(it.get("deal_id")).strip()))
+        v = vis.get(did, VIS_ALL)
+        if v in VIS_NO_MAILER:
+            out.append((did, str(it.get("company") or "").strip(), VIS_LABELS[v]))
+    return out
+
+
+def _news_visibility_warning(blocks):
+    if not blocks:
+        return ""
+    return ("Not sendable to the list: "
+            + "; ".join((co or "Deal") + " (deal " + did + ") is " + label for did, co, label in blocks)
+            + ". Remove it from the news mailer before sending.")
+
+
 def _render_news_email(first_name, person_id, content):
     greet = "Hello " + escape(first_name) + "," if first_name else "Hello,"
     daily_url = (MAILER_BASE_URL + "?view=daily&amp;pid=" + str(person_id)
@@ -5245,8 +5365,17 @@ def _handle_news_save(body):
     if sid.isdigit():
         data["_search_id"] = sid
     _save_news_mailer(data)
+    resp = {"ok": True, "count": len(data["items"])}
+    try:
+        warning = _news_visibility_warning(
+            _news_visibility_blocks(boto3.client("s3", region_name=S3_REGION), data))
+    except Exception as e:
+        print(f"visibility: lookup failed; no visibility filtering: {type(e).__name__}")
+        warning = ""
+    if warning:
+        resp["warning"] = warning
     return {"statusCode": 200, "headers": {"Content-Type": "application/json"},
-            "body": json.dumps({"ok": True, "count": len(data["items"])})}
+            "body": json.dumps(resp)}
 
 
 def _handle_news_test(body):
@@ -5263,7 +5392,9 @@ def _handle_news_test(body):
         _changed = True
     if _changed:
         _save_news_mailer(content)
-    html = _render_news_email("Chad", MAILER_PREVIEW_PID, _news_send_content(content)[0])
+    send_content = _news_send_content(content)[0]
+    html = _render_news_email("Chad", MAILER_PREVIEW_PID, send_content)
+    warning = _news_visibility_warning(_news_visibility_blocks(s3, send_content))
     boto3.client("ses", region_name=SES_REGION).send_email(
         Source=MAILER_FROM,
         Destination={"ToAddresses": ["cgracia@rainmakersecurities.com"]},
@@ -5271,8 +5402,11 @@ def _handle_news_test(body):
         Message={"Subject": {"Data": "[TEST] " + subject, "Charset": "UTF-8"},
                  "Body": {"Html": {"Data": html, "Charset": "UTF-8"}}},
     )
+    resp = {"ok": True}
+    if warning:
+        resp["warning"] = warning
     return {"statusCode": 200, "headers": {"Content-Type": "application/json"},
-            "body": json.dumps({"ok": True})}
+            "body": json.dumps(resp)}
 
 
 ARCHIVE_TO = "cgracia@rainmakersecurities.com"
@@ -5519,6 +5653,11 @@ def _handle_news_send(body):
     if not content.get("items") and not str(content.get("intro") or "").strip():
         return {"statusCode": 400, "headers": {"Content-Type": "application/json"},
                 "body": json.dumps({"ok": False, "error": "nothing to send: no intro and no items"})}
+    vis_blocks = _news_visibility_blocks(s3, content)
+    if vis_blocks:
+        print("news send refused: visibility " + ", ".join(did for did, _, _ in vis_blocks))
+        return {"statusCode": 400, "headers": {"Content-Type": "application/json"},
+                "body": json.dumps({"ok": False, "error": _news_visibility_warning(vis_blocks)})}
     try:
         referral_emails = _pd_referral_client_emails(s3)
     except Exception as e:
@@ -5648,6 +5787,7 @@ NEWS_COMPOSER_SCRIPT = """
         search_id: (document.getElementById('news-search').value || '').trim()})
     }).then(function (r) { return r.json(); }).then(function (j) {
       if (j.ok) {
+        if (j.warning) alert(j.warning);
         var u = new URL(window.location.href);
         u.searchParams.set('r', Date.now().toString());
         window.location.href = u.toString();
@@ -5690,6 +5830,7 @@ NEWS_COMPOSER_SCRIPT = """
     }).then(function (r) { return r.json(); }).then(function (j) {
       tst.textContent = j.ok ? 'Test sent ✓' : 'Failed — try again';
       tst.disabled = false;
+      if (j.ok && j.warning) alert(j.warning);
     }).catch(function () { tst.textContent = 'Failed — try again'; tst.disabled = false; });
   });
 })();
@@ -5705,6 +5846,10 @@ def _render_news_composer(pid):
     blocked_html = ('<p style="color:#b91c1c;font-size:13px;font-weight:600;margin:0 0 12px 0;">'
                     "OpenEvidence item removed &mdash; RMS no-solicitation notice.</p>"
                     if n_blocked else "")
+    vis_warning = _news_visibility_warning(_news_visibility_blocks(s3, send_content))
+    if vis_warning:
+        blocked_html += ('<p style="color:#b91c1c;font-size:13px;font-weight:600;margin:0 0 12px 0;">'
+                         + escape(vis_warning) + "</p>")
     saved_subject = str(content.get("_subject") or "Recent news and deal updates for ten pre-IPO opportunities")
     saved_search = str(content.get("_search_id") or "19530439")
     raw = json.dumps({k: v for k, v in content.items() if not str(k).startswith("_")},
@@ -5815,7 +5960,7 @@ def _handle_mailer_send(body):
     s3 = boto3.client("s3", region_name=S3_REGION)
     deals = (_fetch_json(s3, "deals.json") or {}).get("deals", []) or []
     counts = _mailer_buyer_counts(s3)
-    sells_all, buys_all = _mailer_eligible(deals, counts)
+    sells_all, buys_all = _mailer_eligible(deals, counts, s3)
     selected = _load_mailer_selection(s3)
     sells = [d for d in sells_all if str(d.get("id")) in selected]
     selected_lc = {str(x).lower() for x in selected}
@@ -5949,7 +6094,7 @@ def _handle_mailer_test(body):
     s3 = boto3.client("s3", region_name=S3_REGION)
     deals = (_fetch_json(s3, "deals.json") or {}).get("deals", []) or []
     counts = _mailer_buyer_counts(s3)
-    sells_all, buys_all = _mailer_eligible(deals, counts)
+    sells_all, buys_all = _mailer_eligible(deals, counts, s3)
     selected = _load_mailer_selection(s3)
     sells = [d for d in sells_all if str(d.get("id")) in selected]
     selected_lc = {str(x).lower() for x in selected}
@@ -5974,7 +6119,7 @@ def _render_mailer_composer(pid):
     s3 = boto3.client("s3", region_name=S3_REGION)
     deals = (_fetch_json(s3, "deals.json") or {}).get("deals", []) or []
     counts = _mailer_buyer_counts(s3)
-    sells_all, buys_all = _mailer_eligible(deals, counts)
+    sells_all, buys_all = _mailer_eligible(deals, counts, s3)
     buy_cos = _mailer_buy_companies(s3, counts)
     selected = _load_mailer_selection(s3)
     sells = [d for d in sells_all if str(d.get("id")) in selected]
