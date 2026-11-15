@@ -7155,7 +7155,7 @@ def _render_access_queue_section(s3=None):
             f'padding:16px 18px;margin:0 0 16px 0;background:#ffffff">'
             f'<h2 style="{H2_STYLE}">Deal access queue ({len(rows)})</h2>'
             '<p style="margin:0 0 8px;font-size:13px;color:#6b7280">Approve sets Investor Level to '
-            'Substantive and unlocks offer terms within a minute. Decline sets Hold. Nobody is emailed.</p>'
+            'Substantive and unlocks deal terms within a minute. Decline sets Hold. Nobody is emailed.</p>'
             f'<table style="width:100%;border-collapse:collapse"><tr>{head}</tr>{"".join(rows)}</table></div>')
 
 
