@@ -7001,6 +7001,46 @@ DAQ_PLACEHOLDER_NAMES = frozenset({"", ".", "..", "...", "-", "--", "_", "?", "x
                                    "null", "unknown", "(unknown)", "unverified", "(unverified)", "tbd",
                                    "first", "last", "name", "first name", "last name"})
 DAQ_ACCREDITED = {"yes": "Yes", "unsure": "Not sure"}
+_DAQ_LINKEDIN_OK = re.compile(r"^https://www\.linkedin\.com/[A-Za-z0-9\-._~%/]*$")
+_DAQ_DEAL_PATH = re.compile(r"^/deal/\d{1,15}$")
+DAQ_APPROVED_SUBJECT = "Your access is approved"
+
+
+def _daq_linkedin(url):
+    """The stored LinkedIn URL only when it is still https://www.linkedin.com/... ; else ''."""
+    url = str(url or "")
+    return url if len(url) <= 200 and _DAQ_LINKEDIN_OK.match(url) else ""
+
+
+def _daq_return_link(path):
+    """https://trades.graciagroup.com + the saved /deal/<id> path or the grid; else the site root.
+    Never carries a query string, token or key."""
+    p = str(path or "").split("?", 1)[0].split("#", 1)[0].rstrip("/")
+    if _DAQ_DEAL_PATH.match(p):
+        return DAQ_SITE + p
+    return DAQ_SITE + "/"
+
+
+def _daq_send_approval_email(ses, email, first, path):
+    """ONE email to the approved address. Same sender (MAILER_FROM) and reply-to as
+    the client mailer, BCC to the brief recipient (TO_ADDRS), matching trades'
+    one-click-link email. Returns True when SES accepted it; never raises."""
+    hello = f"Hi {first}," if first else "Hello,"
+    text = (f"{hello}\n\nYour access to deal terms at Gracia Group is approved.\n\n"
+            f"View the deal: {_daq_return_link(path)}\n\n"
+            "If I can help with anything, just reply to this email.\n\nChad Gracia\n")
+    try:
+        (ses or boto3.client("ses", region_name=SES_REGION)).send_email(
+            Source=MAILER_FROM,
+            Destination={"ToAddresses": [email], "BccAddresses": list(TO_ADDRS)},
+            ReplyToAddresses=["cgracia@rainmakersecurities.com"],
+            Message={"Subject": {"Data": DAQ_APPROVED_SUBJECT, "Charset": "UTF-8"},
+                     "Body": {"Text": {"Data": text, "Charset": "UTF-8"}}})
+        print("access-queue: approval email sent")
+        return True
+    except Exception as e:
+        print(f"access-queue: approval email failed ({type(e).__name__})")
+        return False
 
 
 def _daq_real_name(name):
@@ -7132,6 +7172,9 @@ def _render_access_queue_section(s3=None):
                                          str(it.get("last_name") or "").strip()) if x)
         name = _daq_real_name(name) or form_name
         who = escape(name or "(no name)")
+        li = _daq_linkedin(it.get("linkedin"))
+        li_html = (f'<a href="{escape(li, quote=True)}" target="_blank" rel="noopener noreferrer" '
+                   f'style="{LINK_STYLE_500}">Profile</a>') if li else ""
         src = str(it.get("from") or "")
         from_html = (f'<a href="{escape(DAQ_SITE + src, quote=True)}" target="_blank" rel="noopener" '
                      f'style="{LINK_STYLE_500}">{escape(src)}</a>') if src.startswith("/") else ""
@@ -7144,18 +7187,20 @@ def _render_access_queue_section(s3=None):
             f'<td style="{TD_STYLE}">{escape(email)}</td><td style="{TD_STYLE}">{escape(level)}</td>'
             f'<td style="{TD_STYLE}">{escape(str(it.get("country") or ""))}</td>'
             f'<td style="{TD_STYLE}">{escape(str(it.get("employer") or ""))}</td>'
+            f'<td style="{TD_STYLE}">{li_html}</td>'
             f'<td style="{TD_STYLE}">{escape(DAQ_ACCREDITED.get(it.get("accredited"), ""))}</td>'
             f'<td style="{TD_STYLE}">{escape(str(it.get("reason") or ""))}</td>'
             f'<td style="{TD_STYLE}">{escape(when)}</td><td style="{TD_STYLE}">{from_html}</td>'
             f'<td style="{TD_STYLE}">{buttons}</td></tr>')
     head = "".join(f'<th style="text-align:left;padding:6px 8px;font-size:12px;color:#6b7280">{h}</th>'
-                   for h in ("Name", "Company", "Email", "Investor Level", "Country", "Employer",
+                   for h in ("Name", "Company", "Email", "Investor Level", "Country", "Employer", "LinkedIn",
                              "Accredited", "Reason", "Date", "From", ""))
     return (f'<div id="access-queue" data-owner="chad" style="border:1px solid #e5e7eb;border-radius:8px;'
             f'padding:16px 18px;margin:0 0 16px 0;background:#ffffff">'
             f'<h2 style="{H2_STYLE}">Deal access queue ({len(rows)})</h2>'
             '<p style="margin:0 0 8px;font-size:13px;color:#6b7280">Approve sets Investor Level to '
-            'Substantive and unlocks deal terms within a minute. Decline sets Hold. Nobody is emailed.</p>'
+            'Substantive, unlocks deal terms within a minute and emails the person a link back to the deal. '
+            'Decline sets Hold and sends nothing.</p>'
             f'<table style="width:100%;border-collapse:collapse"><tr>{head}</tr>{"".join(rows)}</table></div>')
 
 
@@ -7178,7 +7223,7 @@ def _daq_page(msg):
                      f'<p>{escape(msg)}</p><p><a href="{back}">Back to the brief</a></p></body></html>')}
 
 
-def _handle_access_queue_post(event, s3=None, jwt=None, now=None):
+def _handle_access_queue_post(event, s3=None, jwt=None, now=None, ses=None):
     """POST ?view=access-queue (page key already checked): approve / decline one item."""
     f = _daq_form(event)
     act = (f.get("act") or "").strip()
@@ -7197,7 +7242,8 @@ def _handle_access_queue_post(event, s3=None, jwt=None, now=None):
     declined = queue.get("declined") if isinstance(queue.get("declined"), dict) else {}
     if email not in items:
         return _daq_page("Nothing changed: that entry is no longer in the queue.")
-    pid, _name, _co, _lvl = _daq_resolve(email, items[email], _daq_people(s3))
+    item = dict(items[email])
+    pid, _name, _co, _lvl = _daq_resolve(email, item, _daq_people(s3))
     if act == "approve" and not pid:
         return _daq_page("Not approved: this person is not in the CRM yet.")
     if pid:
@@ -7231,6 +7277,13 @@ def _handle_access_queue_post(event, s3=None, jwt=None, now=None):
         return _daq_page(f"Pipeline was updated, but the queue could not be saved ({type(e).__name__}). "
                          "Try again; the Pipeline value is already set.")
     print(f"access-queue: {act}d one entry")
+    if act == "approve":
+        first = str(item.get("first_name") or "").strip()
+        if not first:
+            real = _daq_real_name(_name)
+            first = real.split()[0] if real else ""
+        if not _daq_send_approval_email(ses, email, first, item.get("from")):
+            return _daq_page("Approved. The approval email could not be sent.")
     key = os.environ.get("BRIEF_PAGE_KEY", "")
     return {"statusCode": 303, "headers": {"Location": "?key=" + quote(key, safe="") + "#access-queue",
                                            "Cache-Control": "no-store"}, "body": ""}

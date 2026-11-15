@@ -51,11 +51,23 @@ QUEUE = {"items": {
     "declined": {}}
 
 
-def post(s3, act, email, api, b64=False):
+class SES:
+    def __init__(self, fail=False):
+        self.sent, self.fail = [], fail
+
+    def send_email(self, **kw):
+        if self.fail:
+            raise RuntimeError("MessageRejected")
+        self.sent.append(kw)
+        return {"MessageId": "x"}
+
+
+def post(s3, act, email, api, b64=False, ses=None):
     body = urlencode({"act": act, "email": email})
     ev = {"body": base64.b64encode(body.encode()).decode() if b64 else body, "isBase64Encoded": b64}
-    with mock.patch.object(lf, "call_pipeline_api", api):
-        return lf._handle_access_queue_post(ev, s3=s3, jwt="jwt", now=NOW)
+    with mock.patch.object(lf, "call_pipeline_api", api), \
+            mock.patch.object(lf.boto3, "client", side_effect=AssertionError("no real AWS client")):
+        return lf._handle_access_queue_post(ev, s3=s3, jwt="jwt", now=NOW, ses=ses if ses is not None else SES())
 
 
 class Api:
@@ -201,3 +213,77 @@ class QueueDetailsColumns(unittest.TestCase):
             self.assertIn(s, html)
         self.assertNotIn("<b>Hold Co</b>", html)
         self.assertEqual(html.count(">Approve<"), 2)        # hal, dot (CRM records); approve/decline unchanged
+
+
+class ApprovalEmail(unittest.TestCase):
+    def setUp(self):
+        lf._daq_slim_cache.update({"etag": None, "checked_at": 0.0, "by_email": None, "by_id": None})
+        p = mock.patch("builtins.print"); self.log = p.start(); self.addCleanup(p.stop)
+        p = mock.patch.dict(os.environ, {"BRIEF_PAGE_KEY": KEY}); p.start(); self.addCleanup(p.stop)
+
+    def queue(self, frm="/deal/9?v=tok&key=k", first="Harry"):
+        q = json.loads(json.dumps(QUEUE))
+        q["items"]["hal@z.com"].update({"first_name": first, "from": frm,
+                                        "linkedin": "https://www.linkedin.com/in/hal"})
+        return q
+
+    def test_sent_once_with_right_link(self):
+        s3, ses = store(self.queue()), SES()
+        r = post(s3, "approve", "hal@z.com", Api(), ses=ses)
+        self.assertEqual(r["statusCode"], 303)
+        self.assertEqual(len(ses.sent), 1)
+        m = ses.sent[0]
+        self.assertEqual(m["Destination"], {"ToAddresses": ["hal@z.com"], "BccAddresses": lf.TO_ADDRS})
+        self.assertEqual(m["Source"], lf.MAILER_FROM)
+        self.assertEqual(m["ReplyToAddresses"], ["cgracia@rainmakersecurities.com"])
+        self.assertEqual(m["Message"]["Subject"]["Data"], "Your access is approved")
+        self.assertEqual(m["Message"]["Body"]["Text"]["Data"],
+                         "Hi Harry,\n\nYour access to deal terms at Gracia Group is approved.\n\n"
+                         "View the deal: https://trades.graciagroup.com/deal/9\n\n"
+                         "If I can help with anything, just reply to this email.\n\nChad Gracia\n")
+        r = post(s3, "approve", "hal@z.com", Api(), ses=ses)       # same approval again: item gone
+        self.assertIn("no longer in the queue", r["body"])
+        self.assertEqual(len(ses.sent), 1)
+
+    def test_link_falls_back_to_site_root_and_hello(self):
+        for frm, want in (("/", "https://trades.graciagroup.com/"), ("/?view=x&sso=abc", "https://trades.graciagroup.com/"),
+                          ("https://evil.example/deal/9", "https://trades.graciagroup.com/"),
+                          ("/deal/9/", "https://trades.graciagroup.com/deal/9"), ("/deal/abc", "https://trades.graciagroup.com/"),
+                          (None, "https://trades.graciagroup.com/")):
+            self.assertEqual(lf._daq_return_link(frm), want, frm)
+        q = self.queue(first="")
+        q["items"]["hal@z.com"]["first_name"] = ""
+        s3, ses = store(q), SES()
+        post(s3, "approve", "hal@z.com", Api(), ses=ses)
+        self.assertTrue(ses.sent[0]["Message"]["Body"]["Text"]["Data"].startswith("Hi Hal,"))  # Pipeline first name
+        q["items"]["new2@z.com"] = {"email": "new2@z.com", "person_id": None}
+        self.assertTrue(lf._daq_send_approval_email(ses, "x@z.com", "", "/"))
+        self.assertTrue(ses.sent[-1]["Message"]["Body"]["Text"]["Data"].startswith("Hello,"))
+
+    def test_not_sent_on_decline_or_failed_pipeline_write(self):
+        ses = SES()
+        post(store(self.queue()), "decline", "hal@z.com", Api(), ses=ses)
+        r = post(store(self.queue()), "approve", "hal@z.com", Api(status=500), ses=ses)
+        self.assertIn("Nothing changed", r["body"])
+        self.assertEqual(ses.sent, [])
+
+    def test_approval_succeeds_when_send_fails(self):
+        s3 = store(self.queue())
+        r = post(s3, "approve", "hal@z.com", Api(), ses=SES(fail=True))
+        self.assertIn("Approved. The approval email could not be sent.", r["body"])
+        self.assertIn("302", json.loads(s3.objects[(B, A)]))
+        self.assertNotIn("hal@z.com", json.loads(s3.objects[(B, Q)])["items"])
+        logged = " ".join(str(c) for c in self.log.call_args_list)
+        self.assertIn("approval email failed", logged)
+        for pii in ("hal@z.com", "Harry", "Hal"):
+            self.assertNotIn(pii, logged)
+
+    def test_linkedin_column(self):
+        q = self.queue()
+        q["items"]["sue@z.com"]["linkedin"] = "javascript:alert(1)"
+        html = lf._render_access_queue_section(store(q))
+        self.assertIn(">LinkedIn</th>", html)
+        self.assertIn('<a href="https://www.linkedin.com/in/hal" target="_blank" rel="noopener noreferrer"', html)
+        self.assertEqual(html.count(">Profile</a>"), 1)
+        self.assertNotIn("javascript:", html)
+        self.assertIn("emails the person a link back to the deal. Decline sets Hold and sends nothing.", html)
