@@ -162,3 +162,42 @@ class AccessQueue(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class QueueDetailsColumns(unittest.TestCase):
+    def setUp(self):
+        lf._daq_slim_cache.update({"etag": None, "checked_at": 0.0, "by_email": None, "by_id": None})
+        p = mock.patch("builtins.print"); p.start(); self.addCleanup(p.stop)
+        p = mock.patch.dict(os.environ, {"BRIEF_PAGE_KEY": KEY}); p.start(); self.addCleanup(p.stop)
+
+    def test_form_columns_and_name_precedence(self):
+        people = {"people": PEOPLE["people"] + [
+            {"id": 310, "first_name": ".", "last_name": "(unverified)", "email": "dot@z.com", "custom_fields": {}}]}
+        q = {"items": {
+            "hal@z.com": {"email": "hal@z.com", "person_id": "302", "reason": "self-confirmed",
+                          "first_name": "Harry", "last_name": "H", "country": "Canada", "employer": "<b>Hold Co</b>",
+                          "accredited": "yes", "details_at": "2030-03-17T10:00:00+00:00", "from": "/deal/9?x=1",
+                          "first_at": "2030-03-17T10:00:00+00:00", "last_at": "2030-03-17T10:00:00+00:00"},
+            "dot@z.com": {"email": "dot@z.com", "person_id": "310", "reason": "signup", "first_name": "Dee",
+                          "last_name": "Dot", "country": "France", "accredited": "unsure", "from": "/",
+                          "first_at": "2030-03-17T11:00:00+00:00", "last_at": "2030-03-17T11:00:00+00:00"},
+            "new@z.com": {"email": "new@z.com", "person_id": None, "reason": "signup", "first_name": "Nia",
+                          "last_name": "New", "country": "Japan",
+                          "first_at": "2030-03-17T12:00:00+00:00", "last_at": "2030-03-17T12:00:00+00:00"},
+            "old@z.com": {"email": "old@z.com", "person_id": None, "reason": "signup",
+                          "first_at": "2030-03-17T09:00:00+00:00", "last_at": "2030-03-17T09:00:00+00:00"}},
+            "declined": {}}
+        s3 = S3({(B, SLIM): json.dumps(people).encode(), (B, Q): json.dumps(q).encode()})
+        html = lf._render_access_queue_section(s3)
+        for h in ("Country", "Employer", "Accredited", "From"):
+            self.assertIn(f">{h}</th>", html)
+        self.assertIn(">Hal Hold</a>", html)               # real Pipeline name wins over "Harry H"
+        self.assertNotIn("Harry", html)
+        self.assertIn(">Dee Dot</a>", html)                # placeholder Pipeline name -> form name
+        self.assertIn(">Nia New</td>", html)               # not in CRM: form name
+        self.assertIn(">(no name)</td>", html)             # no form, no CRM
+        for s in ("Canada", "France", "Japan", ">Yes<", ">Not sure<", "&lt;b&gt;Hold Co&lt;/b&gt;",
+                  'href="https://trades.graciagroup.com/deal/9?x=1"', ">/deal/9?x=1</a>"):
+            self.assertIn(s, html)
+        self.assertNotIn("<b>Hold Co</b>", html)
+        self.assertEqual(html.count(">Approve<"), 2)        # hal, dot (CRM records); approve/decline unchanged

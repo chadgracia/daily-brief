@@ -6995,6 +6995,19 @@ DAQ_IL_LABELS = {"6950561": "Unknown", "7161646": "Hold: Screen for Substantive"
                  "7223459": "Self-Confirmed Accredited", "6950563": "Accredited Investor",
                  "7209227": "Qualified Client", "6950564": "Qualified Purchaser"}
 _daq_slim_cache = {"etag": None, "checked_at": 0.0, "by_email": None, "by_id": None}
+DAQ_SITE = "https://trades.graciagroup.com"
+# Same placeholder list as the deal gate (trades / CRMDealDetails DG_AD_PLACEHOLDER_NAMES).
+DAQ_PLACEHOLDER_NAMES = frozenset({"", ".", "..", "...", "-", "--", "_", "?", "x", "n/a", "na", "none",
+                                   "null", "unknown", "(unknown)", "unverified", "(unverified)", "tbd",
+                                   "first", "last", "name", "first name", "last name"})
+DAQ_ACCREDITED = {"yes": "Yes", "unsure": "Not sure"}
+
+
+def _daq_real_name(name):
+    """The Pipeline name unless every part of it is blank or a placeholder."""
+    parts = [p for p in str(name or "").split() if p.strip().lower() not in DAQ_PLACEHOLDER_NAMES]
+    n = str(name or "").strip()
+    return n if parts and n.lower() not in DAQ_PLACEHOLDER_NAMES else ""
 
 
 def _daq_option_ids(value):
@@ -7115,7 +7128,13 @@ def _render_access_queue_section(s3=None):
         it = items[email] if isinstance(items[email], dict) else {}
         pid, name, company, level = _daq_resolve(email, it, people)
         when = str(it.get("last_at") or it.get("first_at") or "")[:10]
+        form_name = " ".join(x for x in (str(it.get("first_name") or "").strip(),
+                                         str(it.get("last_name") or "").strip()) if x)
+        name = _daq_real_name(name) or form_name
         who = escape(name or "(no name)")
+        src = str(it.get("from") or "")
+        from_html = (f'<a href="{escape(DAQ_SITE + src, quote=True)}" target="_blank" rel="noopener" '
+                     f'style="{LINK_STYLE_500}">{escape(src)}</a>') if src.startswith("/") else ""
         if pid:
             who = (f'<a href="https://app.pipelinecrm.com/people/{escape(pid)}" target="_blank" '
                    f'rel="noopener" style="{LINK_STYLE_500}">{who}</a>')
@@ -7123,10 +7142,15 @@ def _render_access_queue_section(s3=None):
         rows.append(
             f'<tr><td style="{TD_STYLE}">{who}</td><td style="{TD_STYLE}">{escape(company)}</td>'
             f'<td style="{TD_STYLE}">{escape(email)}</td><td style="{TD_STYLE}">{escape(level)}</td>'
+            f'<td style="{TD_STYLE}">{escape(str(it.get("country") or ""))}</td>'
+            f'<td style="{TD_STYLE}">{escape(str(it.get("employer") or ""))}</td>'
+            f'<td style="{TD_STYLE}">{escape(DAQ_ACCREDITED.get(it.get("accredited"), ""))}</td>'
             f'<td style="{TD_STYLE}">{escape(str(it.get("reason") or ""))}</td>'
-            f'<td style="{TD_STYLE}">{escape(when)}</td><td style="{TD_STYLE}">{buttons}</td></tr>')
+            f'<td style="{TD_STYLE}">{escape(when)}</td><td style="{TD_STYLE}">{from_html}</td>'
+            f'<td style="{TD_STYLE}">{buttons}</td></tr>')
     head = "".join(f'<th style="text-align:left;padding:6px 8px;font-size:12px;color:#6b7280">{h}</th>'
-                   for h in ("Name", "Company", "Email", "Investor Level", "Reason", "Date", ""))
+                   for h in ("Name", "Company", "Email", "Investor Level", "Country", "Employer",
+                             "Accredited", "Reason", "Date", "From", ""))
     return (f'<div id="access-queue" data-owner="chad" style="border:1px solid #e5e7eb;border-radius:8px;'
             f'padding:16px 18px;margin:0 0 16px 0;background:#ffffff">'
             f'<h2 style="{H2_STYLE}">Deal access queue ({len(rows)})</h2>'
