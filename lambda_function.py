@@ -7129,12 +7129,18 @@ def _daq_level_label(ids):
 
 
 def _daq_resolve(email, item, people):
-    """(pid or None, name, company, level label) for a queue item, by email."""
+    """(pid or None, name, company, level label) for a queue item, by email. A
+    person_id saved on the item (live match) counts even before the snapshot has it."""
+    saved = str((item or {}).get("person_id") or "")
     if not people:
+        if saved.isdigit():
+            return saved, "", "", "unknown (people index unreadable)"
         return None, "", "", "unknown (people index unreadable)"
     by_email, by_id = people
     pids = sorted(by_email.get(email) or [])
     if not pids:
+        if saved.isdigit():
+            return saved, "", "", "not in snapshot yet"
         return None, "", "", "not in CRM yet"
     want = str((item or {}).get("person_id") or "")
     pid = want if want in pids else pids[0]
@@ -7142,7 +7148,113 @@ def _daq_resolve(email, item, people):
     return pid, name, company, _daq_level_label(levels)
 
 
-def _render_access_queue_section(s3=None):
+DAQ_LIVE_EVERY = 600          # at most one live lookup per item per 10 minutes
+DAQ_LIVE_TIMEOUT = 3
+DAQ_LIVE_MAX_PER_RENDER = 3
+_daq_live_tried = {}
+
+
+def _daq_live_person_id(email, jwt, timeout=DAQ_LIVE_TIMEOUT):
+    """One live Pipeline lookup by exact email (query by email, then compare the
+    returned address case-insensitively). Person id str or None. Read-only."""
+    want = (email or "").strip().lower()
+    try:
+        r = call_pipeline_api("GET", f"/people.json?conditions[email]={quote(want, safe='')}&per_page=3",
+                              jwt=jwt, timeout=timeout)
+        if r.get("status") == 200 and isinstance(r.get("data"), dict):
+            for p in r["data"].get("entries") or []:
+                if isinstance(p, dict) and p.get("id") is not None and want in {
+                        str(p.get(k) or "").strip().lower() for k in ("email", "email2", "home_email")}:
+                    return str(p["id"])
+    except Exception as e:
+        print(f"access-queue: live lookup failed ({type(e).__name__})")
+    return None
+
+
+def _daq_is_placeholder(v):
+    return " ".join(str(v or "").split()).lower() in DAQ_PLACEHOLDER_NAMES
+
+
+def _daq_sync_names(pid, item, jwt):
+    """Once per item: write the form's first / last name to Pipeline ONLY where the
+    current one is blank or a placeholder. Never touches any other field or creates
+    anyone. True when done (written or nothing to write), False to retry later."""
+    first = str(item.get("first_name") or "").strip()
+    last = str(item.get("last_name") or "").strip()
+    r = call_pipeline_api("GET", f"/people/{pid}.json", jwt=jwt, timeout=DAQ_LIVE_TIMEOUT)
+    if r.get("status") != 200 or not isinstance(r.get("data"), dict):
+        print(f"access-queue: name check failed ({r.get('status')})")
+        return False
+    cur = r["data"].get("person", r["data"])
+    person = {}
+    if first and _daq_is_placeholder(cur.get("first_name")):
+        person["first_name"] = first
+    if last and _daq_is_placeholder(cur.get("last_name")):
+        person["last_name"] = last
+    if not person:
+        return True
+    w = call_pipeline_api("PUT", f"/people/{pid}.json", {"person": person}, jwt=jwt, timeout=DAQ_LIVE_TIMEOUT)
+    if w.get("status") != 200:
+        print(f"access-queue: name write failed ({w.get('status')})")
+        return False
+    print(f"access-queue: placeholder name filled ({', '.join(sorted(person))})")
+    return True
+
+
+def _daq_catch_up(s3, items, people, now=None, jwt=None):
+    """Items with form details but no person_id: find the person (snapshot, else one
+    live lookup per item per 10 min), save person_id and, once, fill a placeholder
+    name. Fail-soft; returns the (possibly updated) items."""
+    now = time.time() if now is None else now
+    found, lookups = {}, 0
+    for email, it in items.items():
+        if not isinstance(it, dict) or not it.get("details_at") or it.get("person_id"):
+            continue
+        pids = sorted((people[0].get(email) or [])) if people else []
+        pid = pids[0] if pids else None
+        if not pid:
+            if now - _daq_live_tried.get(email, 0) < DAQ_LIVE_EVERY or lookups >= DAQ_LIVE_MAX_PER_RENDER:
+                continue
+            _daq_live_tried[email] = now
+            lookups += 1
+            try:
+                jwt = jwt or get_jwt()
+            except Exception as e:
+                print(f"access-queue: no Pipeline token ({type(e).__name__})")
+                return items
+            pid = _daq_live_person_id(email, jwt)
+        if pid:
+            found[email] = pid
+    if not found:
+        return items
+    iso = datetime.fromtimestamp(now, timezone.utc).isoformat(timespec="seconds")
+    updates = {}
+    for email, pid in found.items():
+        upd = {"person_id": pid}
+        if not items[email].get("names_synced_at"):
+            try:
+                jwt = jwt or get_jwt()
+                if _daq_sync_names(pid, items[email], jwt):
+                    upd["names_synced_at"] = iso
+            except Exception as e:
+                print(f"access-queue: name sync failed ({type(e).__name__})")
+        updates[email] = upd
+    try:
+        q = _daq_read(s3, DAQ_QUEUE_KEY)
+        qi = q.get("items") if isinstance(q.get("items"), dict) else {}
+        for email, upd in updates.items():
+            if isinstance(qi.get(email), dict):
+                qi[email].update(upd)
+        _daq_write(s3, DAQ_QUEUE_KEY, {"items": qi, "declined": q.get("declined") if isinstance(q.get("declined"), dict) else {}})
+        print(f"access-queue: linked {len(updates)} item(s) to Pipeline")
+    except Exception as e:
+        print(f"access-queue: catch-up save failed ({type(e).__name__})")
+    for email, upd in updates.items():
+        items[email].update(upd)
+    return items
+
+
+def _render_access_queue_section(s3=None, now=None, jwt=None):
     """'Deal access queue (N)' for the online brief; '' when empty or unreadable."""
     try:
         s3 = s3 or boto3.client("s3", region_name=S3_REGION)
@@ -7153,6 +7265,7 @@ def _render_access_queue_section(s3=None):
     if not isinstance(items, dict) or not items:
         return ""
     people = _daq_people(s3)
+    items = _daq_catch_up(s3, items, people, now, jwt)
     key = os.environ.get("BRIEF_PAGE_KEY", "")
     action = escape("?view=access-queue&key=" + quote(key, safe=""), quote=True)
 

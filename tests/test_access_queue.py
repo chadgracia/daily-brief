@@ -287,3 +287,96 @@ class ApprovalEmail(unittest.TestCase):
         self.assertEqual(html.count(">Profile</a>"), 1)
         self.assertNotIn("javascript:", html)
         self.assertIn("emails the person a link back to the deal. Decline sets Hold and sends nothing.", html)
+
+
+class CatchUp(unittest.TestCase):
+    """Form details saved before the person existed: link and fill names once."""
+    def setUp(self):
+        lf._daq_slim_cache.update({"etag": None, "checked_at": 0.0, "by_email": None, "by_id": None})
+        lf._daq_live_tried.clear()
+        p = mock.patch("builtins.print"); self.log = p.start(); self.addCleanup(p.stop)
+        p = mock.patch.dict(os.environ, {"BRIEF_PAGE_KEY": KEY}); p.start(); self.addCleanup(p.stop)
+        self.calls = []
+        self.live_entries = [{"id": 888, "email": "Nia@Z.com"}]
+        self.person = {"first_name": "", "last_name": "Unknown"}
+
+    def api(self, method, endpoint, payload=None, jwt=None, timeout=15):
+        self.calls.append((method, endpoint, payload, timeout))
+        if endpoint.startswith("/people.json?"):
+            return {"status": 200, "data": {"entries": self.live_entries}}
+        if method == "GET":
+            return {"status": 200, "data": dict(self.person)}
+        return {"status": 200, "data": {}}
+
+    def store(self, extra_people=()):
+        q = {"items": {"nia@z.com": {"email": "nia@z.com", "person_id": None, "reason": "signup",
+                                     "first_name": "Nia", "last_name": "New", "country": "Japan",
+                                     "accredited": "yes", "details_at": "2030-03-17T10:00:00+00:00",
+                                     "from": "/deal/9", "first_at": "2030-03-17T10:00:00+00:00",
+                                     "last_at": "2030-03-17T10:00:00+00:00"}}, "declined": {}}
+        people = {"people": PEOPLE["people"] + list(extra_people)}
+        return S3({(B, SLIM): json.dumps(people).encode(), (B, Q): json.dumps(q).encode()})
+
+    def render(self, s3, now=NOW):
+        with mock.patch.object(lf, "call_pipeline_api", self.api):
+            return lf._render_access_queue_section(s3, now=now, jwt="jwt")
+
+    def item(self, s3):
+        return json.loads(s3.objects[(B, Q)])["items"]["nia@z.com"]
+
+    def writes(self):
+        return [c for c in self.calls if c[0] != "GET"]
+
+    def test_live_match_links_and_fills_names_once(self):
+        s3 = self.store()
+        html = self.render(s3)
+        self.assertIn('href="https://app.pipelinecrm.com/people/888"', html)
+        self.assertIn(">Nia New</a>", html)
+        it = self.item(s3)
+        self.assertEqual(it["person_id"], "888")
+        self.assertTrue(it["names_synced_at"])
+        self.assertEqual(self.writes(), [("PUT", "/people/888.json",
+                                          {"person": {"first_name": "Nia", "last_name": "New"}}, 3)])
+        lookup = [c for c in self.calls if c[1].startswith("/people.json?")][0]
+        self.assertIn("conditions[email]=nia%40z.com", lookup[1])
+        self.assertEqual(lookup[3], 3)
+        self.calls.clear()
+        self.render(s3, now=NOW + 3600)                       # later renders: no lookup, no write
+        self.assertEqual(self.calls, [])
+
+    def test_snapshot_match_no_live_lookup(self):
+        s3 = self.store([{"id": 401, "first_name": ".", "email": "nia@z.com", "custom_fields": {}}])
+        self.render(s3)
+        self.assertFalse([c for c in self.calls if c[1].startswith("/people.json?")])
+        self.assertEqual(self.item(s3)["person_id"], "401")
+        self.assertEqual(self.writes()[0][1], "/people/401.json")
+
+    def test_real_name_never_overwritten(self):
+        self.person = {"first_name": "Nadia", "last_name": "Newman"}
+        s3 = self.store()
+        self.render(s3)
+        self.assertEqual(self.writes(), [])
+        self.assertTrue(self.item(s3)["names_synced_at"])      # marked done; never retried
+
+    def test_not_found_throttled_and_never_creates(self):
+        self.live_entries = [{"id": 5, "email": "nia@z.com.evil"}]
+        s3 = self.store()
+        self.render(s3)
+        self.render(s3, now=NOW + 300)                        # within 10 min: no second lookup
+        self.assertEqual(len([c for c in self.calls if c[1].startswith("/people.json?")]), 1)
+        self.render(s3, now=NOW + 601)
+        self.assertEqual(len([c for c in self.calls if c[1].startswith("/people.json?")]), 2)
+        self.assertEqual(self.writes(), [])                  # no POST /people, no PUT
+        self.assertIsNone(self.item(s3)["person_id"])
+
+    def test_lookup_failure_is_soft(self):
+        def boom(*a, **k):
+            raise TimeoutError()
+        s3 = self.store()
+        with mock.patch.object(lf, "call_pipeline_api", boom):
+            html = lf._render_access_queue_section(s3, now=NOW, jwt="jwt")
+        self.assertIn("Deal access queue (1)", html)
+        self.assertIn("not in CRM yet", html)
+        logged = " ".join(str(c) for c in self.log.call_args_list)
+        self.assertNotIn("nia@z.com", logged)
+        self.assertNotIn("Nia", logged)
