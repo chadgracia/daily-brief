@@ -7001,6 +7001,34 @@ DAQ_PLACEHOLDER_NAMES = frozenset({"", ".", "..", "...", "-", "--", "_", "?", "x
                                    "null", "unknown", "(unknown)", "unverified", "(unverified)", "tbd",
                                    "first", "last", "name", "first name", "last name"})
 DAQ_ACCREDITED = {"yes": "Yes", "unsure": "Not sure"}
+# Same rule as the deal gate: cleared ONLY Substantive / Accredited Investor / Qualified Client /
+# Qualified Purchaser, and never while Hold or Non-Accredited is also set.
+DAQ_IL_CLEARED = frozenset({"7162165", "6950563", "7209227", "6950564"})
+DAQ_IL_NOT_CLEARED = frozenset({"7161646", "6950562"})
+DAQ_ALREADY_CLEARED_MSG = "Nothing changed: this person already has access."
+
+
+def _daq_person_cleared(pid, people):
+    """True when the snapshot says this person already clears the deal gate."""
+    if not pid or not people:
+        return False
+    rec = people[1].get(str(pid))
+    levels = set(rec[2]) if rec else set()
+    return bool(levels & DAQ_IL_CLEARED) and not (levels & DAQ_IL_NOT_CLEARED)
+
+
+def _daq_drop_items(s3, emails):
+    """Silently remove queue items (no email, no Pipeline write, not 'declined')."""
+    try:
+        q = _daq_read(s3, DAQ_QUEUE_KEY)
+        qi = q.get("items") if isinstance(q.get("items"), dict) else {}
+        for e in emails:
+            qi.pop(e, None)
+        _daq_write(s3, DAQ_QUEUE_KEY, {"items": qi,
+                                        "declined": q.get("declined") if isinstance(q.get("declined"), dict) else {}})
+        print(f"access-queue: removed {len(emails)} item(s) already cleared")
+    except Exception as e:
+        print(f"access-queue: cleared-item removal failed ({type(e).__name__})")
 _DAQ_LINKEDIN_OK = re.compile(r"^https://www\.linkedin\.com/[A-Za-z0-9\-._~%/]*$")
 _DAQ_DEAL_PATH = re.compile(r"^/deal/\d{1,15}$")
 DAQ_APPROVED_SUBJECT = "Your access is approved"
@@ -7061,9 +7089,11 @@ def _daq_option_ids(value):
 
 
 def _daq_emails(p):
+    """Lowercased, trimmed emails: all three Pipeline slots (email, email2,
+    home_email) plus any other email* field (same rule as the deal gate)."""
     out = set()
     for k, v in p.items():
-        if not isinstance(k, str) or not k.lower().startswith("email"):
+        if not isinstance(k, str) or not (k.lower().startswith("email") or k.lower() == "home_email"):
             continue
         for item in (v if isinstance(v, list) else [v]):
             if isinstance(item, dict):
@@ -7266,6 +7296,15 @@ def _render_access_queue_section(s3=None, now=None, jwt=None):
         return ""
     people = _daq_people(s3)
     items = _daq_catch_up(s3, items, people, now, jwt)
+    # Stale items for people who already clear the gate: removed silently, never shown
+    # (a Decline would set a real client to Hold).
+    cleared = [e for e, it in items.items()
+               if _daq_person_cleared(_daq_resolve(e, it if isinstance(it, dict) else {}, people)[0], people)]
+    if cleared:
+        _daq_drop_items(s3, cleared)
+        items = {e: it for e, it in items.items() if e not in cleared}
+        if not items:
+            return ""
     key = os.environ.get("BRIEF_PAGE_KEY", "")
     action = escape("?view=access-queue&key=" + quote(key, safe=""), quote=True)
 
@@ -7356,7 +7395,11 @@ def _handle_access_queue_post(event, s3=None, jwt=None, now=None, ses=None):
     if email not in items:
         return _daq_page("Nothing changed: that entry is no longer in the queue.")
     item = dict(items[email])
-    pid, _name, _co, _lvl = _daq_resolve(email, item, _daq_people(s3))
+    people = _daq_people(s3)
+    pid, _name, _co, _lvl = _daq_resolve(email, item, people)
+    if act == "decline" and _daq_person_cleared(pid, people):
+        _daq_drop_items(s3, [email])
+        return _daq_page(DAQ_ALREADY_CLEARED_MSG)
     if act == "approve" and not pid:
         return _daq_page("Not approved: this person is not in the CRM yet.")
     if pid:

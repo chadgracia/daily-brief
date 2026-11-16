@@ -380,3 +380,69 @@ class CatchUp(unittest.TestCase):
         logged = " ".join(str(c) for c in self.log.call_args_list)
         self.assertNotIn("nia@z.com", logged)
         self.assertNotIn("Nia", logged)
+
+
+class EmailSlotsAndClearedItems(unittest.TestCase):
+    def setUp(self):
+        lf._daq_slim_cache.update({"etag": None, "checked_at": 0.0, "by_email": None, "by_id": None})
+        lf._daq_live_tried.clear()
+        p = mock.patch("builtins.print"); p.start(); self.addCleanup(p.stop)
+        p = mock.patch.dict(os.environ, {"BRIEF_PAGE_KEY": KEY}); p.start(); self.addCleanup(p.stop)
+        self.people = {"people": [
+            {"id": 501, "first_name": "Cleo", "last_name": "Client", "email": "work@c.com", "email2": "Cleo2@C.com",
+             "custom_fields": {"custom_label_3923758": 7162165}},              # Substantive via email2
+            {"id": 502, "full_name": "Hope Home", "email": "w@h.com", "home_email": " Hope@Home.com",
+             "custom_fields": {"custom_label_3923758": [6950564]}},            # QP via home_email
+            {"id": 503, "full_name": "Pat Pending", "email": "p@p.com", "email2": "pat2@p.com",
+             "custom_fields": {"custom_label_3923758": 7161646}},              # Hold via email2
+            {"id": 504, "full_name": "Mix", "email": "mix@m.com",
+             "custom_fields": {"custom_label_3923758": [7162165, 7161646]}}]}  # Substantive + Hold: not cleared
+        self.q = {"items": {e: {"email": e, "person_id": None, "reason": "signup",
+                                "first_at": "2030-03-17T10:00:00+00:00", "last_at": "2030-03-17T10:00:00+00:00"}
+                            for e in ("cleo2@c.com", "hope@home.com", "pat2@p.com", "mix@m.com")},
+                  "declined": {}}
+
+    def s3(self):
+        return S3({(B, SLIM): json.dumps(self.people).encode(), (B, Q): json.dumps(self.q).encode()})
+
+    def test_three_slots_indexed(self):
+        by_email, _ = lf._daq_people(self.s3())
+        for e, pid in (("work@c.com", "501"), ("cleo2@c.com", "501"), ("hope@home.com", "502"), ("pat2@p.com", "503")):
+            self.assertEqual(by_email.get(e), [pid], e)
+
+    def test_cleared_items_removed_silently_and_never_declinable(self):
+        s3, api = self.s3(), Api()
+        with mock.patch.object(lf, "call_pipeline_api", api):
+            html = lf._render_access_queue_section(s3, now=NOW, jwt="jwt")
+        self.assertIn("Deal access queue (2)", html)
+        for gone in ("cleo2@c.com", "hope@home.com", "Cleo", "Hope"):
+            self.assertNotIn(gone, html)
+        self.assertIn("pat2@p.com", html)
+        self.assertIn("mix@m.com", html)                     # Hold beats Substantive: still pending
+        q = json.loads(s3.objects[(B, Q)])
+        self.assertEqual(set(q["items"]), {"pat2@p.com", "mix@m.com"})
+        self.assertEqual(q["declined"], {})                 # not declined
+        self.assertEqual(api.calls, [])                     # no Pipeline write
+
+    def test_pending_via_email2_shows_approve(self):
+        html = lf._render_access_queue_section(self.s3(), now=NOW, jwt="jwt")
+        row = html.split("pat2@p.com", 1)[1].split("</tr>", 1)[0]
+        self.assertIn(">Approve<", row)
+        self.assertIn(">Decline<", row)
+        self.assertIn("Hold: Screen for Substantive", html.split("pat2@p.com", 1)[1].split("</tr>", 1)[0])
+
+    def test_post_decline_refused_for_cleared_person(self):
+        s3, api, ses = self.s3(), Api(), SES()
+        r = post(s3, "decline", "cleo2@c.com", api, ses=ses)
+        self.assertIn("Nothing changed: this person already has access.", r["body"])
+        self.assertEqual((api.calls, ses.sent), ([], []))
+        q = json.loads(s3.objects[(B, Q)])
+        self.assertNotIn("cleo2@c.com", q["items"])
+        self.assertNotIn("cleo2@c.com", q["declined"])
+
+    def test_post_approve_via_email2_uses_matched_person(self):
+        s3, api, ses = self.s3(), Api(), SES()
+        r = post(s3, "approve", "pat2@p.com", api, ses=ses)
+        self.assertEqual(r["statusCode"], 303)
+        self.assertEqual(api.calls[0][1], "/people/503.json")
+        self.assertEqual(ses.sent[0]["Destination"]["ToAddresses"], ["pat2@p.com"])
