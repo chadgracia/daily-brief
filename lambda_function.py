@@ -7075,6 +7075,56 @@ def _daq_return_link(path):
     return DAQ_SITE + "/"
 
 
+DAQ_INVITE_SUBJECT = "Access to Gracia Group deal terms"
+DAQ_PARTNER_DESK_URL = "https://trades.graciagroup.com/?view=partner-desk"
+DAQ_INVITE_DAYS = 30
+DAQ_INVITE_SENT_MSG = "Invitation sent."
+DAQ_INVITE_FAILED_MSG = "The invitation could not be sent."
+DAQ_INVITE_REFUSED_MSG = "Nothing changed: only intermediaries in the queue can be invited."
+
+
+def _daq_invite_first(pid, item, people):
+    """Pipeline first name, else the form first name, else '' (greeting 'Hello,')."""
+    rec = _daq_rec(pid, people)
+    first = rec[5] if rec and len(rec) > 5 else ""
+    if first and first.strip().lower() not in DAQ_PLACEHOLDER_NAMES:
+        return first.strip()
+    form = str((item or {}).get("first_name") or "").strip()
+    return form if form and form.lower() not in DAQ_PLACEHOLDER_NAMES else ""
+
+
+def _daq_invite_text(first):
+    """(subject, body) of the Partner Desk invitation: the pop-up shows exactly this."""
+    hello = f"Hi {first}," if first else "Hello,"
+    return DAQ_INVITE_SUBJECT, (
+        f"{hello}\n\nThanks for registering. Brokers, advisers and finders see our deal terms through "
+        "the Partner Desk, where you can choose how you'd like to work with us:\n"
+        f"{DAQ_PARTNER_DESK_URL}\n\nIf I can help with anything, just reply to this email.\n\nChad Gracia\n")
+
+
+def _daq_ses_send(ses, email, subject, text):
+    """One SES email to `email`, same From / Reply-To / BCC as the approval email. Raises on failure."""
+    (ses or boto3.client("ses", region_name=SES_REGION)).send_email(
+        Source=MAILER_FROM,
+        Destination={"ToAddresses": [email], "BccAddresses": list(TO_ADDRS)},
+        ReplyToAddresses=["cgracia@rainmakersecurities.com"],
+        Message={"Subject": {"Data": subject, "Charset": "UTF-8"},
+                 "Body": {"Text": {"Data": text, "Charset": "UTF-8"}}})
+
+
+def _daq_invited_at(queue, email, now):
+    """ISO time this address was invited within the last DAQ_INVITE_DAYS days, else ''."""
+    inter = queue.get("intermediaries") if isinstance(queue.get("intermediaries"), dict) else {}
+    rec = inter.get(email) if isinstance(inter.get(email), dict) else {}
+    at = str(rec.get("invited_at") or "")
+    try:
+        if at and now - datetime.fromisoformat(at).timestamp() < DAQ_INVITE_DAYS * 86400:
+            return at
+    except (TypeError, ValueError):
+        pass
+    return ""
+
+
 def _daq_send_approval_email(ses, email, first, path):
     """ONE email to the approved address. Same sender (MAILER_FROM) and reply-to as
     the client mailer, BCC to the brief recipient (TO_ADDRS), matching trades'
@@ -7084,12 +7134,7 @@ def _daq_send_approval_email(ses, email, first, path):
             f"View the deal: {_daq_return_link(path)}\n\n"
             "If I can help with anything, just reply to this email.\n\nChad Gracia\n")
     try:
-        (ses or boto3.client("ses", region_name=SES_REGION)).send_email(
-            Source=MAILER_FROM,
-            Destination={"ToAddresses": [email], "BccAddresses": list(TO_ADDRS)},
-            ReplyToAddresses=["cgracia@rainmakersecurities.com"],
-            Message={"Subject": {"Data": DAQ_APPROVED_SUBJECT, "Charset": "UTF-8"},
-                     "Body": {"Text": {"Data": text, "Charset": "UTF-8"}}})
+        _daq_ses_send(ses, email, DAQ_APPROVED_SUBJECT, text)
         print("access-queue: approval email sent")
         return True
     except Exception as e:
@@ -7156,7 +7201,8 @@ def _daq_people(s3=None):
             by_id[pid] = (str(name or "").strip(), str(company or "").strip(),
                           frozenset(_daq_option_ids(cf.get(DAQ_IL_FIELD))),
                           frozenset(_daq_option_ids(cf.get(DAQ_TRANSACTOR_FIELD))),
-                          frozenset(_daq_option_ids(cf.get(DAQ_PD_FIELD))))
+                          frozenset(_daq_option_ids(cf.get(DAQ_PD_FIELD))),
+                          str(p.get("first_name") or "").strip())
             for em in _daq_emails(p):
                 by_email.setdefault(em, []).append(pid)
         c.update({"etag": etag, "checked_at": now, "by_email": by_email, "by_id": by_id})
@@ -7380,7 +7426,13 @@ def _render_access_queue_section(s3=None, now=None, jwt=None):
                      f'style="{LINK_STYLE_500}">From {escape(src)}</a>') if src.startswith("/") else ""
         requested = line(escape(when), "white-space:nowrap;") + line(from_html)
         if broker:
-            buttons = btn(email, "remove", "Remove", "#6b7280")
+            subj, body = _daq_invite_text(_daq_invite_first(pid, it, people))
+            bell = (f'<button type="button" class="daq-bell" title="Invite to the Partner Desk" '
+                    f'aria-label="Invite to the Partner Desk" data-email="{escape(email, quote=True)}" '
+                    f'data-subject="{escape(subj, quote=True)}" data-body="{escape(body, quote=True)}" '
+                    'style="padding:4px 8px;font-size:13px;border:1px solid #6b7280;background:#fff;'
+                    'border-radius:4px;cursor:pointer;margin:0 4px 0 0">&#128276;</button>')
+            buttons = bell + btn(email, "remove", "Remove", "#6b7280")
         else:
             buttons = ((btn(email, "approve", "Approve", "#15803d") if pid else "")
                        + btn(email, "decline", "Decline", "#b91c1c"))
@@ -7397,7 +7449,48 @@ def _render_access_queue_section(s3=None, now=None, jwt=None):
             '<p style="margin:0 0 8px;font-size:13px;color:#6b7280">Approve sets Investor Level to '
             'Substantive, unlocks deal terms within a minute and emails the person a link back to the deal. '
             'Decline sets Hold and sends nothing.</p>'
-            f'<table style="{TABLE_STYLE}"><colgroup>{cols}</colgroup><tr>{head}</tr>{"".join(rows)}</table></div>')
+            f'<table style="{TABLE_STYLE}"><colgroup>{cols}</colgroup><tr>{head}</tr>{"".join(rows)}</table>'
+            + (_daq_invite_modal(action) if 'class="daq-bell"' in "".join(rows) else "") + '</div>')
+
+
+# In-page pop-up for the Partner Desk invitation (never alert/confirm/prompt).
+# Send is a POST behind the page key; Cancel or a click outside closes it.
+DAQ_INVITE_SCRIPT = """<script>(function(){
+var m=document.getElementById('daq-invite-modal');if(!m)return;
+function close(){m.style.display='none';}
+document.querySelectorAll('.daq-bell').forEach(function(b){b.addEventListener('click',function(){
+document.getElementById('daq-invite-to').textContent=b.getAttribute('data-email');
+document.getElementById('daq-invite-subject').textContent=b.getAttribute('data-subject');
+document.getElementById('daq-invite-body').textContent=b.getAttribute('data-body');
+document.getElementById('daq-invite-email').value=b.getAttribute('data-email');
+m.style.display='flex';});});
+document.getElementById('daq-invite-cancel').addEventListener('click',close);
+m.addEventListener('click',function(e){if(e.target===m)close();});
+document.addEventListener('keydown',function(e){if(e.key==='Escape')close();});
+})();</script>"""
+
+
+def _daq_invite_modal(action):
+    return (
+        '<div id="daq-invite-modal" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,.4);'
+        'z-index:1000;align-items:center;justify-content:center;padding:16px">'
+        '<div role="dialog" aria-modal="true" aria-labelledby="daq-invite-title" style="background:#fff;'
+        'border-radius:8px;max-width:560px;width:100%;padding:18px 20px;font-family:Arial,sans-serif;'
+        'box-shadow:0 10px 30px rgba(0,0,0,.25)">'
+        '<h3 id="daq-invite-title" style="margin:0 0 10px;font-size:16px">Invite to the Partner Desk</h3>'
+        '<div style="font-size:13px;margin:0 0 4px">To: <span id="daq-invite-to"></span></div>'
+        '<div style="font-size:13px;margin:0 0 8px">Subject: <span id="daq-invite-subject"></span></div>'
+        '<pre id="daq-invite-body" style="white-space:pre-wrap;font-family:Arial,sans-serif;font-size:13px;'
+        'background:#f9fafb;border:1px solid #e5e7eb;border-radius:4px;padding:10px;margin:0 0 12px"></pre>'
+        f'<form method="post" action="{action}" style="margin:0;text-align:right">'
+        '<input type="hidden" name="act" value="invite">'
+        '<input type="hidden" name="email" id="daq-invite-email" value="">'
+        '<button type="button" id="daq-invite-cancel" style="padding:6px 14px;font-size:13px;'
+        'border:1px solid #6b7280;background:#fff;color:#6b7280;border-radius:4px;cursor:pointer;'
+        'margin:0 6px 0 0">Cancel</button>'
+        '<button type="submit" style="padding:6px 14px;font-size:13px;border:1px solid #15803d;'
+        'background:#15803d;color:#fff;border-radius:4px;cursor:pointer">Send</button></form></div></div>'
+        + DAQ_INVITE_SCRIPT)
 
 
 def _daq_form(event):
@@ -7419,12 +7512,40 @@ def _daq_page(msg):
                      f'<p>{escape(msg)}</p><p><a href="{back}">Back to the brief</a></p></body></html>')}
 
 
+def _daq_invite(s3, ses, email, pid, item, people, iso):
+    """Send the Partner Desk invitation to one intermediary row, then drop the item
+    (no Pipeline write, not declined) and record the invite in 'intermediaries'."""
+    if (isinstance(item, dict) and item.get("accredited") == "intermediary") or not _daq_is_broker(pid, people):
+        return _daq_page(DAQ_INVITE_REFUSED_MSG)
+    subject, text = _daq_invite_text(_daq_invite_first(pid, item, people))
+    try:
+        _daq_ses_send(ses, email, subject, text)
+    except Exception as e:
+        print(f"access-queue: invitation email failed ({type(e).__name__})")
+        return _daq_page(DAQ_INVITE_FAILED_MSG)
+    print("access-queue: invitation email sent")
+    try:
+        q = _daq_read(s3, DAQ_QUEUE_KEY)
+        qi = q.get("items") if isinstance(q.get("items"), dict) else {}
+        inter = q.get("intermediaries") if isinstance(q.get("intermediaries"), dict) else {}
+        qi.pop(email, None)
+        prev = inter.get(email) if isinstance(inter.get(email), dict) else {}
+        inter[email] = dict(prev, email=email, person_id=(str(pid) if pid else prev.get("person_id")),
+                            invited=True, invited_at=iso)
+        _daq_write(s3, DAQ_QUEUE_KEY, dict(q, items=qi, intermediaries=inter,
+                                           declined=q.get("declined") if isinstance(q.get("declined"), dict) else {}))
+    except Exception as e:
+        print(f"access-queue: invitation sent but the queue could not be saved ({type(e).__name__})")
+        return _daq_page("Invitation sent, but the queue could not be updated.")
+    return _daq_page(DAQ_INVITE_SENT_MSG)
+
+
 def _handle_access_queue_post(event, s3=None, jwt=None, now=None, ses=None):
     """POST ?view=access-queue (page key already checked): approve / decline one item."""
     f = _daq_form(event)
     act = (f.get("act") or "").strip()
     email = (f.get("email") or "").strip().lower()
-    if act not in ("approve", "decline", "remove") or not email:
+    if act not in ("approve", "decline", "remove", "invite") or not email:
         return _daq_page("Nothing changed: unknown request.")
     now = time.time() if now is None else now
     iso = datetime.fromtimestamp(now, timezone.utc).isoformat(timespec="seconds")
@@ -7436,11 +7557,17 @@ def _handle_access_queue_post(event, s3=None, jwt=None, now=None, ses=None):
         return _daq_page("Nothing changed: the queue could not be read.")
     items = queue.get("items") if isinstance(queue.get("items"), dict) else {}
     declined = queue.get("declined") if isinstance(queue.get("declined"), dict) else {}
+    if act == "invite":
+        invited = _daq_invited_at(queue, email, now)
+        if invited:
+            return _daq_page(f"Already invited on {invited[:10]}.")
     if email not in items:
         return _daq_page("Nothing changed: that entry is no longer in the queue.")
     item = dict(items[email])
     people = _daq_people(s3)
     pid, _name, _co, _lvl = _daq_resolve(email, item, people)
+    if act == "invite":
+        return _daq_invite(s3, ses, email, pid, item, people, iso)
     if act == "decline" and _daq_person_cleared(pid, people):
         _daq_drop_items(s3, [email])
         return _daq_page(DAQ_ALREADY_CLEARED_MSG)

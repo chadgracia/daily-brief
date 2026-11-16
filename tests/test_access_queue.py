@@ -556,3 +556,183 @@ class FiveColumnLayoutAndBrokers(unittest.TestCase):
         self.assertNotIn("reg@k.com", q["items"])
         self.assertEqual(q["declined"], {})
         self.assertEqual(api.calls, [])
+
+
+class PartnerDeskInvite(unittest.TestCase):
+    """Bell + pop-up on intermediary rows; POST act=invite sends the Partner Desk invitation."""
+    BODY = ("Thanks for registering. Brokers, advisers and finders see our deal terms through the Partner Desk, "
+            "where you can choose how you'd like to work with us:\n"
+            "https://trades.graciagroup.com/?view=partner-desk\n\n"
+            "If I can help with anything, just reply to this email.\n\nChad Gracia\n")
+
+    def setUp(self):
+        lf._daq_slim_cache.update({"etag": None, "checked_at": 0.0, "by_email": None, "by_id": None})
+        lf._daq_live_tried.clear()
+        p = mock.patch("builtins.print"); p.start(); self.addCleanup(p.stop)
+        p = mock.patch.dict(os.environ, {"BRIEF_PAGE_KEY": KEY}); p.start(); self.addCleanup(p.stop)
+        self.people = {"people": PEOPLE["people"] + [
+            {"id": 701, "first_name": "Bo", "full_name": "Bo Broker", "email": "bo@k.com",
+             "custom_fields": {"custom_label_3759163": [6888332], "custom_label_3923758": 7161646}},
+            {"id": 704, "first_name": "", "full_name": "Unknown", "email": "fin@k.com",
+             "custom_fields": {"custom_label_3759163": 6888333}}]}
+
+    def s3(self, items, extra=None):
+        q = {"items": {e: dict({"email": e, "person_id": None, "reason": "signup",
+                                "first_at": "2030-03-17T10:00:00+00:00", "last_at": "2030-03-17T10:00:00+00:00"}, **x)
+                       for e, x in items.items()},
+             "declined": {"old@z.com": "2030-01-01T00:00:00+00:00"},
+             "intermediaries": {"i@k.com": {"email": "i@k.com", "reason": "intermediary"}}}
+        q.update(extra or {})
+        return S3({(B, SLIM): json.dumps(self.people).encode(), (B, Q): json.dumps(q).encode()})
+
+    def queue(self, s3):
+        return json.loads(s3.objects[(B, Q)])
+
+    def row(self, html, email):
+        return html.split(email, 1)[1].split("</tr>", 1)[0] if email in html else ""
+
+    def test_bell_only_on_intermediary_rows(self):
+        html = lf._render_access_queue_section(self.s3({"bo@k.com": {}, "hal@z.com": {"person_id": "302"}}),
+                                               now=NOW, jwt="jwt")
+        bo, hal = self.row(html, "bo@k.com"), self.row(html, "hal@z.com")
+        self.assertIn('title="Invite to the Partner Desk"', bo)
+        self.assertLess(bo.index("daq-bell"), bo.index(">Remove<"))
+        self.assertNotIn("daq-bell", hal)
+        self.assertEqual(html.count('class="daq-bell"'), 1)
+        self.assertIn('id="daq-invite-modal"', html)
+        for bad in ("alert(", "confirm(", "prompt("):
+            self.assertNotIn(bad, html)
+        modal = html.split('id="daq-invite-modal"', 1)[1]
+        self.assertIn('method="post"', modal)
+        self.assertIn('name="act" value="invite"', modal)
+        self.assertIn(">Send<", modal)
+        self.assertIn(">Cancel<", modal)
+
+    def test_no_modal_without_intermediaries(self):
+        html = lf._render_access_queue_section(self.s3({"hal@z.com": {"person_id": "302"}}), now=NOW, jwt="jwt")
+        self.assertNotIn("daq-invite-modal", html)
+
+    def test_preview_equals_sent_text(self):
+        s3 = self.s3({"bo@k.com": {"first_name": "Robert"}})
+        html = lf._render_access_queue_section(s3, now=NOW, jwt="jwt")
+        from html import unescape
+        bell = self.row(html, "bo@k.com").split('class="daq-bell"', 1)[1]
+        shown_body = unescape(bell.split('data-body="', 1)[1].split('"', 1)[0])
+        shown_subj = unescape(bell.split('data-subject="', 1)[1].split('"', 1)[0])
+        ses = SES()
+        lf._daq_slim_cache.update({"etag": None, "checked_at": 0.0, "by_email": None, "by_id": None})
+        post(s3, "invite", "bo@k.com", Api(), ses=ses)
+        msg = ses.sent[0]["Message"]
+        self.assertEqual(shown_body, msg["Body"]["Text"]["Data"])
+        self.assertEqual(shown_subj, msg["Subject"]["Data"])
+
+    def test_one_send_right_recipient_subject_body(self):
+        s3, ses, api = self.s3({"bo@k.com": {"first_name": "Robert"}, "hal@z.com": {"person_id": "302"}}), SES(), Api()
+        r = post(s3, "invite", "bo@k.com", api, ses=ses)
+        self.assertIn("Invitation sent.", r["body"])
+        self.assertEqual(len(ses.sent), 1)
+        kw = ses.sent[0]
+        self.assertEqual(kw["Destination"]["ToAddresses"], ["bo@k.com"])
+        self.assertEqual(kw["Destination"]["BccAddresses"], list(lf.TO_ADDRS))
+        self.assertEqual(kw["Source"], lf.MAILER_FROM)
+        self.assertEqual(kw["ReplyToAddresses"], ["cgracia@rainmakersecurities.com"])
+        self.assertEqual(kw["Message"]["Subject"]["Data"], "Access to Gracia Group deal terms")
+        self.assertEqual(kw["Message"]["Body"]["Text"]["Data"], "Hi Bo,\n\n" + self.BODY)   # Pipeline first name wins
+        self.assertEqual(api.calls, [])                                                    # no Pipeline write
+        q = self.queue(s3)
+        self.assertNotIn("bo@k.com", q["items"])
+        self.assertIn("hal@z.com", q["items"])
+        self.assertNotIn("bo@k.com", q["declined"])
+        self.assertEqual(q["intermediaries"]["bo@k.com"]["invited_at"][:4], "2030")
+        self.assertTrue(q["intermediaries"]["bo@k.com"]["invited"])
+        self.assertIn("i@k.com", q["intermediaries"])
+
+    def test_approval_email_unchanged_sender(self):
+        ses = SES()
+        self.assertTrue(lf._daq_send_approval_email(ses, "x@z.com", "X", "/deal/1"))
+        kw = ses.sent[0]
+        self.assertEqual(kw["Message"]["Subject"]["Data"], lf.DAQ_APPROVED_SUBJECT)
+        self.assertEqual(kw["Source"], lf.MAILER_FROM)
+
+    def test_greeting_fallback(self):
+        ses = SES()
+        post(self.s3({"fin@k.com": {"first_name": "Fiona"}}), "invite", "fin@k.com", Api(), ses=ses)
+        self.assertTrue(ses.sent[0]["Message"]["Body"]["Text"]["Data"].startswith("Hi Fiona,\n\n"))
+        lf._daq_slim_cache.update({"etag": None, "checked_at": 0.0, "by_email": None, "by_id": None})
+        ses = SES()
+        post(self.s3({"fin@k.com": {}}), "invite", "fin@k.com", Api(), ses=ses)
+        self.assertEqual(ses.sent[0]["Message"]["Body"]["Text"]["Data"], "Hello,\n\n" + self.BODY)
+        html = lf._render_access_queue_section(self.s3({"fin@k.com": {}}), now=NOW, jwt="jwt")
+        self.assertIn('data-body="Hello,', html)
+
+    def test_get_never_sends(self):
+        ses = SES()
+        ev = {"requestContext": {"http": {"method": "GET"}},
+              "queryStringParameters": {"key": KEY, "view": "access-queue", "act": "invite", "email": "bo@k.com"},
+              "body": "act=invite&email=bo%40k.com"}
+        with mock.patch.object(lf, "_handle_access_queue_post", side_effect=AssertionError("GET must not post")), \
+                mock.patch.object(lf, "_daq_ses_send", side_effect=AssertionError("GET must not send")):
+            try:
+                lf.handle_http_request(ev)
+            except AssertionError:
+                raise
+            except Exception:
+                pass                                       # page render may need AWS; it must just never send
+        self.assertEqual(ses.sent, [])
+
+    def test_refused_for_investor_row(self):
+        s3, ses = self.s3({"hal@z.com": {"person_id": "302"}}), SES()
+        r = post(s3, "invite", "hal@z.com", Api(), ses=ses)
+        self.assertIn("only intermediaries in the queue can be invited", r["body"])
+        self.assertEqual(ses.sent, [])
+        self.assertIn("hal@z.com", self.queue(s3)["items"])
+
+    def test_refused_when_not_in_queue(self):
+        ses = SES()
+        r = post(self.s3({}), "invite", "bo@k.com", Api(), ses=ses)
+        self.assertIn("no longer in the queue", r["body"])
+        self.assertEqual(ses.sent, [])
+
+    def test_refused_within_30_days(self):
+        recent = datetime.fromtimestamp(NOW - 29 * 86400, timezone.utc).isoformat(timespec="seconds")
+        s3, ses = self.s3({"bo@k.com": {}}, {"intermediaries": {"bo@k.com": {"invited_at": recent}}}), SES()
+        r = post(s3, "invite", "bo@k.com", Api(), ses=ses)
+        self.assertIn(f"Already invited on {recent[:10]}.", r["body"])
+        self.assertEqual(ses.sent, [])
+        # a second press after a successful send is refused too
+        s3, ses = self.s3({"bo@k.com": {}}), SES()
+        post(s3, "invite", "bo@k.com", Api(), ses=ses)
+        r = post(s3, "invite", "bo@k.com", Api(), ses=ses)
+        self.assertIn("Already invited on", r["body"])
+        self.assertEqual(len(ses.sent), 1)
+        # older than 30 days: allowed again
+        old = datetime.fromtimestamp(NOW - 31 * 86400, timezone.utc).isoformat(timespec="seconds")
+        s3, ses = self.s3({"bo@k.com": {}}, {"intermediaries": {"bo@k.com": {"invited_at": old}}}), SES()
+        self.assertIn("Invitation sent.", post(s3, "invite", "bo@k.com", Api(), ses=ses)["body"])
+
+    def test_row_kept_when_send_fails(self):
+        s3, ses = self.s3({"bo@k.com": {}}), SES(fail=True)
+        logged = []
+        with mock.patch("builtins.print", side_effect=lambda *a, **k: logged.append(" ".join(map(str, a)))):
+            r = post(s3, "invite", "bo@k.com", Api(), ses=ses)
+        self.assertIn("The invitation could not be sent.", r["body"])
+        q = self.queue(s3)
+        self.assertIn("bo@k.com", q["items"])
+        self.assertNotIn("bo@k.com", q["intermediaries"])
+        fails = [l for l in logged if "invitation" in l]
+        self.assertEqual(len(fails), 1)
+        self.assertNotIn("bo@k.com", fails[0])
+        self.assertNotIn("Bo", fails[0])
+
+    def test_intermediaries_preserved_by_every_queue_write(self):
+        inter = {"i@k.com": {"email": "i@k.com", "reason": "intermediary"}}
+        for act, email in (("approve", "hal@z.com"), ("decline", "hal@z.com"), ("remove", "bo@k.com"),
+                           ("invite", "bo@k.com")):
+            lf._daq_slim_cache.update({"etag": None, "checked_at": 0.0, "by_email": None, "by_id": None})
+            s3 = self.s3({"hal@z.com": {"person_id": "302"}, "bo@k.com": {}})
+            post(s3, act, email, Api(), ses=SES())
+            self.assertEqual(self.queue(s3)["intermediaries"]["i@k.com"], inter["i@k.com"], act)
+        lf._daq_slim_cache.update({"etag": None, "checked_at": 0.0, "by_email": None, "by_id": None})
+        s3 = self.s3({"reg@z.com": {}})
+        lf._daq_drop_items(s3, ["reg@z.com"])
+        self.assertIn("i@k.com", self.queue(s3)["intermediaries"])
