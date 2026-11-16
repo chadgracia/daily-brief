@@ -7006,12 +7006,38 @@ DAQ_ACCREDITED = {"yes": "Yes", "unsure": "Not sure"}
 DAQ_IL_CLEARED = frozenset({"7162165", "6950563", "7209227", "6950564"})
 DAQ_IL_NOT_CLEARED = frozenset({"7161646", "6950562"})
 DAQ_ALREADY_CLEARED_MSG = "Nothing changed: this person already has access."
+# Deal gate broker rule: these Transactor Types are hard-blocked (Partner Desk instead),
+# unless Partner Desk Response is Partner – Registered (then they already have access).
+DAQ_TRANSACTOR_FIELD = "custom_label_3759163"
+DAQ_BROKER_TRANSACTOR_IDS = frozenset({"6577160", "6888332", "6888333"})
+DAQ_PD_FIELD = "custom_label_4011837"
+DAQ_PD_REGISTERED = "7218528"
+DAQ_INTERMEDIARY_MSG = "Nothing changed: intermediaries get access through the Partner Desk."
+
+
+def _daq_rec(pid, people):
+    rec = people[1].get(str(pid)) if (pid and people) else None
+    return rec if rec and len(rec) >= 5 else None
+
+
+def _daq_partner_registered(pid, people):
+    rec = _daq_rec(pid, people)
+    return bool(rec) and DAQ_PD_REGISTERED in rec[4]
+
+
+def _daq_is_broker(pid, people):
+    """Hard-blocked by the deal gate's broker rule (and not Partner – Registered)."""
+    rec = _daq_rec(pid, people)
+    return bool(rec) and bool(rec[3] & DAQ_BROKER_TRANSACTOR_IDS) and DAQ_PD_REGISTERED not in rec[4]
 
 
 def _daq_person_cleared(pid, people):
-    """True when the snapshot says this person already clears the deal gate."""
+    """True when the snapshot says this person already clears the deal gate
+    (verified Investor Level, or Partner – Registered)."""
     if not pid or not people:
         return False
+    if _daq_partner_registered(pid, people):
+        return True
     rec = people[1].get(str(pid))
     levels = set(rec[2]) if rec else set()
     return bool(levels & DAQ_IL_CLEARED) and not (levels & DAQ_IL_NOT_CLEARED)
@@ -7128,7 +7154,9 @@ def _daq_people(s3=None):
             co = p.get("company") if isinstance(p.get("company"), dict) else {}
             company = co.get("name") or p.get("company_name") or ""
             by_id[pid] = (str(name or "").strip(), str(company or "").strip(),
-                          frozenset(_daq_option_ids(cf.get(DAQ_IL_FIELD))))
+                          frozenset(_daq_option_ids(cf.get(DAQ_IL_FIELD))),
+                          frozenset(_daq_option_ids(cf.get(DAQ_TRANSACTOR_FIELD))),
+                          frozenset(_daq_option_ids(cf.get(DAQ_PD_FIELD))))
             for em in _daq_emails(p):
                 by_email.setdefault(em, []).append(pid)
         c.update({"etag": etag, "checked_at": now, "by_email": by_email, "by_id": by_id})
@@ -7174,7 +7202,7 @@ def _daq_resolve(email, item, people):
         return None, "", "", "not in CRM yet"
     want = str((item or {}).get("person_id") or "")
     pid = want if want in pids else pids[0]
-    name, company, levels = by_id.get(pid) or ("", "", frozenset())
+    name, company, levels = (by_id.get(pid) or ("", "", frozenset()))[:3]
     return pid, name, company, _daq_level_label(levels)
 
 
@@ -7312,53 +7340,64 @@ def _render_access_queue_section(s3=None, now=None, jwt=None):
             return ""
     key = os.environ.get("BRIEF_PAGE_KEY", "")
     action = escape("?view=access-queue&key=" + quote(key, safe=""), quote=True)
+    small = "font-size:12px;color:#6b7280;"
+    cell = TD_STYLE + " overflow-wrap:anywhere;"
 
     def btn(email, act, label, color):
-        return (f'<form method="post" action="{action}" style="display:inline;margin:0 4px 0 0">'
+        return (f'<form method="post" action="{action}" style="display:inline-block;margin:0 4px 0 0">'
                 f'<input type="hidden" name="act" value="{act}">'
                 f'<input type="hidden" name="email" value="{escape(email, quote=True)}">'
                 f'<button type="submit" style="padding:4px 10px;font-size:13px;border:1px solid {color};'
                 f'background:#fff;color:{color};border-radius:4px;cursor:pointer">{label}</button></form>')
 
+    def line(html, style=small):
+        return f'<div style="{style}">{html}</div>' if html else ""
+
     rows = []
     for email in sorted(items, key=lambda e: str((items[e] or {}).get("last_at") or ""), reverse=True):
         it = items[email] if isinstance(items[email], dict) else {}
         pid, name, company, level = _daq_resolve(email, it, people)
+        broker = _daq_is_broker(pid, people)
         when = str(it.get("last_at") or it.get("first_at") or "")[:10]
         form_name = " ".join(x for x in (str(it.get("first_name") or "").strip(),
                                          str(it.get("last_name") or "").strip()) if x)
         name = _daq_real_name(name) or form_name
         who = escape(name or "(no name)")
-        li = _daq_linkedin(it.get("linkedin"))
-        li_html = (f'<a href="{escape(li, quote=True)}" target="_blank" rel="noopener noreferrer" '
-                   f'style="{LINK_STYLE_500}">Profile</a>') if li else ""
-        src = str(it.get("from") or "")
-        from_html = (f'<a href="{escape(DAQ_SITE + src, quote=True)}" target="_blank" rel="noopener" '
-                     f'style="{LINK_STYLE_500}">{escape(src)}</a>') if src.startswith("/") else ""
         if pid:
             who = (f'<a href="https://app.pipelinecrm.com/people/{escape(pid)}" target="_blank" '
                    f'rel="noopener" style="{LINK_STYLE_500}">{who}</a>')
-        buttons = (btn(email, "approve", "Approve", "#15803d") if pid else "") + btn(email, "decline", "Decline", "#b91c1c")
+        person = (line(who, "") + line(escape(company)) + line(escape(email)))
+        acc = DAQ_ACCREDITED.get(it.get("accredited"), "")
+        status = (line("Intermediary: Partner Desk", "") if broker
+                  else line(escape(level), "") + line(f"Accredited: {escape(acc)}" if acc else ""))
+        li = _daq_linkedin(it.get("linkedin"))
+        details = (line(escape(str(it.get("country") or "").strip()), "")
+                   + line(escape(str(it.get("employer") or "").strip()), "")
+                   + line(f'<a href="{escape(li, quote=True)}" target="_blank" rel="noopener noreferrer" '
+                          f'style="{LINK_STYLE_500}">LinkedIn</a>' if li else "", ""))
+        src = str(it.get("from") or "")
+        from_html = (f'<a href="{escape(DAQ_SITE + src, quote=True)}" target="_blank" rel="noopener" '
+                     f'style="{LINK_STYLE_500}">From {escape(src)}</a>') if src.startswith("/") else ""
+        requested = line(escape(when), "white-space:nowrap;") + line(from_html)
+        if broker:
+            buttons = btn(email, "remove", "Remove", "#6b7280")
+        else:
+            buttons = ((btn(email, "approve", "Approve", "#15803d") if pid else "")
+                       + btn(email, "decline", "Decline", "#b91c1c"))
         rows.append(
-            f'<tr><td style="{TD_STYLE}">{who}</td><td style="{TD_STYLE}">{escape(company)}</td>'
-            f'<td style="{TD_STYLE}">{escape(email)}</td><td style="{TD_STYLE}">{escape(level)}</td>'
-            f'<td style="{TD_STYLE}">{escape(str(it.get("country") or ""))}</td>'
-            f'<td style="{TD_STYLE}">{escape(str(it.get("employer") or ""))}</td>'
-            f'<td style="{TD_STYLE}">{li_html}</td>'
-            f'<td style="{TD_STYLE}">{escape(DAQ_ACCREDITED.get(it.get("accredited"), ""))}</td>'
-            f'<td style="{TD_STYLE}">{escape(str(it.get("reason") or ""))}</td>'
-            f'<td style="{TD_STYLE}">{escape(when)}</td><td style="{TD_STYLE}">{from_html}</td>'
-            f'<td style="{TD_STYLE}">{buttons}</td></tr>')
+            f'<tr><td style="{cell}">{person}</td><td style="{cell}">{status}</td>'
+            f'<td style="{cell}">{details}</td><td style="{cell}">{requested}</td>'
+            f'<td style="{TD_STYLE} white-space:nowrap;">{buttons}</td></tr>')
     head = "".join(f'<th style="text-align:left;padding:6px 8px;font-size:12px;color:#6b7280">{h}</th>'
-                   for h in ("Name", "Company", "Email", "Investor Level", "Country", "Employer", "LinkedIn",
-                             "Accredited", "Reason", "Date", "From", ""))
+                   for h in ("Person", "Status", "Details", "Requested", ""))
+    cols = "".join(f'<col style="width:{w}">' for w in ("31%", "19%", "18%", "14%", "18%"))
     return (f'<div id="access-queue" data-owner="chad" style="border:1px solid #e5e7eb;border-radius:8px;'
             f'padding:16px 18px;margin:0 0 16px 0;background:#ffffff">'
             f'<h2 style="{H2_STYLE}">Deal access queue ({len(rows)})</h2>'
             '<p style="margin:0 0 8px;font-size:13px;color:#6b7280">Approve sets Investor Level to '
             'Substantive, unlocks deal terms within a minute and emails the person a link back to the deal. '
             'Decline sets Hold and sends nothing.</p>'
-            f'<table style="width:100%;border-collapse:collapse"><tr>{head}</tr>{"".join(rows)}</table></div>')
+            f'<table style="{TABLE_STYLE}"><colgroup>{cols}</colgroup><tr>{head}</tr>{"".join(rows)}</table></div>')
 
 
 def _daq_form(event):
@@ -7385,7 +7424,7 @@ def _handle_access_queue_post(event, s3=None, jwt=None, now=None, ses=None):
     f = _daq_form(event)
     act = (f.get("act") or "").strip()
     email = (f.get("email") or "").strip().lower()
-    if act not in ("approve", "decline") or not email:
+    if act not in ("approve", "decline", "remove") or not email:
         return _daq_page("Nothing changed: unknown request.")
     now = time.time() if now is None else now
     iso = datetime.fromtimestamp(now, timezone.utc).isoformat(timespec="seconds")
@@ -7405,6 +7444,15 @@ def _handle_access_queue_post(event, s3=None, jwt=None, now=None, ses=None):
     if act == "decline" and _daq_person_cleared(pid, people):
         _daq_drop_items(s3, [email])
         return _daq_page(DAQ_ALREADY_CLEARED_MSG)
+    if act in ("approve", "remove") and _daq_is_broker(pid, people):
+        if act == "approve":
+            return _daq_page(DAQ_INTERMEDIARY_MSG)
+        _daq_drop_items(s3, [email])          # no email, no Pipeline write, not declined
+        key = os.environ.get("BRIEF_PAGE_KEY", "")
+        return {"statusCode": 303, "headers": {"Location": "?key=" + quote(key, safe="") + "#access-queue",
+                                               "Cache-Control": "no-store"}, "body": ""}
+    if act == "remove":
+        return _daq_page("Nothing changed: unknown request.")
     if act == "approve" and not pid:
         return _daq_page("Not approved: this person is not in the CRM yet.")
     if pid:

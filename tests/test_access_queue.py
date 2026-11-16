@@ -95,8 +95,8 @@ class AccessQueue(unittest.TestCase):
     def test_rows_and_post_forms(self):
         html = lf._render_access_queue_section(store(QUEUE))
         self.assertIn("Deal access queue (3)", html)
-        for s in ("Hal Hold", "Hold Co", "hal@z.com", "Hold: Screen for Substantive", "signup",
-                  "Sue Self", "Self-Confirmed Accredited", "self-confirmed", "2030-03-17",
+        for s in ("Hal Hold", "Hold Co", "hal@z.com", "Hold: Screen for Substantive",
+                  "Sue Self", "Self-Confirmed Accredited", "2030-03-17",
                   "https://app.pipelinecrm.com/people/302", "not in CRM yet"):
             self.assertIn(s, html)
         self.assertEqual(html.count('method="post"'), 5)          # 2 + 2 + Decline only for new@z.com
@@ -201,15 +201,15 @@ class QueueDetailsColumns(unittest.TestCase):
             "declined": {}}
         s3 = S3({(B, SLIM): json.dumps(people).encode(), (B, Q): json.dumps(q).encode()})
         html = lf._render_access_queue_section(s3)
-        for h in ("Country", "Employer", "Accredited", "From"):
+        for h in ("Person", "Status", "Details", "Requested"):
             self.assertIn(f">{h}</th>", html)
         self.assertIn(">Hal Hold</a>", html)               # real Pipeline name wins over "Harry H"
         self.assertNotIn("Harry", html)
         self.assertIn(">Dee Dot</a>", html)                # placeholder Pipeline name -> form name
-        self.assertIn(">Nia New</td>", html)               # not in CRM: form name
-        self.assertIn(">(no name)</td>", html)             # no form, no CRM
-        for s in ("Canada", "France", "Japan", ">Yes<", ">Not sure<", "&lt;b&gt;Hold Co&lt;/b&gt;",
-                  'href="https://trades.graciagroup.com/deal/9?x=1"', ">/deal/9?x=1</a>"):
+        self.assertIn('<div style="">Nia New</div>', html)  # not in CRM: form name
+        self.assertIn('<div style="">(no name)</div>', html)  # no form, no CRM
+        for s in ("Canada", "France", "Japan", "Accredited: Yes<", "Accredited: Not sure<", "&lt;b&gt;Hold Co&lt;/b&gt;",
+                  'href="https://trades.graciagroup.com/deal/9?x=1"', ">From /deal/9?x=1</a>"):
             self.assertIn(s, html)
         self.assertNotIn("<b>Hold Co</b>", html)
         self.assertEqual(html.count(">Approve<"), 2)        # hal, dot (CRM records); approve/decline unchanged
@@ -282,9 +282,8 @@ class ApprovalEmail(unittest.TestCase):
         q = self.queue()
         q["items"]["sue@z.com"]["linkedin"] = "javascript:alert(1)"
         html = lf._render_access_queue_section(store(q))
-        self.assertIn(">LinkedIn</th>", html)
         self.assertIn('<a href="https://www.linkedin.com/in/hal" target="_blank" rel="noopener noreferrer"', html)
-        self.assertEqual(html.count(">Profile</a>"), 1)
+        self.assertEqual(html.count(">LinkedIn</a>"), 1)
         self.assertNotIn("javascript:", html)
         self.assertIn("emails the person a link back to the deal. Decline sets Hold and sends nothing.", html)
 
@@ -469,3 +468,91 @@ class IntermediaryItems(unittest.TestCase):
         post(s3, "decline", "sue@z.com", Api())
         self.assertEqual(json.loads(s3.objects[(B, Q)])["intermediaries"],
                          {"ib@k.com": {"email": "ib@k.com", "accredited": "intermediary"}})
+
+
+class FiveColumnLayoutAndBrokers(unittest.TestCase):
+    def setUp(self):
+        lf._daq_slim_cache.update({"etag": None, "checked_at": 0.0, "by_email": None, "by_id": None})
+        lf._daq_live_tried.clear()
+        p = mock.patch("builtins.print"); p.start(); self.addCleanup(p.stop)
+        p = mock.patch.dict(os.environ, {"BRIEF_PAGE_KEY": KEY}); p.start(); self.addCleanup(p.stop)
+        self.people = {"people": PEOPLE["people"] + [
+            {"id": 701, "full_name": "Bo Broker", "email": "bo@k.com", "company": {"name": "Brokerage LLC"},
+             "custom_fields": {"custom_label_3759163": [6888332], "custom_label_3923758": 7161646}},
+            {"id": 702, "full_name": "Reg Partner", "email": "reg@k.com",
+             "custom_fields": {"custom_label_3759163": 6577160, "custom_label_4011837": 7218528}},
+            {"id": 703, "full_name": "Nat Natural", "email": "nat@k.com",
+             "custom_fields": {"custom_label_3759163": 6484810, "custom_label_3923758": 7161646}}]}
+
+    def s3(self, items):
+        q = {"items": {e: dict({"email": e, "person_id": None, "reason": "signup",
+                                "first_at": "2030-03-17T10:00:00+00:00", "last_at": "2030-03-17T10:00:00+00:00"}, **x)
+                       for e, x in items.items()}, "declined": {}}
+        return S3({(B, SLIM): json.dumps(self.people).encode(), (B, Q): json.dumps(q).encode()})
+
+    def row(self, html, email):
+        return html.split(email, 1)[1].split("</tr>", 1)[0] if email in html else ""
+
+    def test_five_columns_all_fields(self):
+        html = lf._render_access_queue_section(self.s3({"hal@z.com": {
+            "first_name": "Hal", "country": "Canada", "employer": "Hold Co", "accredited": "yes",
+            "linkedin": "https://www.linkedin.com/in/hal", "from": "/deal/9", "details_at": "x", "person_id": "302"}}),
+            now=NOW, jwt="jwt")
+        self.assertIn('<table style="width:100%; border-collapse:collapse; table-layout:fixed;"><colgroup>', html)
+        self.assertEqual(html.count("<th "), 5)
+        self.assertEqual(html.count("<col "), 5)
+        self.assertNotIn(">Reason</th>", html)
+        tr = html.split("</th></tr>", 1)[1].split("</tr>", 1)[0]
+        self.assertEqual(tr.count("<td "), 5)
+        for s in (">Hal Hold</a></div>", "Hold Co</div>", "hal@z.com</div>", "Hold: Screen for Substantive",
+                  "Accredited: Yes", "Canada", ">LinkedIn</a>", '<div style="white-space:nowrap;">2030-03-17</div>',
+                  ">From /deal/9</a>", ">Approve<", ">Decline<"):
+            self.assertIn(s, tr)
+        self.assertIn("overflow-wrap:anywhere", tr)
+        self.assertIn("white-space:nowrap;\"><form", tr)               # Approve + Decline side by side
+
+    def test_five_columns_no_fields(self):
+        html = lf._render_access_queue_section(self.s3({"ghost@z.com": {}}), now=NOW, jwt="jwt")
+        tr = html.split("</th></tr>", 1)[1].split("</tr>", 1)[0]
+        self.assertEqual(tr.count("<td "), 5)
+        self.assertNotIn("—", tr)
+        self.assertNotIn("Accredited:", tr)
+        self.assertNotIn("LinkedIn", tr)
+        self.assertNotIn("From ", tr)
+        self.assertIn(">Decline<", tr)
+        self.assertNotIn(">Approve<", tr)
+
+    def test_broker_shows_remove_not_approve(self):
+        html = lf._render_access_queue_section(self.s3({"bo@k.com": {}, "nat@k.com": {}}), now=NOW, jwt="jwt")
+        bo = self.row(html, "bo@k.com")
+        self.assertIn("Intermediary: Partner Desk", bo)
+        self.assertIn(">Remove<", bo)
+        self.assertNotIn(">Approve<", bo)
+        self.assertNotIn(">Decline<", bo)
+        nat = self.row(html, "nat@k.com")                                 # Natural Person: normal investor row
+        self.assertIn(">Approve<", nat)
+        self.assertNotIn("Intermediary", nat)
+
+    def test_approve_refused_and_remove_silent(self):
+        s3, api, ses = self.s3({"bo@k.com": {}}), Api(), SES()
+        r = post(s3, "approve", "bo@k.com", api, ses=ses)
+        self.assertIn("Nothing changed: intermediaries get access through the Partner Desk.", r["body"])
+        self.assertIn("bo@k.com", json.loads(s3.objects[(B, Q)])["items"])
+        r = post(s3, "remove", "bo@k.com", api, ses=ses)
+        self.assertEqual(r["statusCode"], 303)
+        q = json.loads(s3.objects[(B, Q)])
+        self.assertNotIn("bo@k.com", q["items"])
+        self.assertEqual(q["declined"], {})
+        self.assertEqual((api.calls, ses.sent), ([], []))
+        s3 = self.s3({"hal@z.com": {"person_id": "302"}})
+        self.assertIn("unknown request", post(s3, "remove", "hal@z.com", Api())["body"])   # not a broker
+
+    def test_partner_registered_broker_auto_removed(self):
+        s3, api = self.s3({"reg@k.com": {}, "hal@z.com": {"person_id": "302"}}), Api()
+        with mock.patch.object(lf, "call_pipeline_api", api):
+            html = lf._render_access_queue_section(s3, now=NOW, jwt="jwt")
+        self.assertNotIn("reg@k.com", html)
+        q = json.loads(s3.objects[(B, Q)])
+        self.assertNotIn("reg@k.com", q["items"])
+        self.assertEqual(q["declined"], {})
+        self.assertEqual(api.calls, [])
