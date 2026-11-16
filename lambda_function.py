@@ -7024,8 +7024,8 @@ def _daq_drop_items(s3, emails):
         qi = q.get("items") if isinstance(q.get("items"), dict) else {}
         for e in emails:
             qi.pop(e, None)
-        _daq_write(s3, DAQ_QUEUE_KEY, {"items": qi,
-                                        "declined": q.get("declined") if isinstance(q.get("declined"), dict) else {}})
+        _daq_write(s3, DAQ_QUEUE_KEY, dict(q, items=qi,
+                                           declined=q.get("declined") if isinstance(q.get("declined"), dict) else {}))
         print(f"access-queue: removed {len(emails)} item(s) already cleared")
     except Exception as e:
         print(f"access-queue: cleared-item removal failed ({type(e).__name__})")
@@ -7275,7 +7275,8 @@ def _daq_catch_up(s3, items, people, now=None, jwt=None):
         for email, upd in updates.items():
             if isinstance(qi.get(email), dict):
                 qi[email].update(upd)
-        _daq_write(s3, DAQ_QUEUE_KEY, {"items": qi, "declined": q.get("declined") if isinstance(q.get("declined"), dict) else {}})
+        _daq_write(s3, DAQ_QUEUE_KEY, dict(q, items=qi,
+                                           declined=q.get("declined") if isinstance(q.get("declined"), dict) else {}))
         print(f"access-queue: linked {len(updates)} item(s) to Pipeline")
     except Exception as e:
         print(f"access-queue: catch-up save failed ({type(e).__name__})")
@@ -7289,6 +7290,10 @@ def _render_access_queue_section(s3=None, now=None, jwt=None):
     try:
         s3 = s3 or boto3.client("s3", region_name=S3_REGION)
         items = _daq_read(s3, DAQ_QUEUE_KEY).get("items") or {}
+        # Broker / adviser / finder answers are never part of the investor queue.
+        if isinstance(items, dict):
+            items = {e: it for e, it in items.items()
+                     if not (isinstance(it, dict) and it.get("accredited") == "intermediary")}
     except Exception as e:
         print(f"access-queue: queue unreadable ({type(e).__name__})")
         return ""
@@ -7427,7 +7432,7 @@ def _handle_access_queue_post(event, s3=None, jwt=None, now=None, ses=None):
         items.pop(email, None)
         if act == "decline":
             declined[email] = iso
-        _daq_write(s3, DAQ_QUEUE_KEY, {"items": items, "declined": declined})
+        _daq_write(s3, DAQ_QUEUE_KEY, dict(queue, items=items, declined=declined))
     except Exception as e:
         print(f"access-queue: {act} S3 write failed ({type(e).__name__})")
         return _daq_page(f"Pipeline was updated, but the queue could not be saved ({type(e).__name__}). "

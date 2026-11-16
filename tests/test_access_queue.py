@@ -446,3 +446,26 @@ class EmailSlotsAndClearedItems(unittest.TestCase):
         self.assertEqual(r["statusCode"], 303)
         self.assertEqual(api.calls[0][1], "/people/503.json")
         self.assertEqual(ses.sent[0]["Destination"]["ToAddresses"], ["pat2@p.com"])
+
+
+class IntermediaryItems(unittest.TestCase):
+    def setUp(self):
+        lf._daq_slim_cache.update({"etag": None, "checked_at": 0.0, "by_email": None, "by_id": None})
+        lf._daq_live_tried.clear()
+        p = mock.patch("builtins.print"); p.start(); self.addCleanup(p.stop)
+        p = mock.patch.dict(os.environ, {"BRIEF_PAGE_KEY": KEY}); p.start(); self.addCleanup(p.stop)
+
+    def test_never_shown_and_section_preserved(self):
+        q = json.loads(json.dumps(QUEUE))
+        q["items"]["bro@k.com"] = {"email": "bro@k.com", "accredited": "intermediary", "reason": "intermediary",
+                                   "first_at": "2030-03-17T10:00:00+00:00", "last_at": "2030-03-17T10:00:00+00:00"}
+        q["intermediaries"] = {"ib@k.com": {"email": "ib@k.com", "accredited": "intermediary"}}
+        s3 = store(q)
+        html = lf._render_access_queue_section(s3, now=NOW, jwt="jwt")
+        self.assertIn("Deal access queue (3)", html)
+        self.assertNotIn("bro@k.com", html)
+        self.assertNotIn("ib@k.com", html)
+        post(s3, "approve", "hal@z.com", Api())
+        post(s3, "decline", "sue@z.com", Api())
+        self.assertEqual(json.loads(s3.objects[(B, Q)])["intermediaries"],
+                         {"ib@k.com": {"email": "ib@k.com", "accredited": "intermediary"}})
