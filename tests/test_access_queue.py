@@ -240,7 +240,8 @@ class ApprovalEmail(unittest.TestCase):
         self.assertEqual(m["Message"]["Body"]["Text"]["Data"],
                          "Hi Harry,\n\nYour access to deal terms at Gracia Group is approved.\n\n"
                          "View the deal: https://trades.graciagroup.com/deal/9\n\n"
-                         "If I can help with anything, just reply to this email.\n\nChad Gracia\n")
+                         "If I can help with anything, just reply to this email.\n\n" + lf.DAQ_SIGNATURE_TEXT)
+        self.assertIn('href="https://trades.graciagroup.com/deal/9"', m["Message"]["Body"]["Html"]["Data"])
         r = post(s3, "approve", "hal@z.com", Api(), ses=ses)       # same approval again: item gone
         self.assertIn("no longer in the queue", r["body"])
         self.assertEqual(len(ses.sent), 1)
@@ -588,6 +589,9 @@ class PartnerDeskInvite(unittest.TestCase):
     def queue(self, s3):
         return json.loads(s3.objects[(B, Q)])
 
+    def sent_text(self, hello):
+        return lf._daq_strip_signoff(hello + "\n\n" + self.BODY) + "\n\n" + lf.DAQ_SIGNATURE_TEXT
+
     def row(self, html, email):
         return html.split(email, 1)[1].split("</tr>", 1)[0] if email in html else ""
 
@@ -623,7 +627,11 @@ class PartnerDeskInvite(unittest.TestCase):
         lf._daq_slim_cache.update({"etag": None, "checked_at": 0.0, "by_email": None, "by_id": None})
         post(s3, "invite", "bo@k.com", Api(), ses=ses)
         msg = ses.sent[0]["Message"]
-        self.assertEqual(shown_body, msg["Body"]["Text"]["Data"])
+        self.assertTrue(shown_body.endswith("\n\nChad Gracia\n"))
+        self.assertEqual(lf._daq_strip_signoff(shown_body) + "\n\n" + lf.DAQ_SIGNATURE_TEXT,
+                         msg["Body"]["Text"]["Data"])
+        self.assertIn("Your signature and the RMS disclosure are added automatically.",
+                      html.split('id="daq-invite-modal"', 1)[1])
         self.assertEqual(shown_subj, msg["Subject"]["Data"])
 
     def test_one_send_right_recipient_subject_body(self):
@@ -637,7 +645,7 @@ class PartnerDeskInvite(unittest.TestCase):
         self.assertEqual(kw["Source"], lf.MAILER_FROM)
         self.assertEqual(kw["ReplyToAddresses"], ["cgracia@rainmakersecurities.com"])
         self.assertEqual(kw["Message"]["Subject"]["Data"], "Access to Gracia Group deal terms")
-        self.assertEqual(kw["Message"]["Body"]["Text"]["Data"], "Hi Bo,\n\n" + self.BODY)   # Pipeline first name wins
+        self.assertEqual(kw["Message"]["Body"]["Text"]["Data"], self.sent_text("Hi Bo,"))   # Pipeline first name wins
         self.assertEqual(api.calls, [])                                                    # no Pipeline write
         q = self.queue(s3)
         self.assertNotIn("bo@k.com", q["items"])
@@ -661,7 +669,7 @@ class PartnerDeskInvite(unittest.TestCase):
         lf._daq_slim_cache.update({"etag": None, "checked_at": 0.0, "by_email": None, "by_id": None})
         ses = SES()
         post(self.s3({"fin@k.com": {}}), "invite", "fin@k.com", Api(), ses=ses)
-        self.assertEqual(ses.sent[0]["Message"]["Body"]["Text"]["Data"], "Hello,\n\n" + self.BODY)
+        self.assertEqual(ses.sent[0]["Message"]["Body"]["Text"]["Data"], self.sent_text("Hello,"))
         html = lf._render_access_queue_section(self.s3({"fin@k.com": {}}), now=NOW, jwt="jwt")
         self.assertIn('data-body="Hello,', html)
 
@@ -828,3 +836,64 @@ class AutoApprove(unittest.TestCase):
         html = lf._render_access_queue_section(s3, now=NOW)
         self.assertIn("Deal access queue (0)", html)
         self.assertIn("Auto-approved (last 7 days) (1)", html)
+
+
+class AccessEmailSignature(unittest.TestCase):
+    """Approval + Partner Desk invite emails: Html and Text parts, full signature + RMS disclosure."""
+    MARKS = ("Registered Representative, Rainmaker Securities", "WhatsApp: +1-917-549-8969",
+             "DISCLOSURE: Rainmaker Securities, LLC")
+
+    def setUp(self):
+        p = mock.patch("builtins.print"); p.start(); self.addCleanup(p.stop)
+
+    def check(self, kw, email):
+        self.assertEqual(kw["Source"], lf.MAILER_FROM)
+        self.assertEqual(kw["Destination"], {"ToAddresses": [email], "BccAddresses": list(lf.TO_ADDRS)})
+        self.assertEqual(kw["ReplyToAddresses"], ["cgracia@rainmakersecurities.com"])
+        body = kw["Message"]["Body"]
+        self.assertEqual(set(body), {"Html", "Text"})
+        h, t = body["Html"]["Data"], body["Text"]["Data"]
+        for mark in self.MARKS:
+            self.assertIn(mark, h)
+            self.assertIn(mark, t)
+        self.assertEqual(h.count("Chad Gracia"), 1)
+        self.assertEqual(t.count("Chad Gracia"), 1)
+        self.assertIn(lf.MAILER_SIGNATURE_HTML, h)
+        self.assertIn("Aptos, Calibri, Arial, sans-serif", h)
+        self.assertNotIn("<", t)
+        return h, t
+
+    def test_approval_email(self):
+        ses = SES()
+        self.assertTrue(lf._daq_send_approval_email(ses, "sophie@z.com", "Sophie", "/deal/55716152"))
+        self.assertEqual(len(ses.sent), 1)
+        h, t = self.check(ses.sent[0], "sophie@z.com")
+        link = "https://trades.graciagroup.com/deal/55716152"
+        self.assertIn(f"View the deal: {link}\n", t)
+        self.assertIn(f'View the deal: <a href="{link}"', h)
+        self.assertTrue(t.startswith("Hi Sophie,\n\n"))
+        self.assertIn("<p", h)
+        self.assertEqual(ses.sent[0]["Message"]["Subject"]["Data"], lf.DAQ_APPROVED_SUBJECT)
+
+    def test_invite_email(self):
+        ses = SES()
+        subject, text = lf._daq_invite_text("Bo")
+        lf._daq_ses_send(ses, "bo@k.com", subject, text)
+        self.assertEqual(len(ses.sent), 1)
+        h, t = self.check(ses.sent[0], "bo@k.com")
+        self.assertIn(f'<a href="{lf.DAQ_PARTNER_DESK_URL}"', h)
+        self.assertIn(lf.DAQ_PARTNER_DESK_URL, t)
+
+    def test_disclosure_text_matches_html(self):
+        d = lf.MAILER_DISCLOSURE_TEXT
+        self.assertTrue(d.startswith("DISCLOSURE: Rainmaker Securities, LLC (\u201cRMS\u201d) is a FINRA registered"))
+        self.assertIn("\n\nRISK FACTORS\n\n", d)
+        self.assertNotIn("<", d)
+        self.assertNotIn("&", d)
+        self.assertEqual(d.count("\n\n") + 1, lf.MAILER_DISCLOSURE_HTML.count("<p "))
+        self.assertTrue(lf.DAQ_SIGNATURE_TEXT.endswith(d + "\n"))
+
+    def test_html_escapes_body(self):
+        h, t = lf._daq_email_parts("Hi <b>&,\nline two\n\nChad Gracia\n")
+        self.assertIn("<p style=\"margin:0 0 12px 0;\">Hi &lt;b&gt;&amp;,<br>line two</p>", h)
+        self.assertTrue(t.startswith("Hi <b>&,\nline two\n\nChad Gracia\nRegistered"))

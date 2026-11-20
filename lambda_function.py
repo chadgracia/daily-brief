@@ -12,7 +12,7 @@ import uuid
 import urllib.error
 import urllib.request
 from datetime import datetime, timedelta, timezone
-from html import escape
+from html import escape, unescape
 from urllib.parse import quote
 
 import boto3
@@ -7102,14 +7102,68 @@ def _daq_invite_text(first):
         f"{DAQ_PARTNER_DESK_URL}\n\nIf I can help with anything, just reply to this email.\n\nChad Gracia\n")
 
 
+def _html_paragraphs_to_text(h):
+    """Plain text of each <p> in `h` (tags stripped, entities unescaped), one blank line between."""
+    paras = (" ".join(unescape(re.sub(r"<[^>]+>", "", b)).split())
+             for b in re.findall(r"<p\b[^>]*>(.*?)</p>", h, re.S))
+    return "\n\n".join(x for x in paras if x)
+
+
+# Generated from the HTML constant so the wording can never drift from it.
+MAILER_DISCLOSURE_TEXT = _html_paragraphs_to_text(MAILER_DISCLOSURE_HTML)
+
+DAQ_SIGNATURE_TEXT = (
+    "Chad Gracia\n"
+    "Registered Representative, Rainmaker Securities\n"
+    "WhatsApp: +1-917-549-8969\n\n"
+    "Indications for Accredited Investors: https://trades.graciagroup.com/\n\n"
+    + MAILER_DISCLOSURE_TEXT + "\n")
+
+DAQ_EMAIL_FONT_STYLE = "font-family:Aptos, Calibri, Arial, sans-serif;font-size:11pt;color:#000000;width:100%;"
+_DAQ_URL_RE = re.compile(r"https://[^\s<>\"']+")
+
+
+def _daq_strip_signoff(text):
+    """Body text without a trailing "Chad Gracia" sign-off line (the signature supplies the name)."""
+    t = (text or "").rstrip()
+    if t == "Chad Gracia" or t.endswith("\nChad Gracia"):
+        t = t[:-len("Chad Gracia")].rstrip()
+    return t
+
+
+def _daq_line_html(line):
+    """One escaped line with every https:// URL as a clickable link."""
+    out, pos = [], 0
+    for m in _DAQ_URL_RE.finditer(line):
+        url = m.group(0).rstrip(".,;:!?)")
+        out.append(escape(line[pos:m.start()]))
+        out.append(f'<a href="{escape(url, quote=True)}" style="color:#1d4ed8;">{escape(url)}</a>')
+        pos = m.start() + len(url)
+    out.append(escape(line[pos:]))
+    return "".join(out)
+
+
+def _daq_email_parts(text):
+    """(html, text) bodies: the body (sign-off dropped) + the mailer signature and RMS disclosure."""
+    body = _daq_strip_signoff(text)
+    paras = ['<p style="margin:0 0 12px 0;">' + "<br>".join(_daq_line_html(ln) for ln in b.strip("\n").split("\n"))
+             + "</p>" for b in re.split(r"\n[ \t]*\n", body) if b.strip()]
+    html_body = (f'<html><body style="margin:0;padding:0;"><div style="{DAQ_EMAIL_FONT_STYLE}">'
+                 + "".join(paras) + MAILER_SIGNATURE_HTML + "</div></body></html>")
+    return html_body, f"{body}\n\n{DAQ_SIGNATURE_TEXT}"
+
+
 def _daq_ses_send(ses, email, subject, text):
-    """One SES email to `email`, same From / Reply-To / BCC as the approval email. Raises on failure."""
+    """One SES email to `email`, same From / Reply-To / BCC as the approval email, with an
+    Html part and a Text part, both carrying the signature and RMS disclosure. Raises on failure."""
+    html_body, text_body = _daq_email_parts(text)
     (ses or boto3.client("ses", region_name=SES_REGION)).send_email(
         Source=MAILER_FROM,
         Destination={"ToAddresses": [email], "BccAddresses": list(TO_ADDRS)},
         ReplyToAddresses=["cgracia@rainmakersecurities.com"],
         Message={"Subject": {"Data": subject, "Charset": "UTF-8"},
-                 "Body": {"Text": {"Data": text, "Charset": "UTF-8"}}})
+                 "Body": {"Html": {"Data": html_body, "Charset": "UTF-8"},
+                          "Text": {"Data": text_body, "Charset": "UTF-8"}}})
 
 
 def _daq_invited_at(queue, email, now):
@@ -7540,7 +7594,9 @@ def _daq_invite_modal(action):
         '<div style="font-size:13px;margin:0 0 4px">To: <span id="daq-invite-to"></span></div>'
         '<div style="font-size:13px;margin:0 0 8px">Subject: <span id="daq-invite-subject"></span></div>'
         '<pre id="daq-invite-body" style="white-space:pre-wrap;font-family:Arial,sans-serif;font-size:13px;'
-        'background:#f9fafb;border:1px solid #e5e7eb;border-radius:4px;padding:10px;margin:0 0 12px"></pre>'
+        'background:#f9fafb;border:1px solid #e5e7eb;border-radius:4px;padding:10px;margin:0 0 6px"></pre>'
+        '<div style="font-size:12px;color:#6b7280;margin:0 0 12px">'
+        'Your signature and the RMS disclosure are added automatically.</div>'
         f'<form method="post" action="{action}" style="margin:0;text-align:right">'
         '<input type="hidden" name="act" value="invite">'
         '<input type="hidden" name="email" id="daq-invite-email" value="">'

@@ -4,6 +4,7 @@ import io
 import json
 import os
 import sys
+import time
 import types
 import unittest
 from unittest import mock
@@ -384,6 +385,7 @@ class PdEvent(unittest.TestCase):
     def test_email_dedupe(self):
         res, calls, ses, s3 = self._run({"gp": self._gp(), "action": "leave", "did": ""})
         self.assertEqual(len(ses.sent), 1)
+        time.sleep(0.002)   # event keys are <ms>-<pid>: two runs in one millisecond would share a key
         _, _, ses2, s3 = self._run({"gp": self._gp(), "action": "leave", "did": ""}, s3=s3)
         self.assertEqual(ses2.sent, [])
         self.assertEqual(len(self._events(s3)), 2)
