@@ -736,3 +736,95 @@ class PartnerDeskInvite(unittest.TestCase):
         s3 = self.s3({"reg@z.com": {}})
         lf._daq_drop_items(s3, ["reg@z.com"])
         self.assertIn("i@k.com", self.queue(s3)["intermediaries"])
+
+
+# ── Domain auto-approval (act=auto_approve, posted by trades) ──────────────────
+AUTO = {"email": "kim@acme.vc", "person_id": "302", "first_name": "Kim", "last_name": "Lee",
+        "country": "Canada", "employer": "Acme", "accredited": "yes", "linkedin": "",
+        "from": "/deal/77", "details_at": "2030-03-17T10:00:00+00:00", "domain": "acme.vc",
+        "voucher_id": "900", "voucher_name": "Val Vouch", "voucher_level": "Substantive"}
+
+
+def auto_post(s3, api, ses, **over):
+    body = urlencode(dict(AUTO, act="auto_approve", **over))
+    with mock.patch.object(lf, "call_pipeline_api", api), \
+            mock.patch.object(lf.boto3, "client", side_effect=AssertionError("no real AWS client")):
+        return lf._handle_access_queue_post({"body": body}, s3=s3, jwt="jwt", now=NOW, ses=ses)
+
+
+class AutoApprove(unittest.TestCase):
+    def setUp(self):
+        lf._daq_slim_cache.update({"etag": None, "checked_at": 0.0, "by_email": None, "by_id": None})
+        p = mock.patch("builtins.print"); self.log = p.start(); self.addCleanup(p.stop)
+        p = mock.patch.dict(os.environ, {"BRIEF_PAGE_KEY": KEY}); p.start(); self.addCleanup(p.stop)
+
+    def q(self, s3):
+        return json.loads(s3.objects[(B, Q)])
+
+    def test_success_same_path_as_approve_plus_note_and_email(self):
+        s3, api, ses = store(QUEUE), Api(), SES()
+        r = auto_post(s3, api, ses)
+        self.assertEqual(json.loads(r["body"]), {"ok": True, "emailed": True, "saved": True})
+        self.assertEqual(api.calls[0], ("PUT", "/people/302.json",
+                                        {"person": {"custom_fields": {"custom_label_3923758": 7162165}}}))
+        note = api.calls[1]
+        self.assertEqual(note[:2], ("POST", "/notes.json"))
+        self.assertEqual(note[2]["note"]["content"],
+                         "Deal access auto-approved: email domain acme.vc matches Val Vouch (person id 900), "
+                         "Investor Level Substantive.")
+        self.assertEqual(note[2]["note"]["person_id"], 302)
+        self.assertIn("302", json.loads(s3.objects[(B, A)]))
+        q = self.q(s3)
+        self.assertNotIn("kim@acme.vc", q["items"])                 # never the pending queue
+        self.assertEqual(set(q["items"]), set(QUEUE["items"]))
+        self.assertEqual(q["auto_approved"]["kim@acme.vc"]["voucher_id"], "900")
+        self.assertEqual(len(ses.sent), 1)
+        m = ses.sent[0]
+        self.assertEqual(m["Destination"]["ToAddresses"], ["kim@acme.vc"])
+        self.assertEqual(m["Message"]["Subject"]["Data"], lf.DAQ_APPROVED_SUBJECT)
+        self.assertIn("Hi Kim,", m["Message"]["Body"]["Text"]["Data"])
+        self.assertIn("https://trades.graciagroup.com/deal/77", m["Message"]["Body"]["Text"]["Data"])
+
+    def test_pipeline_failure_writes_nothing_and_sends_nothing(self):
+        s3, api, ses = store(QUEUE), Api(status=500), SES()
+        r = auto_post(s3, api, ses)
+        self.assertEqual(json.loads(r["body"]), {"ok": False, "reason": "pipeline"})
+        self.assertEqual((s3.puts, ses.sent, len(api.calls)), ([], [], 1))
+
+    def test_declined_address_refused_without_writes(self):
+        s3, api, ses = store({"items": {}, "declined": {"kim@acme.vc": "2030-01-01T00:00:00+00:00"}}), Api(), SES()
+        self.assertEqual(json.loads(auto_post(s3, api, ses)["body"])["reason"], "declined")
+        self.assertEqual((api.calls, s3.puts, ses.sent), ([], [], []))
+
+    def test_bad_requests_refused(self):
+        for over in ({"person_id": ""}, {"voucher_id": "302"}, {"domain": "other.vc"}, {"voucher_id": "x"}):
+            s3, api, ses = store(QUEUE), Api(), SES()
+            self.assertEqual(auto_post(s3, api, ses, **over)["statusCode"], 400, over)
+            self.assertEqual((api.calls, s3.puts), ([], []))
+
+    def test_listed_7_days_below_queue_and_remove_only_drops_row(self):
+        s3, api, ses = store(QUEUE), Api(), SES()
+        auto_post(s3, api, ses)
+        html = lf._render_access_queue_section(s3, now=NOW)
+        self.assertLess(html.index("Deal access queue (3)"), html.index("Auto-approved (last 7 days) (1)"))
+        auto = html[html.index("Auto-approved (last 7 days)"):]
+        for s in ("Kim Lee", "kim@acme.vc", "Val Vouch", "https://app.pipelinecrm.com/people/900", "Domain acme.vc"):
+            self.assertIn(s, auto)
+        self.assertEqual(auto.count('method="post"'), 1)
+        self.assertIn('name="act" value="remove"', auto)
+        self.assertNotIn(">Approve<", auto)
+        self.assertNotIn(">Decline<", auto)
+        self.assertNotIn("Auto-approved", lf._render_access_queue_section(s3, now=NOW + 8 * 86400))
+        api2 = Api()
+        r = post(s3, "remove", "kim@acme.vc", api2)
+        self.assertEqual(r["statusCode"], 303)
+        self.assertEqual(api2.calls, [])
+        self.assertNotIn("kim@acme.vc", self.q(s3).get("auto_approved", {}))
+        self.assertEqual(set(self.q(s3)["items"]), set(QUEUE["items"]))
+
+    def test_list_shows_even_with_empty_pending_queue(self):
+        s3, api, ses = store({"items": {}, "declined": {}}), Api(), SES()
+        auto_post(s3, api, ses)
+        html = lf._render_access_queue_section(s3, now=NOW)
+        self.assertIn("Deal access queue (0)", html)
+        self.assertIn("Auto-approved (last 7 days) (1)", html)

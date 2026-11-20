@@ -1,5 +1,8 @@
 # daily-brief
 
+## Deal access queue: domain auto-approval
+- POST ?view=access-queue act=auto_approve (from trades' access form, behind BRIEF_PAGE_KEY): `_daq_auto_approve` = the Approve path (`_daq_put_level` Substantive FIRST, `_daq_add_approved`) + Pipeline note + queue.json `auto_approved` {email: {..., voucher_id, voucher_name, voucher_level, domain, auto_approved_at}} (never `items`; declined addresses and broker records refused) + `_daq_send_approval_email`. JSON reply; ok only after the Pipeline write. The brief lists `auto_approved` from the last 7 days below the pending queue ("Auto-approved (last 7 days)"), read-only; Remove only drops the row.
+
 ## SECURITY RULES — MANDATORY (read before any change)
 
 This repo is PUBLIC, and so are its GitHub Actions logs. Secrets have leaked from Chad's repos 5-6 times. Never again.

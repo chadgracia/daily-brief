@@ -7360,7 +7360,66 @@ def _daq_catch_up(s3, items, people, now=None, jwt=None):
 
 
 def _render_access_queue_section(s3=None, now=None, jwt=None):
-    """'Deal access queue (N)' for the online brief; '' when empty or unreadable."""
+    """'Deal access queue (N)' for the online brief, then 'Auto-approved (last 7 days)';
+    '' when both are empty or the queue is unreadable."""
+    now = time.time() if now is None else now
+    try:
+        s3 = s3 or boto3.client("s3", region_name=S3_REGION)
+        auto = _daq_recent_auto(_daq_read(s3, DAQ_QUEUE_KEY), now)
+    except Exception:
+        auto = {}
+    pending = _render_access_queue_pending(s3, now, jwt)
+    if not auto:
+        return pending
+    return (pending or ('<div id="access-queue" data-owner="chad" style="border:1px solid #e5e7eb;'
+                        'border-radius:8px;padding:16px 18px;margin:0 0 16px 0;background:#ffffff">'
+                        f'<h2 style="{H2_STYLE}">Deal access queue (0)</h2></div>')) + _render_auto_approved(auto)
+
+
+def _render_auto_approved(auto):
+    """Read-only list of domain auto-approvals; the only action is Remove (off the list)."""
+    key = os.environ.get("BRIEF_PAGE_KEY", "")
+    action = escape("?view=access-queue&key=" + quote(key, safe=""), quote=True)
+    small = "font-size:12px;color:#6b7280;"
+    cell = TD_STYLE + " overflow-wrap:anywhere;"
+    rows = []
+    for email in sorted(auto, key=lambda e: str(auto[e].get("auto_approved_at") or ""), reverse=True):
+        it = auto[email]
+        pid, vid = str(it.get("person_id") or ""), str(it.get("voucher_id") or "")
+        name = " ".join(x for x in (str(it.get("first_name") or "").strip(),
+                                    str(it.get("last_name") or "").strip()) if x) or "(no name)"
+        who = (f'<a href="https://app.pipelinecrm.com/people/{escape(pid)}" target="_blank" rel="noopener" '
+               f'style="{LINK_STYLE_500}">{escape(name)}</a>') if pid.isdigit() else escape(name)
+        person = (f'<div>{who}</div><div style="{small}">{escape(str(it.get("employer") or ""))}</div>'
+                  f'<div style="{small}">{escape(email)}</div>')
+        vname = escape(str(it.get("voucher_name") or "(no name)"))
+        voucher = ((f'<a href="https://app.pipelinecrm.com/people/{escape(vid)}" target="_blank" rel="noopener" '
+                    f'style="{LINK_STYLE_500}">{vname}</a>') if vid.isdigit() else vname)
+        vouch = (f'<div>{voucher}</div><div style="{small}">{escape(str(it.get("voucher_level") or ""))}</div>'
+                 f'<div style="{small}">Domain {escape(str(it.get("domain") or ""))}</div>')
+        when = escape(str(it.get("auto_approved_at") or "")[:10])
+        btn = (f'<form method="post" action="{action}" style="display:inline-block;margin:0">'
+               '<input type="hidden" name="act" value="remove">'
+               f'<input type="hidden" name="email" value="{escape(email, quote=True)}">'
+               '<button type="submit" style="padding:4px 10px;font-size:13px;border:1px solid #6b7280;'
+               'background:#fff;color:#6b7280;border-radius:4px;cursor:pointer">Remove</button></form>')
+        rows.append(f'<tr><td style="{cell}">{person}</td><td style="{cell}">{vouch}</td>'
+                    f'<td style="{cell} white-space:nowrap;">{when}</td>'
+                    f'<td style="{TD_STYLE} white-space:nowrap;">{btn}</td></tr>')
+    head = "".join(f'<th style="text-align:left;padding:6px 8px;font-size:12px;color:#6b7280">{h}</th>'
+                   for h in ("Person", "Vouched by", "Approved", ""))
+    cols = "".join(f'<col style="width:{w}">' for w in ("38%", "34%", "14%", "14%"))
+    return (f'<div id="access-auto-approved" data-owner="chad" style="border:1px solid #e5e7eb;border-radius:8px;'
+            f'padding:16px 18px;margin:0 0 16px 0;background:#ffffff">'
+            f'<h2 style="{H2_STYLE}">Auto-approved (last 7 days) ({len(rows)})</h2>'
+            '<p style="margin:0 0 8px;font-size:13px;color:#6b7280">Cleared automatically because another '
+            'cleared client shares their email domain. To reverse one, change the Investor Level in Pipeline. '
+            'Remove only takes the row off this list.</p>'
+            f'<table style="{TABLE_STYLE}"><colgroup>{cols}</colgroup><tr>{head}</tr>{"".join(rows)}</table></div>')
+
+
+def _render_access_queue_pending(s3, now, jwt):
+    """'Deal access queue (N)' (pending items only); '' when empty or unreadable."""
     try:
         s3 = s3 or boto3.client("s3", region_name=S3_REGION)
         items = _daq_read(s3, DAQ_QUEUE_KEY).get("items") or {}
@@ -7540,11 +7599,127 @@ def _daq_invite(s3, ses, email, pid, item, people, iso):
     return _daq_page(DAQ_INVITE_SENT_MSG)
 
 
+def _daq_put_level(pid, level, jwt):
+    """Pipeline PUT of Investor Level for one person. Returns the HTTP status (200 = ok)."""
+    try:
+        res = call_pipeline_api("PUT", f"/people/{pid}.json",
+                                {"person": {"custom_fields": {DAQ_IL_FIELD: level}}}, jwt=jwt or get_jwt())
+    except Exception as e:
+        res = {"status": type(e).__name__}
+    return res.get("status")
+
+
+def _daq_add_approved(s3, pid, now, iso):
+    """Append pid to deal-gate/approved.json (entries older than DAQ_APPROVED_KEEP pruned)."""
+    approved = _daq_read(s3, DAQ_APPROVED_KEY)
+    keep = {}
+    for k, v in approved.items():
+        try:
+            if now - datetime.fromisoformat(str(v)).timestamp() <= DAQ_APPROVED_KEEP:
+                keep[k] = v
+        except (TypeError, ValueError):
+            continue
+    keep[str(pid)] = iso
+    _daq_write(s3, DAQ_APPROVED_KEY, keep)
+
+
+# ── Domain auto-approval (trades decides, this Lambda executes) ─────────────────
+# trades' access form evaluates the domain rule (another cleared person at the same
+# corporate domain vouches) and POSTs act=auto_approve here behind the page key.
+# Same path as Approve: Pipeline Investor Level = Substantive FIRST (failure = nothing
+# else changes and trades queues the request as usual), then approved.json, a Pipeline
+# note, the item recorded under queue.json "auto_approved" (never the pending "items")
+# and the existing approval email. The brief lists auto_approved for 7 days.
+DAQ_AUTO_KEEP = 7 * 86400
+DAQ_AUTO_FIELDS = ("first_name", "last_name", "country", "employer", "accredited", "linkedin", "from",
+                   "details_at", "domain", "voucher_id", "voucher_name", "voucher_level")
+DAQ_NOTE_CATEGORY = 69759
+
+
+def _daq_json(status, data):
+    return {"statusCode": status, "headers": {"Content-Type": "application/json", "Cache-Control": "no-store"},
+            "body": json.dumps(data)}
+
+
+def _daq_auto_note(domain, voucher_name, voucher_id, level):
+    return (f"Deal access auto-approved: email domain {domain} matches {voucher_name} "
+            f"(person id {voucher_id}), Investor Level {level}.")
+
+
+def _daq_recent_auto(queue, now):
+    """{email: record} of auto-approvals in the last DAQ_AUTO_KEEP seconds."""
+    auto = queue.get("auto_approved") if isinstance(queue.get("auto_approved"), dict) else {}
+    out = {}
+    for e, rec in auto.items():
+        if not isinstance(rec, dict):
+            continue
+        try:
+            if now - datetime.fromisoformat(str(rec.get("auto_approved_at"))).timestamp() <= DAQ_AUTO_KEEP:
+                out[e] = rec
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
+def _daq_auto_approve(f, s3, jwt, now, ses):
+    """act=auto_approve from trades. JSON {"ok": bool, ...}; ok is True only after the
+    Pipeline write succeeded. Never logs the address or names."""
+    email = (f.get("email") or "").strip().lower()
+    pid = (f.get("person_id") or "").strip()
+    rec = {k: str(f.get(k) or "").strip()[:200] for k in DAQ_AUTO_FIELDS}
+    if (not email or "@" not in email or not pid.isdigit() or not rec["voucher_id"].isdigit()
+            or rec["voucher_id"] == pid or not rec["domain"] or not email.endswith("@" + rec["domain"])):
+        return _daq_json(400, {"ok": False, "reason": "bad request"})
+    iso = datetime.fromtimestamp(now, timezone.utc).isoformat(timespec="seconds")
+    try:
+        s3 = s3 or boto3.client("s3", region_name=S3_REGION)
+        queue = _daq_read(s3, DAQ_QUEUE_KEY)
+    except Exception as e:
+        print(f"access-queue: auto-approve refused, queue unreadable ({type(e).__name__})")
+        return _daq_json(200, {"ok": False, "reason": "queue unreadable"})
+    declined = queue.get("declined") if isinstance(queue.get("declined"), dict) else {}
+    if email in declined:
+        print("access-queue: auto-approve refused (declined address)")
+        return _daq_json(200, {"ok": False, "reason": "declined"})
+    if _daq_is_broker(pid, _daq_people(s3)):
+        print("access-queue: auto-approve refused (broker record)")
+        return _daq_json(200, {"ok": False, "reason": "broker"})
+    status = _daq_put_level(pid, DAQ_IL_SUBSTANTIVE, jwt)
+    if status != 200:
+        print(f"access-queue: auto-approve Pipeline write failed ({status})")
+        return _daq_json(200, {"ok": False, "reason": "pipeline"})
+    try:
+        call_pipeline_api("POST", "/notes.json", {"note": {
+            "content": _daq_auto_note(rec["domain"], rec["voucher_name"] or "(no name)", rec["voucher_id"],
+                                      rec["voucher_level"] or "(unknown)"),
+            "note_category_id": DAQ_NOTE_CATEGORY, "person_id": int(pid)}}, jwt=jwt or get_jwt())
+    except Exception as e:
+        print(f"access-queue: auto-approve note failed ({type(e).__name__})")
+    saved = True
+    try:
+        _daq_add_approved(s3, pid, now, iso)
+        q = _daq_read(s3, DAQ_QUEUE_KEY)
+        qi = q.get("items") if isinstance(q.get("items"), dict) else {}
+        qi.pop(email, None)
+        auto = _daq_recent_auto(q, now)
+        auto[email] = dict(rec, email=email, person_id=pid, auto_approved_at=iso)
+        _daq_write(s3, DAQ_QUEUE_KEY, dict(q, items=qi, auto_approved=auto,
+                                           declined=q.get("declined") if isinstance(q.get("declined"), dict) else {}))
+    except Exception as e:
+        saved = False
+        print(f"access-queue: auto-approve S3 write failed ({type(e).__name__})")
+    print("access-queue: auto-approved one entry")
+    emailed = _daq_send_approval_email(ses, email, rec["first_name"], rec["from"])
+    return _daq_json(200, {"ok": True, "emailed": emailed, "saved": saved})
+
+
 def _handle_access_queue_post(event, s3=None, jwt=None, now=None, ses=None):
     """POST ?view=access-queue (page key already checked): approve / decline one item."""
     f = _daq_form(event)
     act = (f.get("act") or "").strip()
     email = (f.get("email") or "").strip().lower()
+    if act == "auto_approve":
+        return _daq_auto_approve(f, s3, jwt, time.time() if now is None else now, ses)
     if act not in ("approve", "decline", "remove", "invite") or not email:
         return _daq_page("Nothing changed: unknown request.")
     now = time.time() if now is None else now
@@ -7561,6 +7736,18 @@ def _handle_access_queue_post(event, s3=None, jwt=None, now=None, ses=None):
         invited = _daq_invited_at(queue, email, now)
         if invited:
             return _daq_page(f"Already invited on {invited[:10]}.")
+    if act == "remove" and email not in items and email in (queue.get("auto_approved") or {}):
+        # Auto-approved list: Remove only takes the row off the list (no Pipeline write, no email).
+        try:
+            auto = dict(queue.get("auto_approved") or {})
+            auto.pop(email, None)
+            _daq_write(s3, DAQ_QUEUE_KEY, dict(queue, auto_approved=auto))
+        except Exception as e:
+            print(f"access-queue: auto-approved removal failed ({type(e).__name__})")
+            return _daq_page("Nothing changed: the list could not be saved.")
+        key = os.environ.get("BRIEF_PAGE_KEY", "")
+        return {"statusCode": 303, "headers": {"Location": "?key=" + quote(key, safe="") + "#access-queue",
+                                               "Cache-Control": "no-store"}, "body": ""}
     if email not in items:
         return _daq_page("Nothing changed: that entry is no longer in the queue.")
     item = dict(items[email])
@@ -7583,27 +7770,13 @@ def _handle_access_queue_post(event, s3=None, jwt=None, now=None, ses=None):
     if act == "approve" and not pid:
         return _daq_page("Not approved: this person is not in the CRM yet.")
     if pid:
-        level = DAQ_IL_SUBSTANTIVE if act == "approve" else DAQ_IL_HOLD
-        try:
-            res = call_pipeline_api("PUT", f"/people/{pid}.json",
-                                    {"person": {"custom_fields": {DAQ_IL_FIELD: level}}}, jwt=jwt or get_jwt())
-        except Exception as e:
-            res = {"status": type(e).__name__}
-        if res.get("status") != 200:
-            print(f"access-queue: {act} Pipeline write failed ({res.get('status')})")
-            return _daq_page(f"Nothing changed: Pipeline did not accept the update ({res.get('status')}).")
+        status = _daq_put_level(pid, DAQ_IL_SUBSTANTIVE if act == "approve" else DAQ_IL_HOLD, jwt)
+        if status != 200:
+            print(f"access-queue: {act} Pipeline write failed ({status})")
+            return _daq_page(f"Nothing changed: Pipeline did not accept the update ({status}).")
     try:
         if act == "approve":
-            approved = _daq_read(s3, DAQ_APPROVED_KEY)
-            keep = {}
-            for k, v in approved.items():
-                try:
-                    if now - datetime.fromisoformat(str(v)).timestamp() <= DAQ_APPROVED_KEEP:
-                        keep[k] = v
-                except (TypeError, ValueError):
-                    continue
-            keep[str(pid)] = iso
-            _daq_write(s3, DAQ_APPROVED_KEY, keep)
+            _daq_add_approved(s3, pid, now, iso)
         items.pop(email, None)
         if act == "decline":
             declined[email] = iso
